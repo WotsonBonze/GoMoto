@@ -177,6 +177,15 @@ const TYPE_LABEL_MAP: Record<string, string> = {
 }
 
 /**
+ * @constant MAINTENANCE_TYPE_OPTIONS
+ * @description Opções de tipo de manutenção disponíveis para cadastro e edição manual.
+ */
+const MAINTENANCE_TYPE_OPTIONS = [
+  { value: 'corrective', label: 'Corretiva' },
+  { value: 'preventive', label: 'Preventiva' },
+]
+
+/**
  * @constant STATUS_COLORS
  * @description Mapeamento centralizado de cores mágicas para uso consistente nos badges e textos de cada status de manutenção.
  * Impacto se alterado: Reflete em toda a página onde o status é renderizado de forma visual sem alterar as classes originais em linha.
@@ -599,6 +608,13 @@ export default function MaintenancePage() {
     { value: '', label: 'Selecione a moto...' },
     ...vehicles.map((m) => ({ value: m.id, label: `${m.license_plate} — ${m.make} ${m.model}` })),
   ], [vehicles])
+
+  const typeSelectOptions = useMemo(() => {
+    if (formData.type === 'inspection') {
+      return [...MAINTENANCE_TYPE_OPTIONS, { value: 'inspection', label: 'Vistoria' }]
+    }
+    return MAINTENANCE_TYPE_OPTIONS
+  }, [formData.type])
 
   const hasActiveFilters =
     statusFilter !== 'all'
@@ -1375,12 +1391,17 @@ export default function MaintenancePage() {
               }}
               options={vehicleSelectOptions}
             />
-            <div>
-              <label className="mb-1.5 block text-[13px] font-medium text-fg-mute">Tipo</label>
-              <div className="flex h-10 items-center rounded-lg border border-border bg-surface-2 px-3 text-[13px] text-fg-mute cursor-not-allowed">
-                {editingMaintenance ? TYPE_LABEL_MAP[formData.type] || formData.type : 'Corretiva'}
-              </div>
-            </div>
+            <Select
+              label="Tipo *"
+              value={formData.type}
+              onChange={(e) =>
+                setFormData({
+                  ...formData,
+                  type: e.target.value as 'preventive' | 'corrective' | 'inspection',
+                })
+              }
+              options={typeSelectOptions}
+            />
             <div className="md:col-span-2">
               <Input
                 label="Item / Descrição *"
