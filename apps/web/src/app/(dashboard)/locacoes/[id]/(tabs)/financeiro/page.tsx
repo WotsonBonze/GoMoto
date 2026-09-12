@@ -3,7 +3,7 @@ import { formatCurrency } from '@/lib/utils'
 import {
   BILLING_STATUS_BADGE, BILLING_TYPE_LABEL,
 } from '@/lib/billing-status'
-import { contractedBacklog } from '@gomoto/core'
+import { contractedBacklog, displayPeriodEnd } from '@gomoto/core'
 import { getRentalCore } from '../_lib/get-rental-core'
 import { fmt } from '../_lib/shared'
 
@@ -66,7 +66,9 @@ function ScheduleRowCells({ line }: { line: ScheduleRow }) {
   return (
     <tr className="border-b border-divider last:border-0">
       <td className="h-9 w-12 px-4 font-mono text-fg-mute">{line.sequence_number}</td>
-      <td className="h-9 px-4 text-fg-mute">{fmt(line.period_start)} a {fmt(line.period_end)}</td>
+      {/* `period_end` é a fronteira exclusiva (= vencimento, coluna ao lado) —
+          exibe o último dia de USO, não o vencimento repetido. */}
+      <td className="h-9 px-4 text-fg-mute">{fmt(line.period_start)} a {fmt(displayPeriodEnd(line.period_end))}</td>
       <td className="h-9 px-4 text-fg">{fmt(line.due_date)}</td>
       <td className="h-9 px-4 text-right font-mono tabular-nums text-fg">
         {formatCurrency(line.amount)}

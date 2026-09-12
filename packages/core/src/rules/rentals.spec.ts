@@ -11,6 +11,7 @@ import {
   previewScheduleRegeneration,
   RENTAL_MINIMUM_DURATION,
   rentalPeriodsOverlap,
+  displayPeriodEnd,
 } from './rentals'
 import { RentalSchema, RenewRentalSchema, TerminateRentalSchema } from '../schemas/rentals'
 import type { CycleCharge } from './rentals'
@@ -514,5 +515,36 @@ describe('rentalPeriodsOverlap — mesma semântica do trigger (ADR 0036)', () =
     const a = ['2026-06-01', '2026-07-01'] as const
     const b = ['2026-06-20', '2026-09-01'] as const
     expect(rentalPeriodsOverlap(a[0], a[1], b[0], b[1])).toBe(rentalPeriodsOverlap(b[0], b[1], a[0], a[1]))
+  })
+})
+
+describe('displayPeriodEnd — period_end é fronteira exclusiva, não dia de uso', () => {
+  it('ciclo semanal 23/12 a 30/12: o último dia de uso é 29/12', () => {
+    expect(displayPeriodEnd('2026-12-30')).toBe('2026-12-29')
+  })
+
+  it('atravessa virada de mês', () => {
+    expect(displayPeriodEnd('2027-01-01')).toBe('2026-12-31')
+  })
+
+  it('atravessa virada de ano', () => {
+    expect(displayPeriodEnd('2027-01-01')).not.toBe('2027-01-01')
+  })
+})
+
+describe('makeCycleDescription (via generateCycleCharges) — semanal mostra o último dia de USO', () => {
+  it('ciclo cheio 23/12 a 30/12 descreve "23/12 a 29/12", não "23/12 a 30/12"', () => {
+    // Exemplo real que motivou a correção: vencimento 30/12 não é dia cobrado.
+    const charges = generateCycleCharges({
+      start_date: '2026-12-16', end_date: '2027-01-13',
+      cycle: 'weekly', due_day: 3, // quarta-feira
+      cycle_amount: 350, use_pro_rata: false,
+    })
+    const alvo = charges.find((c) => c.period_start === '2026-12-23' && c.period_end === '2026-12-30')
+    expect(alvo, 'período 23/12→30/12 não apareceu no cronograma').toBeDefined()
+    expect(alvo!.description).toBe('Aluguel semanal — 23/12 a 29/12')
+    expect(alvo!.description).not.toContain('a 30/12')
+    // O vencimento em si não muda — só o texto do período.
+    expect(alvo!.due_date).toBe('2026-12-30')
   })
 })

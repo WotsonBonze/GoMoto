@@ -107,6 +107,27 @@ export function isParseableIsoDate(isoDate: string | null | undefined): boolean 
   return d.getFullYear() === y && d.getMonth() + 1 === m && d.getDate() === day
 }
 
+/**
+ * Último dia de uso coberto por um período de ciclo, para EXIBIÇÃO.
+ *
+ * `period_end` é a fronteira EXCLUSIVA do período — o mesmo valor do
+ * `due_date`, e é isso que faz uma linha do cronograma encaixar com a
+ * seguinte sem buraco (`period_end` de uma linha = `period_start` da
+ * próxima; mesma convenção `[início, fim)` da ADR 0036 para o período da
+ * locação inteira). Mostrar esse valor cru como "fim do período" ao lado de
+ * uma coluna "Vencimento" repete a mesma data duas vezes: um ciclo semanal
+ * de 23/12 a 30/12 cobra 7 dias (23 a 29) — o dia 30 é o instante em que o
+ * ciclo seguinte começa, não um dia a mais sendo cobrado.
+ *
+ * Só para texto. Nunca usar o resultado em cálculo ou em gravação — todo o
+ * encaixe de períodos depende de `period_end` continuar exclusivo.
+ */
+export function displayPeriodEnd(periodEndIso: string): string {
+  const d = parseIsoDate(periodEndIso)
+  d.setDate(d.getDate() - 1)
+  return formatIsoDate(d)
+}
+
 // ---------------------------------------------------------------------------
 // Vigência de locações
 // ---------------------------------------------------------------------------
@@ -253,8 +274,12 @@ function makeCycleDescription(
 ): string {
   const isProRata = Math.abs(amount - cycleAmount) > 0.01
   if (cycle === 'weekly') {
+    // periodEnd é o vencimento (fronteira exclusiva) — o último dia de uso é
+    // o dia anterior. Ver `displayPeriodEnd`.
+    const lastUsageDay = new Date(periodEnd)
+    lastUsageDay.setDate(lastUsageDay.getDate() - 1)
     const prefix = isProRata ? 'Aluguel proporcional' : 'Aluguel semanal'
-    return `${prefix} — ${fmtDay(periodStart)} a ${fmtDay(periodEnd)}`
+    return `${prefix} — ${fmtDay(periodStart)} a ${fmtDay(lastUsageDay)}`
   }
   const mon    = MONTHS_PT[periodEnd.getMonth()]!
   const year   = periodEnd.getFullYear()

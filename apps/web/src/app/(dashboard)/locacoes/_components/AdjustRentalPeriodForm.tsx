@@ -23,6 +23,7 @@ import {
   planPeriodAdjustment,
   scheduleParamLabel,
   formatDueDay,
+  displayPeriodEnd,
   WEEK_DAY_OPTIONS,
   type PlannedScheduleLine,
   type RentalScheduleParams,
@@ -344,7 +345,10 @@ export function AdjustRentalPeriodForm({
               ]}>
                 {supersededPlanLines.map((l) => (
                   <tr key={l.id} className="h-9 border-b border-border last:border-0">
-                    <td className="px-3 text-fg-mute">{formatDate(l.period_start)} a {formatDate(l.period_end)}</td>
+                    {/* `period_end` é a fronteira exclusiva (= vencimento, coluna
+                        ao lado) — exibe o último dia de USO, não o vencimento
+                        repetido. */}
+                    <td className="px-3 text-fg-mute">{formatDate(l.period_start)} a {formatDate(displayPeriodEnd(l.period_end))}</td>
                     <td className="px-3 text-fg-soft">{formatDate(l.due_date)}</td>
                     <td className="px-3 text-right font-mono text-fg-mute line-through">{formatCurrency(l.amount)}</td>
                   </tr>
@@ -364,7 +368,10 @@ export function AdjustRentalPeriodForm({
               ]}>
                 {newLines.map((l) => (
                   <tr key={l.sequence_number} className="h-9 border-b border-border last:border-0">
-                    <td className="px-3 text-fg-mute">{formatDate(l.period_start)} a {formatDate(l.period_end)}</td>
+                    {/* `period_end` é a fronteira exclusiva (= vencimento, coluna
+                        ao lado) — exibe o último dia de USO, não o vencimento
+                        repetido. */}
+                    <td className="px-3 text-fg-mute">{formatDate(l.period_start)} a {formatDate(displayPeriodEnd(l.period_end))}</td>
                     <td className="px-3 text-fg-soft">{formatDate(l.due_date)}</td>
                     <td className="px-3 text-right font-mono text-fg">{formatCurrency(l.amount)}</td>
                     <td className="px-3 text-right"><EmissionTag line={l} /></td>
