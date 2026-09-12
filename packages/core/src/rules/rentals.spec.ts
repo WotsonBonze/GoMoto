@@ -144,6 +144,13 @@ describe('generateCycleCharges — mensal', () => {
 // ---------------------------------------------------------------------------
 
 describe('generateCycleCharges — semanal', () => {
+  // Estes dois casos contavam VENCIMENTOS ("4 segundas dentro do período"),
+  // não PERÍODOS. O contrato começa numa segunda e vence na segunda, então o
+  // primeiro vencimento coincide com o início: a cobrança que ele gerava
+  // cobria de 06/01 a 06/01 — zero dia — pelo valor cheio. Eram R$ 400 por
+  // 3 semanas de uso. A unidade é o período entre dois vencimentos, e é assim
+  // que o ramo com pro rata sempre contou.
+
   it('gera cobranças semanais sem pro rata', () => {
     // due_day 1 = Segunda. Início: 2025-01-06 (Seg), fim: 2025-01-28 (Ter)
     const charges = generateCycleCharges({
@@ -154,9 +161,10 @@ describe('generateCycleCharges — semanal', () => {
       cycle_amount: 100,
       use_pro_rata: false,
     })
-    // Segundas: 06, 13, 20, 27 — 4 vencimentos dentro do período
-    expect(charges).toHaveLength(4)
+    // Períodos fechados: 06→13, 13→20, 20→27. A ponta 27→28 é ignorada (RN-011).
+    expect(charges).toHaveLength(3)
     expect(charges.every((c) => c.amount === 100)).toBe(true)
+    expect(charges.every((c) => c.period_end > c.period_start)).toBe(true)
   })
 
   it('vencimentos são todas as segundas-feiras', () => {
@@ -168,8 +176,21 @@ describe('generateCycleCharges — semanal', () => {
       cycle_amount: 100,
       use_pro_rata: false,
     })
-    const expectedDates = ['2025-01-06', '2025-01-13', '2025-01-20', '2025-01-27']
+    const expectedDates = ['2025-01-13', '2025-01-20', '2025-01-27']
     expect(charges.map((c) => c.due_date)).toEqual(expectedDates)
+  })
+
+  it('os dois ramos cobram os mesmos ciclos cheios', () => {
+    const base = {
+      start_date: '2025-01-06', end_date: '2025-01-28',
+      cycle: 'weekly' as const, due_day: 1, cycle_amount: 100,
+    }
+    const semProRata = generateCycleCharges({ ...base, use_pro_rata: false })
+    const comProRata = generateCycleCharges({ ...base, use_pro_rata: true })
+
+    // A diferença entre os dois é só a ponta final proporcional — antes era
+    // também uma cobrança inteira a mais no começo.
+    expect(comProRata.filter((c) => c.amount === 100)).toHaveLength(semProRata.length)
   })
 
   it('due_day 7 (domingo) funciona corretamente', () => {
@@ -429,5 +450,40 @@ describe('previewScheduleRegeneration', () => {
       new_charges_count: 0,
       new_charges_total: 0,
     })
+  })
+})
+
+describe('generateCycleCharges — contrato que começa no dia do vencimento', () => {
+  // Sem pro rata, `firstDueDate` devolve o próprio início quando ele cai no
+  // dia de vencimento, e a primeira volta do laço montava um período de
+  // duração zero cobrando o ciclo inteiro. Arranjo trivial e caro: "vence todo
+  // dia 10, o contrato começou dia 10".
+  const base = {
+    start_date: '2026-10-10',
+    end_date:   '2027-03-10',
+    cycle:      'monthly' as const,
+    due_day:    10,
+    cycle_amount: 600,
+  }
+
+  it('sem pro rata: não gera cobrança para período de duração zero', () => {
+    const charges = generateCycleCharges({ ...base, use_pro_rata: false })
+    expect(charges).toHaveLength(5)
+    expect(charges.reduce((s, c) => s + c.amount, 0)).toBe(3000)
+    for (const c of charges) expect(c.period_end > c.period_start).toBe(true)
+  })
+
+  it('com pro rata chega ao mesmo total — os dois ramos concordam', () => {
+    const semProRata = generateCycleCharges({ ...base, use_pro_rata: false })
+    const comProRata = generateCycleCharges({ ...base, use_pro_rata: true })
+    expect(semProRata.reduce((s, c) => s + c.amount, 0))
+      .toBe(comProRata.reduce((s, c) => s + c.amount, 0))
+  })
+
+  it('início FORA do dia de vencimento segue cobrando o ciclo cheio na ponta (RN-011)', () => {
+    const charges = generateCycleCharges({ ...base, start_date: '2026-10-05', use_pro_rata: false })
+    expect(charges[0]!.period_start).toBe('2026-10-05')
+    expect(charges[0]!.period_end).toBe('2026-10-10')
+    expect(charges[0]!.amount).toBe(600)
   })
 })

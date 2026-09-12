@@ -370,6 +370,18 @@ export function generateCycleCharges(input: CycleChargeInput): CycleCharge[] {
     for (let i = 0; i < dueDates.length; i++) {
       const due = dueDates[i]!
       const periodStart = i === 0 ? start : dueDates[i - 1]!
+
+      // Período de duração zero não é ciclo, é artefato.
+      //
+      // Quando o contrato começa NO próprio dia de vencimento, `firstDueDate`
+      // devolve a data de início, e a primeira volta do laço montava
+      // `periodStart === periodEnd` cobrando o ciclo cheio. Um contrato mensal
+      // de 10/10 a 10/03 com vencimento dia 10 saía com 6 cobranças de R$ 600
+      // em vez de 5 — R$ 600 a mais, num arranjo trivial ("vence todo dia 10,
+      // começou dia 10"). O ramo com pro rata nunca teve o defeito: lá as
+      // fronteiras já descartam o vencimento que coincide com o início.
+      if (due.getTime() <= periodStart.getTime()) continue
+
       charges.push({
         due_date:     formatIsoDate(due),
         amount:       input.cycle_amount,
