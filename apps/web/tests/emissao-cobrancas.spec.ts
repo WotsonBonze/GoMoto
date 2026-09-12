@@ -42,19 +42,35 @@ type ScheduleLine = {
   amount: number
 }
 
-let vehicleId = ''
 let customerId = ''
 const rentalsCriadas: string[] = []
+const veiculosCriados: string[] = []
+const veiculoDaLocacao = new Map<string, string>()
 
-/** Cria locação com cronograma pela mesma RPC que a tela usa. */
+/** O veículo desta locação — as asserções de dimensão comparam contra ele. */
+function veiculoDa(rentalId: string): string {
+  const v = veiculoDaLocacao.get(rentalId)
+  if (!v) throw new Error(`locação ${rentalId} não foi criada por criarLocacao`)
+  return v
+}
+
+/**
+ * Cria locação com cronograma pela mesma RPC que a tela usa.
+ *
+ * Um veículo por locação: o banco recusa duas locações ativas na mesma moto
+ * (ADR 0036). O spec reaproveitava um veículo só para todos os casos — o que
+ * só funcionava porque a regra não existia.
+ */
 async function criarLocacao(lines: ScheduleLine[]): Promise<string> {
   const tenantId = await getTestTenantId()
+  const veiculo = await createTestVehicle()
+  veiculosCriados.push(veiculo.id)
 
   const { data, error } = await admin().rpc('create_rental_with_schedule', {
     p_tenant_id: tenantId,
     p_rental: {
       customer_id: customerId,
-      vehicle_id: vehicleId,
+      vehicle_id: veiculo.id,
       start_date: lines[0]!.period_start,
       end_date: lines[lines.length - 1]!.period_end,
       cycle: 'monthly',
@@ -69,6 +85,7 @@ async function criarLocacao(lines: ScheduleLine[]): Promise<string> {
   if (error) throw new Error(`Setup falhou ao criar locação: ${error.message}`)
   const id = data as string
   rentalsCriadas.push(id)
+  veiculoDaLocacao.set(id, veiculo.id)
   return id
 }
 
@@ -129,9 +146,7 @@ async function cobrancaDaLinha(scheduleId: string) {
 
 test.describe('Emissão de cobranças a partir do cronograma', () => {
   test.beforeAll(async () => {
-    const v = await createTestVehicle()
     const c = await createTestCustomer()
-    vehicleId = v.id
     customerId = c.id
   })
 
@@ -143,7 +158,7 @@ test.describe('Emissão de cobranças a partir do cronograma', () => {
       await admin().from('rentals').delete().eq('id', id)
     }
     await deleteTestCustomer(customerId).catch(() => {})
-    await deleteTestVehicle(vehicleId).catch(() => {})
+    for (const id of veiculosCriados) await deleteTestVehicle(id).catch(() => {})
   })
 
   test('emite o período que já começou e deixa o futuro em paz', async () => {
@@ -201,7 +216,7 @@ test.describe('Emissão de cobranças a partir do cronograma', () => {
     // Sem o veículo no item, o lançamento nasce sem a dimensão e a cobrança
     // some do resultado por veículo — foi assim que a receita de caução ficou
     // invisível antes.
-    expect(it[0]!.vehicle_id, 'item sem veículo quebra o relatório por veículo').toBe(vehicleId)
+    expect(it[0]!.vehicle_id, 'item sem veículo quebra o relatório por veículo').toBe(veiculoDa(rentalId))
   })
 
   test('rodar de novo não duplica', async () => {
@@ -250,7 +265,7 @@ test.describe('Emissão de cobranças a partir do cronograma', () => {
     const { data: antes } = await admin()
       .from('vehicle_financial_position')
       .select('operating_revenue')
-      .eq('vehicle_id', vehicleId)
+      .eq('vehicle_id', veiculoDa(rentalId))
       .maybeSingle()
 
     const receitaAntes = Number((antes as { operating_revenue: number } | null)?.operating_revenue ?? 0)
@@ -278,7 +293,7 @@ test.describe('Emissão de cobranças a partir do cronograma', () => {
       .select('vehicle_id')
       .eq('charge_id', chargeId)
 
-    expect((items as { vehicle_id: string | null }[])[0]?.vehicle_id).toBe(vehicleId)
+    expect((items as { vehicle_id: string | null }[])[0]?.vehicle_id).toBe(veiculoDa(rentalId))
 
     const { data: entries } = await admin()
       .from('financial_entries')
@@ -286,13 +301,13 @@ test.describe('Emissão de cobranças a partir do cronograma', () => {
       .eq('charge_id', chargeId)
 
     for (const e of (entries ?? []) as { vehicle_id: string | null }[]) {
-      expect(e.vehicle_id, 'lançamento sem veículo some do relatório').toBe(vehicleId)
+      expect(e.vehicle_id, 'lançamento sem veículo some do relatório').toBe(veiculoDa(rentalId))
     }
 
     const { data: depois } = await admin()
       .from('vehicle_financial_position')
       .select('operating_revenue')
-      .eq('vehicle_id', vehicleId)
+      .eq('vehicle_id', veiculoDa(rentalId))
       .maybeSingle()
 
     const receitaDepois = Number((depois as { operating_revenue: number } | null)?.operating_revenue ?? 0)
@@ -343,7 +358,7 @@ test.describe('Emissão de cobranças a partir do cronograma', () => {
     expect(Number(credito?.amount)).toBe(750)
 
     // A dimensão do veículo sobrevive ao caminho SQL.
-    expect(debito?.vehicle_id).toBe(vehicleId)
+    expect(debito?.vehicle_id).toBe(veiculoDa(rentalId))
 
     // E a execução fica registrada, para "não rodou" deixar de ser invisível.
     const { data: run } = await admin()

@@ -10,6 +10,7 @@ import {
   computeScheduleRegenerationCutoff,
   previewScheduleRegeneration,
   RENTAL_MINIMUM_DURATION,
+  rentalPeriodsOverlap,
 } from './rentals'
 import { RentalSchema, RenewRentalSchema, TerminateRentalSchema } from '../schemas/rentals'
 import type { CycleCharge } from './rentals'
@@ -485,5 +486,33 @@ describe('generateCycleCharges — contrato que começa no dia do vencimento', (
     expect(charges[0]!.period_start).toBe('2026-10-05')
     expect(charges[0]!.period_end).toBe('2026-10-10')
     expect(charges[0]!.amount).toBe(600)
+  })
+})
+
+describe('rentalPeriodsOverlap — mesma semântica do trigger (ADR 0036)', () => {
+  it('períodos que se cruzam', () => {
+    expect(rentalPeriodsOverlap('2026-06-01', '2026-07-01', '2026-06-15', '2026-08-01')).toBe(true)
+  })
+
+  it('devolver e retirar no mesmo dia NÃO é sobreposição', () => {
+    expect(rentalPeriodsOverlap('2026-06-01', '2026-07-01', '2026-07-01', '2026-08-01')).toBe(false)
+    expect(rentalPeriodsOverlap('2026-07-01', '2026-08-01', '2026-06-01', '2026-07-01')).toBe(false)
+  })
+
+  it('contrato sem data de fim ocupa tudo dali em diante', () => {
+    expect(rentalPeriodsOverlap('2026-06-01', null, '2027-01-01', '2027-02-01')).toBe(true)
+    expect(rentalPeriodsOverlap('2026-06-01', null, '2026-01-01', '2026-06-01')).toBe(false)
+  })
+
+  it('locação encerrada antes de começar é período vazio', () => {
+    // terminate_rental grava a data de encerramento como fim — que pode ser
+    // anterior ao início de um contrato futuro cancelado antes da retirada.
+    expect(rentalPeriodsOverlap('2026-09-01', '2026-08-20', '2026-08-01', '2026-12-01')).toBe(false)
+  })
+
+  it('é simétrica', () => {
+    const a = ['2026-06-01', '2026-07-01'] as const
+    const b = ['2026-06-20', '2026-09-01'] as const
+    expect(rentalPeriodsOverlap(a[0], a[1], b[0], b[1])).toBe(rentalPeriodsOverlap(b[0], b[1], a[0], a[1]))
   })
 })

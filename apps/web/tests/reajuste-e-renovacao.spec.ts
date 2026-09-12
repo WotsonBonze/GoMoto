@@ -1,8 +1,9 @@
 /**
- * Reajuste e renovação do cronograma.
+ * Reajuste e extensão do cronograma.
  *
- * São as duas operações que mexem no plano de cobrança de uma locação já ativa,
- * e nenhuma tinha teste. A pergunta que importa nas duas é a mesma, e é o
+ * São as duas operações que mexem no plano de cobrança de uma locação já ativa.
+ * Desde a ADR 0035 as duas moram na mesma tela (`/ajustar`), mas continuam
+ * separadas aqui porque a pergunta que cada uma faz é diferente. A pergunta que importa nas duas é a mesma, e é o
  * Princípio 5 da ADR 0024: **documento emitido é imutável**. Reajustar não pode
  * reescrever cobrança que já foi entregue ao cliente — só o que ainda é plano.
  *
@@ -30,9 +31,9 @@ function isoOffset(days: number): string {
   return d.toISOString().slice(0, 10)
 }
 
-let vehicleId = ''
 let customerId = ''
 const rentalsCriadas: string[] = []
+const veiculosCriados: string[] = []
 
 type ScheduleLine = {
   sequence_number: number
@@ -42,13 +43,20 @@ type ScheduleLine = {
   amount: number
 }
 
+/**
+ * Um veículo por locação: o banco recusa duas locações ativas na mesma moto
+ * (ADR 0036). O spec reaproveitava um veículo só para todos os casos — o que
+ * só funcionava porque a regra não existia.
+ */
 async function criarLocacao(lines: ScheduleLine[], cycleAmount: number): Promise<string> {
   const tenantId = await getTestTenantId()
+  const veiculo = await createTestVehicle()
+  veiculosCriados.push(veiculo.id)
   const { data, error } = await admin().rpc('create_rental_with_schedule', {
     p_tenant_id: tenantId,
     p_rental: {
       customer_id: customerId,
-      vehicle_id: vehicleId,
+      vehicle_id: veiculo.id,
       start_date: lines[0]!.period_start,
       end_date: lines[lines.length - 1]!.period_end,
       cycle: 'monthly',
@@ -100,8 +108,6 @@ async function reajustar(rentalId: string, novoValor: number, aPartirDe: string)
 }
 
 test.beforeAll(async () => {
-  const v = await createTestVehicle()
-  vehicleId = v.id
   const c = await createTestCustomer()
   customerId = c.id
 })
@@ -124,7 +130,7 @@ test.afterAll(async () => {
     await admin().from('rentals').delete().eq('id', id)
   }
   if (customerId) await deleteTestCustomer(customerId).catch(() => {})
-  if (vehicleId) await deleteTestVehicle(vehicleId).catch(() => {})
+  for (const id of veiculosCriados) await deleteTestVehicle(id).catch(() => {})
 })
 
 test.describe('Reajuste do cronograma', () => {
@@ -233,7 +239,17 @@ test.describe('Reajuste do cronograma', () => {
   })
 })
 
-test.describe('Renovação do cronograma', () => {
+test.describe('Estender o prazo pela tela de Ajustar', () => {
+  /**
+   * Renovar deixou de ser tela própria (ADR 0035): esticar o fim é mudar um dos
+   * seis parâmetros do cronograma, e ter dois donos para `end_date` fazia as
+   * regras divergirem. A INVARIANTE, porém, é a mesma de antes e continua sendo
+   * o que este teste protege: estender não pode tocar no que já foi emitido.
+   *
+   * A vigência sugerida por `planPeriodAdjustment` é o fim do último período
+   * emitido, então o caminho de estender preserva as linhas emitidas sem o
+   * operador precisar pensar nisso.
+   */
   test('acrescenta ciclos ao plano sem tocar no que já foi emitido', async ({ page }) => {
     const tenantId = await getTestTenantId()
 
@@ -246,55 +262,71 @@ test.describe('Renovação do cronograma', () => {
     await admin().rpc('fn_issue_charges_for_tenant', { p_tenant_id: tenantId, p_lead_days: 0 })
 
     const antes = await cronograma(rentalId)
-    const emitidasAntes = antes.filter((l) => l.status === 'issued').length
-    expect(emitidasAntes, 'setup não emitiu nada').toBeGreaterThan(0)
+    const emitidasAntes = antes.filter((l) => l.status === 'issued')
+    expect(emitidasAntes.length, 'setup não emitiu nada').toBeGreaterThan(0)
 
     const { count: cobrancasAntes } = await admin()
       .from('charges').select('id', { count: 'exact', head: true })
       .eq('rental_id', rentalId)
 
-    await page.goto(`/locacoes/${rentalId}/renovar`)
+    await page.goto(`/locacoes/${rentalId}/ajustar`)
     await waitForPageLoad(page)
 
-    // Estende por mais ~2 meses.
-    await page.locator('input[type=date]').first().fill(isoOffset(75))
-    await page.getByRole('button', { name: /confirmar renovação/i }).click()
-    await page.waitForURL(`/locacoes/${rentalId}`, { timeout: 15_000 })
+    // Estende por mais ~2 meses. A data de fim é o segundo campo de data; o
+    // terceiro é a vigência, que fica no padrão (fim do último emitido).
+    await page.locator('input[type=date]').nth(1).fill(isoOffset(75))
+    await page.locator('textarea').fill('Renovação combinada com o cliente')
+    await page.getByRole('button', { name: /confirmar ajuste/i }).click()
+    await page.waitForURL(`/locacoes/${rentalId}/financeiro`, { timeout: 15_000 })
 
     const depois = await cronograma(rentalId)
 
-    // Renovar é ACRESCENTAR: nenhuma linha existente muda de status ou valor.
-    expect(depois.length, 'renovação não gerou ciclo novo').toBeGreaterThan(antes.length)
-    for (const original of antes) {
+    // Nenhuma linha EMITIDA muda de status ou valor — é o Princípio 5.
+    for (const original of emitidasAntes) {
       const igual = depois.find((l) => l.id === original.id)
-      expect(igual, `linha ${original.sequence_number} sumiu na renovação`).toBeDefined()
-      expect(igual!.status, `linha ${original.sequence_number} mudou de status`).toBe(original.status)
-      expect(Number(igual!.amount), `linha ${original.sequence_number} mudou de valor`).toBe(Number(original.amount))
+      expect(igual, `linha ${original.sequence_number} sumiu`).toBeDefined()
+      expect(igual!.status, `linha emitida ${original.sequence_number} mudou de status`).toBe('issued')
+      expect(Number(igual!.amount), `linha emitida ${original.sequence_number} mudou de valor`).toBe(Number(original.amount))
     }
 
-    // As linhas novas continuam a numeração e nascem como plano, não emitidas:
-    // quem emite é o job, quando o período começar.
+    // As linhas novas nascem como plano, não emitidas: quem emite é o job,
+    // quando o período começar.
     const novas = depois.filter((l) => !antes.some((a) => a.id === l.id))
-    expect(novas.length).toBeGreaterThan(0)
+    expect(novas.length, 'não gerou ciclo novo').toBeGreaterThan(0)
+    const maxAntes = Math.max(...antes.map((l) => l.sequence_number))
     for (const nova of novas) {
-      expect(nova.status, 'renovação já nasceu emitida — pulou o job').toBe('scheduled')
-      expect(nova.sequence_number).toBeGreaterThan(antes.length)
+      expect(nova.status, 'linha nova já nasceu emitida — pulou o job').toBe('scheduled')
+      // A numeração CONTINUA — `UNIQUE (rental_id, sequence_number)` proíbe reuso.
+      expect(nova.sequence_number).toBeGreaterThan(maxAntes)
       expect(Number(nova.amount)).toBe(400)
     }
 
-    // Sequência sem buraco nem repetição: é o que dá ordem ao cronograma.
-    const seqs = depois.map((l) => l.sequence_number).sort((a, b) => a - b)
-    expect(seqs).toEqual(Array.from({ length: depois.length }, (_, i) => i + 1))
+    // Sem repetição de sequência.
+    const seqs = depois.map((l) => l.sequence_number)
+    expect(new Set(seqs).size).toBe(seqs.length)
 
-    // E renovar não emite cobrança por si só.
+    // E estender não emite cobrança por si só.
     const { count: cobrancasDepois } = await admin()
       .from('charges').select('id', { count: 'exact', head: true })
       .eq('rental_id', rentalId)
-    expect(cobrancasDepois, 'renovação emitiu cobrança fora do job').toBe(cobrancasAntes ?? 0)
+    expect(cobrancasDepois, 'estender emitiu cobrança fora do job').toBe(cobrancasAntes ?? 0)
 
     // A data final da locação acompanha o plano.
     const { data: rental } = await admin()
       .from('rentals').select('end_date').eq('id', rentalId).single()
     expect((rental as { end_date: string }).end_date).toBe(isoOffset(75))
+  })
+
+  test('/renovar e /reajustar continuam vivas como redirect', async ({ page }) => {
+    // Rotas antigas estão em links salvos, no histórico e em abas abertas: 404
+    // no meio de uma operação é pior do que uma navegação a mais.
+    const rentalId = await criarLocacao([
+      { sequence_number: 1, period_start: isoOffset(30), period_end: isoOffset(60), due_date: isoOffset(60), amount: 400 },
+    ], 400)
+
+    for (const antiga of ['renovar', 'reajustar']) {
+      await page.goto(`/locacoes/${rentalId}/${antiga}`)
+      await page.waitForURL(`/locacoes/${rentalId}/ajustar`, { timeout: 15_000 })
+    }
   })
 })

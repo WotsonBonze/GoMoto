@@ -1,26 +1,17 @@
-import { notFound } from 'next/navigation'
-import { createClient } from '@/lib/supabase/server'
-import { getCurrentTenantId } from '@/lib/auth/tenant'
-import { AdjustRentalForm } from '../../_components/AdjustRentalForm'
+import { redirect } from 'next/navigation'
 
-export default async function AdjustRentalPage({
+/**
+ * Reajustar virou um recorte de Ajustar (ADR 0035).
+ *
+ * A rota sobrevive como redirect em vez de sumir: ela está em links salvos, no
+ * histórico do navegador e em abas abertas, e 404 no meio de uma operação é
+ * pior do que uma navegação a mais.
+ */
+export default async function ReajustarRedirect({
   params,
 }: {
   params: Promise<{ id: string }>
 }) {
   const { id } = await params
-  const supabase  = await createClient()
-  const tenantId  = await getCurrentTenantId(supabase)
-  if (!tenantId) notFound()
-
-  const { data, error } = await supabase
-    .from('rentals')
-    .select('*, customer:customers(id,name), vehicle:vehicles(id,license_plate,make,model)')
-    .eq('id', id)
-    .eq('tenant_id', tenantId)
-    .single()
-
-  if (error || !data || data.status !== 'active') notFound()
-
-  return <AdjustRentalForm rental={data} />
+  redirect(`/locacoes/${id}/ajustar`)
 }

@@ -17,9 +17,10 @@ Rota base: `/locacoes` | Tipo: mistura de Server Component (leitura/SSR) + Clien
 | `/locacoes/[id]/manutencoes` | `[id]/(tabs)/manutencoes/page.tsx` | Aba **Manutenções**: manutenções do veículo cujo período cai dentro da locação — somente leitura |
 | `/locacoes/[id]/financeiro` | `[id]/(tabs)/financeiro/page.tsx` | Aba **Financeiro**: extrato completo — cobranças, caução, histórico de reajustes |
 | `/locacoes/[id]/editar` | `[id]/editar/page.tsx` + `_components/RentalForm.tsx` (modo edição) | **Só** caução + observações — fora do group de abas, sem barra de abas |
-| `/locacoes/[id]/renovar` | `_components/RenewForm.tsx` | Estender prazo (`renewRental`) — fora do group de abas |
-| `/locacoes/[id]/encerrar` | `_components/TerminateForm.tsx` | Antecipar fim (`terminateRental`) — fora do group de abas |
-| `/locacoes/[id]/reajustar` | `_components/AdjustRentalForm.tsx` | Reajustar valor do ciclo + encargos (`adjustRental`, PRD 0008 F11) — fora do group de abas |
+| `/locacoes/[id]/ajustar` | `_components/AdjustRentalPeriodForm.tsx` | **Dona única** dos seis parâmetros do cronograma: início, fim, ciclo, dia de vencimento, valor e pro rata ([[decisions/0035-ajuste-de-periodo-da-locacao]]) — fora do group de abas |
+| `/locacoes/[id]/renovar` | redirect → `/ajustar` | Rota mantida viva para links salvos e abas abertas |
+| `/locacoes/[id]/reajustar` | redirect → `/ajustar` | Idem |
+| `/locacoes/[id]/encerrar` | `_components/TerminateForm.tsx` | Encerrar o contrato e liberar o veículo (`terminateRental`) — fora do group de abas |
 | `/locacoes/[id]/cobranca-avulsa` | — | Cobrança avulsa fora do ciclo — fora do group de abas |
 
 ## Detalhe da locação em abas (2026-08-01)
@@ -35,20 +36,79 @@ Rota base: `/locacoes` | Tipo: mistura de Server Component (leitura/SSR) + Clien
 
 ## Decisão de escopo: "Editar" não mexe em nada que afeta cobranças
 
-Decisão tomada em 2026-07-24 (não estava em nenhum PRD antes disso — `RentalForm` foi originalmente construído reaproveitando o form de criação, sem spec própria para o modo edição).
-
-Cada campo que impacta cobranças tem **um dono só**, nunca "Editar":
+Decisão de 2026-07-24, revista em 2026-09-10 pela [[decisions/0035-ajuste-de-periodo-da-locacao]]:
+o que mudou foi **quem** é o dono de cada campo, não o princípio. Cada campo que
+impacta cobranças continua com **um dono só**, nunca "Editar":
 
 | Campo | Dono | Reprocessa cobranças? |
 |---|---|---|
-| Cliente, veículo | — (imutável após criação) | — |
-| Valor do ciclo, encargos por atraso | **Reajustar** (`adjustRental`) | Sim — RN-025/026/027: só `pending`, pro rata recalculada proporcionalmente |
-| Prazo (fim) — estender | **Renovar** (`renewRental`) | Sim — recalcula última cobrança pro rata + gera novas |
-| Prazo (fim) — antecipar | **Encerrar** (`terminate_rental` RPC) | Sim — cancela `pending` com `due_date > data_encerramento` |
-| Tipo, ciclo, dia de vencimento, início, pro rata | — (imutável após criação) | — nenhum fluxo cobre mudança pós-criação; a orientação na UI é encerrar e criar uma nova locação |
-| Caução, Entrada, observações | **Editar** (`updateRental`) | Observações não. Caução sim, **se ainda pendente** — cascata pra cobrança vinculada (ver seção abaixo); se já paga, só `deposits` muda (cobrança paga é imutável, RNF-007). Entrada sim, **se ainda pendente** (`canEditDownPayment`, `@gomoto/core`) — se já paga, campo vira somente-leitura (RN-002/RF-005, [[Specs/0010-entrada-locacao]]) |
+| Cliente, veículo, tipo de contrato | — (imutável após criação) | — |
+| **Início, fim, ciclo, dia de vencimento, valor do ciclo, pro rata** | **Ajustar** (`adjustRentalPeriod` → `fn_adjust_rental_period`) | Sim — regera o cronograma a partir de uma data de vigência; cobrança emitida na faixa é cancelada, e cobrança paga na faixa é impedimento |
+| Encerrar o contrato e liberar o veículo | **Encerrar** (`terminate_rental`) | Sim — cancela o cronograma `scheduled` posterior à data de encerramento |
+| Vínculos de vistoria | — (imutável após criação) | — |
+| Caução, Entrada, observações, modelo de contrato | **Editar** (`updateRental`, `updateContractTemplate`) | Caução e Entrada sim, **se ainda pendentes** — documento emitido não se reescreve, cancela-se e emite-se outro; se já pagas, o campo vira somente-leitura |
 
-`RentalForm.tsx` é compartilhado entre criação e edição: em modo edição, a seção "Condições do contrato" fica somente-leitura com links diretos para Reajustar/Renovar/Encerrar, e o formulário vira single-step (sem o wizard de preview, que só faz sentido na criação).
+Antes da ADR 0035, `end_date` tinha **dois** donos (Renovar para esticar, Encerrar
+para antecipar) com regras divergentes, e início/ciclo/dia/pro rata não tinham
+nenhum — a orientação era "encerre e crie outra locação", o que custava o contrato
+inteiro por um erro de digitação.
+
+`RentalForm.tsx` é compartilhado entre criação e edição: em modo edição, a seção
+"Condições do contrato" fica somente-leitura com link para Ajustar/Encerrar, e o
+formulário vira single-step (sem o wizard de preview, que só faz sentido na criação).
+
+## Ajustar: a prévia é a mesma função que grava
+
+A decisão inteira (o que é mantido, o que é substituído, qual cobrança é cancelada,
+quais parcelas nascem) está em `planPeriodAdjustment`
+(`packages/core/src/rules/schedule.ts`). A tela chama para desenhar a prévia; a
+Server Action chama para gravar. Não existe segunda implementação — mesmo motivo de
+`generateSchedule`.
+
+Pontos que quem for mexer precisa saber:
+
+- **`sequence_number` deixou de ser ordem cronológica.** As linhas novas continuam a
+  numeração (`UNIQUE (rental_id, sequence_number)` proíbe reuso), então um ajuste
+  produz `1,2,3, 8,9, 4(superseded), 10, …`. Toda leitura de cronograma ordena por
+  `period_start`; a aba Financeiro separa `superseded`/`cancelled` atrás de um
+  `<details>` "Histórico do plano".
+- **A página lê no servidor**, não por `useRentalSchedule`. A tela anterior
+  alimentava a prévia pelo cache do TanStack, que `revalidatePath` não alcança:
+  depois de gravar, a prévia seguia anunciando as mesmas mudanças.
+- **A RPC reconfere sob o lock da locação** que nenhuma linha a substituir tem
+  cobrança viva (`LINE_HAS_LIVE_CHARGE`). Não é redundância: entre a leitura da tela
+  e a escrita cabem o job de emissão e um webhook de pagamento.
+- **Cobrança retroativa avisa, não bloqueia.** Parcela cujo período já começou vira
+  cobrança na próxima rodada, possivelmente já vencida; a prévia marca "Emite agora"
+  e "Já vencida" (token `critical`, alarme universal da ADR 0020).
+
+## Um veículo, uma locação (ADR 0036, 2026-09-10)
+
+A moto não pode estar com dois clientes ao mesmo tempo, e a regra mora **no banco**
+([[decisions/0036-um-veiculo-uma-locacao]]):
+
+- `idx_rentals_one_active_per_vehicle`: no máximo uma locação `active` por veículo.
+  Vale para qualquer caminho, inclusive `INSERT` direto.
+- `trg_rentals_vehicle_period`: o período `[início, fim)` da locação ativa não cruza o de
+  outra do mesmo veículo. Devolver e retirar no mesmo dia é permitido.
+
+Na tela: `createRental` traduz `VEHICLE_ALREADY_RENTED` e `VEHICLE_PERIOD_OVERLAP` para
+português. A prévia do `/ajustar` recebe as outras locações do veículo
+(`other_rentals`) e bloqueia antes do clique. O formulário de criação continua listando
+só veículos `available`, mas isso agora é conveniência, não a garantia.
+
+## Bug de cobrança em dobro no primeiro ciclo (corrigido 2026-09-10)
+
+Achado enquanto se escrevia o teste do ajuste. Com `use_pro_rata: false`, quando o
+contrato começava **no próprio dia de vencimento**, `firstDueDate` devolvia a data de
+início e a primeira volta do laço montava um período de duração zero cobrando o ciclo
+cheio. Um contrato mensal de 10/10 a 10/03 com vencimento dia 10 saía com 6 cobranças
+de R$ 600 em vez de 5 — R$ 600 a mais, num arranjo trivial ("vence todo dia 10,
+começou dia 10").
+
+O ramo com pro rata nunca teve o defeito: lá as fronteiras já descartam o vencimento
+que coincide com o início. Dois testes existentes em `rentals.spec.ts` **codificavam o
+bug como esperado** (contavam vencimentos, não períodos) e foram corrigidos junto.
 
 ## Caução gera cobrança própria (2026-07-26)
 
@@ -90,12 +150,12 @@ Ver [[Telas/Contratos]] para o catálogo de variáveis e a mecânica de geraçã
 - Botões desabilitados quando nenhum modelo está vinculado.
 - **`/locacoes/[id]/editar`**: a seção "Modelo de contrato" do `RentalForm.tsx`, antes só na criação (`!isEditMode`), agora também aparece em modo edição — mesmo `<select>`, texto de ajuda diferente. `handleSubmit` em modo edição chama `updateRental` (caução/observações) e depois `updateContractTemplate` (novo modelo) em sequência.
 
-## Reajustar locação (F11) — detalhes de implementação
+## Histórico: Reajustar (F11) e Renovar
 
-- RPC `adjust_rental` (migration `20260724232232_adjust_rental_rpc.sql`): lock na locação, `UPDATE billings` em lote só para `status='pending'`, insere histórico em `rental_adjustments`, atualiza `rentals.cycle_amount`/`late_charge_config`. Atômico (RNF-006).
-- Recálculo proporcional (RN-027) via `calculateAdjustedBillingAmount` em `packages/core/src/rules/rentals.ts` — cobrança pro rata mantém a mesma fração do novo valor, não vira o valor cheio.
-- Prévia de impacto (RF-029) via `previewRentalAdjustment` (mesmo arquivo), consumida tanto pela UI quanto potencialmente por outras integrações.
-- `renew_rental` corrigido na mesma migration: cobranças de renovação agora saem com `source='rental_cycle'` (antes caíam no default `'manual'`).
+Ambas foram absorvidas por Ajustar em 2026-09-10. As RPCs `adjust_rental_schedule` e
+`fn_renew_rental` continuam no banco marcadas como obsoletas por `COMMENT` — não
+foram derrubadas porque função removida vira erro no meio da operação de quem estava
+com a aba aberta. As rotas `/reajustar` e `/renovar` respondem com redirect.
 
 ## Vistoria (Spec 0009, 2026-07-30)
 

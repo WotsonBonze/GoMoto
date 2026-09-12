@@ -4,7 +4,12 @@ import {
   selectIssuableLines,
   selectAdjustableLines,
   contractedBacklog,
+  planPeriodAdjustment,
   type ScheduleStatus,
+  type ScheduleLineRow,
+  type ScheduleLineChargeRow,
+  type PeriodAdjustmentInput,
+  type PeriodAdjustmentPlan,
 } from './schedule'
 
 const HOJE = new Date(2026, 7, 12) // 2026-08-12 local
@@ -211,5 +216,354 @@ describe('data impossível não vira cronograma', () => {
       expect(l.due_date, 'due_date fora do formato ISO').toMatch(/^\d{4}-\d{2}-\d{2}$/)
       expect(Number.isNaN(new Date(`${l.due_date}T00:00:00`).getTime())).toBe(false)
     }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// planPeriodAdjustment — ADR 0035
+// ---------------------------------------------------------------------------
+
+const HOJE_ISO = '2026-08-12'
+
+const PARAMS = {
+  start_date:   '2026-06-01',
+  end_date:     '2026-12-01',
+  cycle:        'monthly' as const,
+  due_day:      1,
+  cycle_amount: 1000,
+  use_pro_rata: true,
+}
+
+/** Cronograma mensal de 01/06 a 01/12, com as N primeiras já emitidas. */
+function cronograma(issuedCount = 0, params = PARAMS): ScheduleLineRow[] {
+  return generateSchedule(params).map((l, i) => ({
+    id: `linha-${i + 1}`,
+    sequence_number: l.sequence_number,
+    period_start: l.period_start,
+    period_end: l.period_end,
+    due_date: l.due_date,
+    amount: l.amount,
+    status: (i < issuedCount ? 'issued' : 'scheduled') as ScheduleStatus,
+  }))
+}
+
+function cobranca(
+  linha: ScheduleLineRow,
+  over: Partial<ScheduleLineChargeRow> = {},
+): ScheduleLineChargeRow {
+  return {
+    schedule_line_id: linha.id,
+    charge_id: `cob-${linha.id}`,
+    charge_number: linha.sequence_number,
+    due_date: linha.due_date,
+    total_amount: linha.amount,
+    paid_amount: 0,
+    status: 'open',
+    ...over,
+  }
+}
+
+function planejar(over: Partial<PeriodAdjustmentInput> = {}): PeriodAdjustmentPlan {
+  const lines = over.lines ?? cronograma()
+  return planPeriodAdjustment({
+    current: PARAMS,
+    next: PARAMS,
+    contract_type: 'rental',
+    lines,
+    charges: [],
+    effective_from: '',
+    today: HOJE_ISO,
+    ...over,
+  })
+}
+
+describe('planPeriodAdjustment — nada emitido', () => {
+  it('regenera o cronograma inteiro quando o início muda', () => {
+    const lines = cronograma(0)
+    const plano = planejar({ lines, next: { ...PARAMS, start_date: '2026-06-15' } })
+
+    expect(plano.blockers).toEqual([])
+    expect(plano.keep_lines).toHaveLength(0)
+    expect(plano.supersede_lines).toHaveLength(lines.length)
+    expect(plano.cancel_charges).toHaveLength(0)
+    expect(plano.new_lines.length).toBeGreaterThan(0)
+    expect(plano.new_lines[0]!.period_start).toBe('2026-06-15')
+  })
+
+  it('a vigência sugerida é o início do contrato — regeneração total', () => {
+    const plano = planejar({ next: { ...PARAMS, cycle_amount: 1200 } })
+    expect(plano.default_effective_from).toBe('2026-06-01')
+    expect(plano.min_effective_from).toBe('2026-06-01')
+  })
+
+  it('nenhuma cobrança é cancelada: linha do plano nunca foi documento', () => {
+    const plano = planejar({ next: { ...PARAMS, due_day: 20 } })
+    expect(plano.cancel_charges).toHaveLength(0)
+    expect(plano.totals.cancelled).toBe(0)
+  })
+})
+
+describe('planPeriodAdjustment — com período já emitido', () => {
+  it('a vigência sugerida preserva tudo que já virou documento', () => {
+    const lines = cronograma(3)
+    const plano = planejar({ lines, charges: lines.slice(0, 3).map((l) => cobranca(l)) })
+
+    expect(plano.default_effective_from).toBe(lines[2]!.period_end)
+    expect(plano.cancel_charges).toHaveLength(0)
+    expect(plano.keep_lines).toHaveLength(3)
+  })
+
+  it('puxar a vigência para trás cancela a cobrança emitida e aberta', () => {
+    const lines = cronograma(3)
+    const charges = lines.slice(0, 3).map((l) => cobranca(l))
+    const plano = planejar({
+      lines, charges,
+      effective_from: lines[1]!.period_end,
+      next: { ...PARAMS, cycle_amount: 1200 },
+    })
+
+    expect(plano.blockers).toEqual([])
+    expect(plano.keep_lines).toHaveLength(2)
+    expect(plano.cancel_charges.map((c) => c.charge_id)).toEqual(['cob-linha-3'])
+    expect(plano.totals.cancelled).toBe(charges[2]!.total_amount)
+  })
+
+  it('a fronteira barra a vigência que alcançaria período com pagamento parcial', () => {
+    // Pagamento parcial conta como dinheiro que entrou: `minEffectiveFrom` puxa
+    // a fronteira para o fim desse período, e o impedimento vem de lá — não do
+    // laço, que nunca chega a olhar a linha.
+    const lines = cronograma(3)
+    const charges = [
+      cobranca(lines[0]!), cobranca(lines[1]!),
+      cobranca(lines[2]!, { paid_amount: 500 }),
+    ]
+    const plano = planejar({ lines, charges, effective_from: lines[1]!.period_end })
+
+    expect(plano.min_effective_from).toBe(lines[2]!.period_end)
+    expect(plano.blockers.map((b) => b.code)).toContain('EFFECTIVE_BEFORE_PAID')
+    expect(plano.cancel_charges).toHaveLength(0)
+    expect(plano.new_lines).toHaveLength(0)
+  })
+
+  it('cobrança baixada por inadimplência que sai da vigência é impedimento', () => {
+    // Aqui a linha não cai pela fronteira (a vigência está no mínimo permitido),
+    // e sim porque o novo início a deixa fora da janela do contrato.
+    const lines = cronograma(3)
+    const charges = [
+      cobranca(lines[0]!), cobranca(lines[1]!),
+      cobranca(lines[2]!, { status: 'written_off' }),
+    ]
+    const plano = planejar({
+      lines, charges,
+      effective_from: lines[2]!.period_end,
+      next: { ...PARAMS, start_date: lines[2]!.period_end },
+    })
+
+    expect(plano.blockers.map((b) => b.code)).toContain('WRITTEN_OFF_IN_RANGE')
+    expect(plano.new_lines).toHaveLength(0)
+  })
+
+  it('a vigência não pode ser anterior ao fim do último período pago', () => {
+    const lines = cronograma(3)
+    const charges = [
+      cobranca(lines[0]!), cobranca(lines[1]!, { paid_amount: 1000, status: 'paid' }),
+      cobranca(lines[2]!),
+    ]
+    const plano = planejar({ lines, charges, effective_from: '2026-06-01' })
+
+    expect(plano.min_effective_from).toBe(lines[1]!.period_end)
+    expect(plano.blockers.map((b) => b.code)).toContain('EFFECTIVE_BEFORE_PAID')
+  })
+
+  it('cobrança já cancelada não entra na lista de cancelamentos', () => {
+    const lines = cronograma(3)
+    const charges = lines.slice(0, 3).map((l) => cobranca(l, { status: 'cancelled' }))
+    const plano = planejar({ lines, charges, effective_from: lines[1]!.period_end })
+
+    expect(plano.cancel_charges).toHaveLength(0)
+    expect(plano.supersede_lines).toHaveLength(lines.length - 2)
+  })
+
+  it('mover o início para depois de um período pago é impedimento, não silêncio', () => {
+    const lines = cronograma(2)
+    const charges = lines.slice(0, 2).map((l) => cobranca(l, { paid_amount: l.amount, status: 'paid' }))
+    const plano = planejar({
+      lines, charges,
+      effective_from: lines[1]!.period_end,
+      next: { ...PARAMS, start_date: '2026-09-01' },
+    })
+
+    expect(plano.blockers.map((b) => b.code)).toContain('PAID_CHARGE_IN_RANGE')
+  })
+})
+
+describe('planPeriodAdjustment — continuidade do cronograma', () => {
+  it('a numeração continua de onde parou: a UNIQUE proíbe reuso', () => {
+    const lines = cronograma(2)
+    const maxAtual = Math.max(...lines.map((l) => l.sequence_number))
+    const plano = planejar({
+      lines,
+      charges: lines.slice(0, 2).map((l) => cobranca(l)),
+      next: { ...PARAMS, cycle_amount: 1200 },
+    })
+
+    expect(plano.new_lines[0]!.sequence_number).toBe(maxAtual + 1)
+    const nums = plano.new_lines.map((l) => l.sequence_number)
+    expect(new Set(nums).size).toBe(nums.length)
+    expect(Math.min(...nums)).toBeGreaterThan(maxAtual)
+  })
+
+  it('não há buraco nem sobreposição entre o mantido e o criado', () => {
+    const lines = cronograma(3)
+    const plano = planejar({
+      lines,
+      charges: lines.slice(0, 3).map((l) => cobranca(l)),
+      next: { ...PARAMS, due_day: 15 },
+    })
+
+    const ultimoMantido = plano.keep_lines[plano.keep_lines.length - 1]!
+    expect(plano.new_lines[0]!.period_start).toBe(ultimoMantido.period_end)
+  })
+
+  it('linha já substituída ou cancelada é inerte: não é tocada de novo', () => {
+    const lines = cronograma(0).map((l, i) =>
+      i === 0 ? { ...l, status: 'superseded' as ScheduleStatus } : l,
+    )
+    const plano = planejar({ lines, next: { ...PARAMS, cycle_amount: 1200 } })
+    expect(plano.supersede_lines.some((l) => l.id === 'linha-1')).toBe(false)
+  })
+})
+
+describe('planPeriodAdjustment — impedimentos de forma', () => {
+  it('fim anterior ao início', () => {
+    const plano = planejar({ next: { ...PARAMS, end_date: '2026-05-01' } })
+    expect(plano.blockers.map((b) => b.code)).toContain('END_BEFORE_START')
+  })
+
+  it('data impossível não vira plano vazio silencioso', () => {
+    const plano = planejar({ next: { ...PARAMS, start_date: '82026-06-01' } })
+    expect(plano.blockers.map((b) => b.code)).toContain('INVALID_DATE')
+    expect(plano.new_lines).toHaveLength(0)
+  })
+
+  it('encurtar até não sobrar parcela é encerramento, não ajuste', () => {
+    const lines = cronograma(3)
+    const plano = planejar({
+      lines,
+      charges: lines.slice(0, 3).map((l) => cobranca(l)),
+      next: { ...PARAMS, end_date: lines[2]!.period_end },
+    })
+    expect(plano.blockers.map((b) => b.code)).toContain('NOTHING_LEFT')
+  })
+})
+
+describe('planPeriodAdjustment — avisos', () => {
+  it('parcela cujo período já começou é marcada como emissão imediata', () => {
+    const plano = planejar({
+      lines: cronograma(0),
+      next: { ...PARAMS, due_day: 20 },
+      today: HOJE_ISO,
+    })
+    const imediatas = plano.new_lines.filter((l) => l.emits_now)
+    expect(imediatas.length).toBeGreaterThan(0)
+    expect(plano.warnings.map((w) => w.code)).toContain('EMITS_NOW')
+  })
+
+  it('parcela com vencimento no passado avisa que nasce vencida', () => {
+    const plano = planejar({ lines: cronograma(0), next: { ...PARAMS, cycle_amount: 1200 } })
+    expect(plano.new_lines.some((l) => l.born_overdue)).toBe(true)
+    expect(plano.warnings.map((w) => w.code)).toContain('BORN_OVERDUE')
+  })
+
+  it('antecipar o início deixa um trecho sem parcela e avisa', () => {
+    const lines = cronograma(3)
+    const plano = planejar({
+      lines,
+      charges: lines.slice(0, 3).map((l) => cobranca(l)),
+      next: { ...PARAMS, start_date: '2026-05-01' },
+    })
+    expect(plano.warnings.map((w) => w.code)).toContain('START_BEFORE_ISSUED')
+  })
+
+  it('mudar de mensal para semanal avisa que o valor passa a ser de outro período', () => {
+    const plano = planejar({
+      lines: cronograma(0),
+      next: { ...PARAMS, cycle: 'weekly', due_day: 1 },
+    })
+    expect(plano.warnings.map((w) => w.code)).toContain('CYCLE_CHANGED')
+    expect(plano.new_lines.length).toBeGreaterThan(cronograma(0).length)
+  })
+
+  it('contrato assinado anexado + datas alteradas vira aviso de aditivo', () => {
+    const plano = planejar({
+      next: { ...PARAMS, end_date: '2027-06-01' },
+      has_signed_contract: true,
+    })
+    expect(plano.warnings.map((w) => w.code)).toContain('SIGNED_CONTRACT_DIVERGES')
+  })
+
+  it('compra programada: mover o início move a data de transferência', () => {
+    const plano = planejar({
+      contract_type: 'rent_to_own',
+      next: { ...PARAMS, start_date: '2026-07-01' },
+    })
+    expect(plano.warnings.map((w) => w.code)).toContain('RENT_TO_OWN_TRANSFER_MOVED')
+  })
+
+  it('sem mudança de data, nenhum aviso de janela', () => {
+    const plano = planejar({ next: { ...PARAMS, cycle_amount: 1200 } })
+    expect(plano.warnings.map((w) => w.code)).not.toContain('PERIOD_WINDOW_CHANGED')
+    expect(plano.changed_fields).toEqual(['cycle_amount'])
+  })
+})
+
+describe('planPeriodAdjustment — totais', () => {
+  it('delta é o quanto o contrato passa a valer a mais', () => {
+    const lines = cronograma(3)
+    const plano = planejar({
+      lines,
+      charges: lines.slice(0, 3).map((l) => cobranca(l)),
+      next: { ...PARAMS, cycle_amount: 2000 },
+    })
+
+    const substituido = plano.supersede_lines
+      .filter((l) => !l.was_issued)
+      .reduce((s, l) => s + l.amount, 0)
+    const criado = plano.new_lines.reduce((s, l) => s + l.amount, 0)
+
+    expect(plano.totals.superseded).toBeCloseTo(substituido, 2)
+    expect(plano.totals.created).toBeCloseTo(criado, 2)
+    expect(plano.totals.delta).toBeCloseTo(criado - substituido - plano.totals.cancelled, 2)
+  })
+
+  it('é determinístico: mesma entrada, mesma saída', () => {
+    const lines = cronograma(2)
+    const args = { lines, charges: lines.slice(0, 2).map((l) => cobranca(l)), next: { ...PARAMS, due_day: 5 } }
+    expect(planejar(args)).toEqual(planejar(args))
+  })
+})
+
+describe('planPeriodAdjustment — um veículo, uma locação (ADR 0036)', () => {
+  it('antecipar o início para antes da devolução anterior é impedimento', () => {
+    const plano = planejar({
+      next: { ...PARAMS, start_date: '2026-05-01' },
+      other_rentals: [{ start_date: '2026-03-01', end_date: '2026-05-20' }],
+    })
+    expect(plano.blockers.map((b) => b.code)).toContain('VEHICLE_PERIOD_OVERLAP')
+    expect(plano.blockers[0]!.message).toContain('20/05/2026')
+    expect(plano.new_lines).toHaveLength(0)
+  })
+
+  it('começar no dia em que a anterior devolveu é permitido', () => {
+    const plano = planejar({
+      next: { ...PARAMS, start_date: '2026-05-20' },
+      other_rentals: [{ start_date: '2026-03-01', end_date: '2026-05-20' }],
+    })
+    expect(plano.blockers.map((b) => b.code)).not.toContain('VEHICLE_PERIOD_OVERLAP')
+  })
+
+  it('sem outra locação no veículo, nada muda', () => {
+    const plano = planejar({ next: { ...PARAMS, start_date: '2026-05-01' }, other_rentals: [] })
+    expect(plano.blockers.map((b) => b.code)).not.toContain('VEHICLE_PERIOD_OVERLAP')
   })
 })

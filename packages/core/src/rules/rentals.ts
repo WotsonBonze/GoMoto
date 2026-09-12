@@ -111,6 +111,25 @@ export function isParseableIsoDate(isoDate: string | null | undefined): boolean 
 // Vigência de locações
 // ---------------------------------------------------------------------------
 
+/**
+ * Dois períodos de locação se cruzam? (ADR 0036)
+ *
+ * Mesma semântica do trigger `trg_rentals_vehicle_period`, que é quem vale —
+ * esta existe para a prévia avisar antes do clique. Período é `[início, fim)`:
+ * devolver e retirar a moto no MESMO dia não é sobreposição. Fim nulo é
+ * contrato em aberto, que ocupa tudo dali em diante. Fim anterior ao início
+ * (locação encerrada antes de começar) é período vazio, que não ocupa nada.
+ */
+export function rentalPeriodsOverlap(
+  aStart: string, aEnd: string | null,
+  bStart: string, bEnd: string | null,
+): boolean {
+  const aUpper = aEnd === null ? null : (aEnd > aStart ? aEnd : aStart)
+  const bUpper = bEnd === null ? null : (bEnd > bStart ? bEnd : bStart)
+  if (aUpper === aStart || bUpper === bStart) return false
+  return (bUpper === null || aStart < bUpper) && (aUpper === null || bStart < aUpper)
+}
+
 /** Data mínima de encerramento sem multa para o tipo de locação. */
 export function calculateMinimumEndDate(
   startDate: string,
@@ -513,6 +532,10 @@ export function getEarlyTerminationImpact(
 // ---------------------------------------------------------------------------
 
 /**
+ * @deprecated Desde a ADR 0024 o reajuste não reescreve documento emitido: ele
+ * altera linhas `scheduled` do cronograma, que já carregam o valor do ciclo.
+ * Sem chamadores desde a Spec 0014.
+ *
  * Recalcula o valor de uma cobrança pendente ao reajustar o ciclo (RN-027).
  * Cobranças de valor cheio escalam 1:1; cobranças pro rata mantêm a mesma
  * fração do novo valor (ex.: 60% do ciclo antigo vira 60% do ciclo novo).
@@ -557,6 +580,11 @@ export function previewRentalAdjustment(
 // ---------------------------------------------------------------------------
 
 /**
+ * @deprecated Desde a ADR 0035, quem decide o corte é `planPeriodAdjustment`
+ * (`rules/schedule.ts`), que trabalha sobre `rental_billing_schedules` e sobre
+ * as cobranças emitidas. Esta versão fala a linguagem de `billings`, tabela que
+ * a Spec 0014 derrubou — nenhum chamador restou.
+ *
  * Ponto de corte para regenerar o cronograma: a due_date mais recente entre
  * as cobranças "travadas" (pagas, canceladas, prejuízo, ou pendentes cuja
  * due_date já passou — vencida na prática, mesmo com status='pending' no

@@ -74,6 +74,39 @@ export const RenewRentalSchema = z.object({
 export type RenewRental = z.infer<typeof RenewRentalSchema>
 
 // ---------------------------------------------------------------------------
+// Locação — ajuste de período e condições (ADR 0035)
+// ---------------------------------------------------------------------------
+
+/**
+ * Ajuste dos seis parâmetros que definem o cronograma.
+ *
+ * Substitui `RenewRentalSchema` (só estendia o fim) e `AdjustScheduleSchema`
+ * (só mudava o valor). Os dois eram recortes do mesmo ato — mudar as condições
+ * do contrato e regerar o plano a partir de uma data de vigência.
+ *
+ * A validação de VIABILIDADE (cobrança já paga na faixa, nada a cobrar depois
+ * do novo fim) não mora aqui: depende do estado do cronograma, e é
+ * `planPeriodAdjustment` que a faz — a mesma função que alimenta a prévia.
+ */
+export const AdjustRentalPeriodSchema = z.object({
+  rental_id:      z.string().uuid(),
+  start_date:     dateString,
+  end_date:       dateString,
+  cycle:          z.enum(['weekly', 'monthly']),
+  due_day:        z.number().int().min(1).max(28),
+  cycle_amount:   z.number().positive({ error: 'Valor do ciclo deve ser positivo' }),
+  use_pro_rata:   z.boolean(),
+  /** Fronteira entre história e futuro: antes dela, nada muda. */
+  effective_from: dateString,
+  justification:  z.string().trim().min(3, { error: 'Informe a justificativa do ajuste' }).max(500),
+}).refine((d) => d.end_date > d.start_date, {
+  message: 'Data de fim deve ser posterior à data de início',
+  path: ['end_date'],
+})
+
+export type AdjustRentalPeriod = z.infer<typeof AdjustRentalPeriodSchema>
+
+// ---------------------------------------------------------------------------
 // Locação — encerramento
 // ---------------------------------------------------------------------------
 

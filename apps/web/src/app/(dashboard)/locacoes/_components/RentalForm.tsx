@@ -656,9 +656,8 @@ export function RentalForm({ rentalId, initialData, defaultCustomerId, tenantNam
                   </div>
                   <div className={`${readOnlyCls} w-fit px-4`}>Pro rata: {form.use_pro_rata ? 'Sim' : 'Não'}</div>
                   <p className="text-[12px] text-fg-mute">
-                    Valor do ciclo e encargos → <Link href={`/locacoes/${rentalId}/reajustar`} className="text-primary hover:underline">Reajustar</Link>.{' '}
-                    Prazo → <Link href={`/locacoes/${rentalId}/renovar`} className="text-primary hover:underline">Renovar</Link> (estender)
-                    {' '}ou <Link href={`/locacoes/${rentalId}/encerrar`} className="text-primary hover:underline">Encerrar</Link> (antecipar).{' '}
+                    Período, ciclo, dia de vencimento e valor → <Link href={`/locacoes/${rentalId}/ajustar`} className="text-primary hover:underline">Ajustar</Link>.{' '}
+                    Para encerrar o contrato e liberar o veículo → <Link href={`/locacoes/${rentalId}/encerrar`} className="text-primary hover:underline">Encerrar</Link>.{' '}
                     Tipo, ciclo, dia de vencimento, início e pro rata não podem ser alterados — encerre esta locação e crie uma nova.
                   </p>
                 </div>

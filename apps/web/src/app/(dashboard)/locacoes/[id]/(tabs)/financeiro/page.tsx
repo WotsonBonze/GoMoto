@@ -61,6 +61,21 @@ const SCHEDULE_STATUS: Record<ScheduleRow['status'], { label: string; cls: strin
   superseded: { label: 'Substituída', cls: 'text-fg-mute line-through' },
 }
 
+function ScheduleRowCells({ line }: { line: ScheduleRow }) {
+  const st = SCHEDULE_STATUS[line.status]
+  return (
+    <tr className="border-b border-divider last:border-0">
+      <td className="h-9 w-12 px-4 font-mono text-fg-mute">{line.sequence_number}</td>
+      <td className="h-9 px-4 text-fg-mute">{fmt(line.period_start)} a {fmt(line.period_end)}</td>
+      <td className="h-9 px-4 text-fg">{fmt(line.due_date)}</td>
+      <td className="h-9 px-4 text-right font-mono tabular-nums text-fg">
+        {formatCurrency(line.amount)}
+      </td>
+      <td className={`h-9 px-4 text-right ${st.cls}`}>{st.label}</td>
+    </tr>
+  )
+}
+
 type AdjustmentRow = {
   id: string
   justification: string
@@ -130,6 +145,11 @@ export default async function RentalFinancialTab({
       .select('id, sequence_number, period_start, period_end, due_date, amount, status')
       .eq('rental_id', id)
       .eq('tenant_id', tenantId)
+      // Cronológica, não por sequência. Depois de um ajuste de período (ADR
+      // 0035) as linhas novas CONTINUAM a numeração — a UNIQUE proíbe reuso —,
+      // então ordenar por `sequence_number` colocaria a parcela de janeiro
+      // depois da de dezembro.
+      .order('period_start', { ascending: true })
       .order('sequence_number', { ascending: true }),
   ])
 
@@ -145,7 +165,8 @@ export default async function RentalFinancialTab({
   const backlog        = contractedBacklog(schedule)
   const scheduleIssued = schedule.filter(l => l.status === 'issued')
     .reduce((sum, l) => sum + Number(l.amount), 0)
-  const scheduleActive = schedule.filter(l => l.status !== 'cancelled' && l.status !== 'superseded')
+  const scheduleActive  = schedule.filter(l => l.status !== 'cancelled' && l.status !== 'superseded')
+  const scheduleHistory = schedule.filter(l => l.status === 'cancelled' || l.status === 'superseded')
   const contractedTotal = scheduleActive.reduce((sum, l) => sum + Number(l.amount), 0)
 
   // A descrição vive nos ITENS, não no documento. Consulta separada: juntar
@@ -400,25 +421,31 @@ export default async function RentalFinancialTab({
                 </tr>
               </thead>
               <tbody>
-                {schedule.map((l) => {
-                  const st = SCHEDULE_STATUS[l.status]
-                  return (
-                    <tr key={l.id} className="border-b border-divider last:border-0">
-                      <td className="h-9 px-4 font-mono text-fg-mute">{l.sequence_number}</td>
-                      <td className="h-9 px-4 text-fg-mute">
-                        {fmt(l.period_start)} a {fmt(l.period_end)}
-                      </td>
-                      <td className="h-9 px-4 text-fg">{fmt(l.due_date)}</td>
-                      <td className="h-9 px-4 text-right font-mono tabular-nums text-fg">
-                        {formatCurrency(l.amount)}
-                      </td>
-                      <td className={`h-9 px-4 text-right ${st.cls}`}>{st.label}</td>
-                    </tr>
-                  )
-                })}
+                {scheduleActive.map((l) => <ScheduleRowCells key={l.id} line={l} />)}
               </tbody>
             </table>
           </div>
+
+          {/* Plano substituído fica atrás de um disclosure nativo: é histórico,
+              não previsão, e misturar os dois faz "Total contratado" parecer
+              não bater com a tabela. */}
+          {scheduleHistory.length > 0 && (
+            <details className="mt-3 rounded-xl bg-surface">
+              <summary className="cursor-pointer px-4 py-2.5 text-[13px] text-fg-mute hover:text-fg">
+                Histórico do plano ({scheduleHistory.length} parcela
+                {scheduleHistory.length === 1 ? '' : 's'} substituída
+                {scheduleHistory.length === 1 ? '' : 's'} ou cancelada
+                {scheduleHistory.length === 1 ? '' : 's'})
+              </summary>
+              <div className="overflow-x-auto border-t border-divider">
+                <table className="w-full text-[13px]">
+                  <tbody>
+                    {scheduleHistory.map((l) => <ScheduleRowCells key={l.id} line={l} />)}
+                  </tbody>
+                </table>
+              </div>
+            </details>
+          )}
         </section>
       )}
 

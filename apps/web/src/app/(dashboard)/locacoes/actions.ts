@@ -4,9 +4,8 @@ import { createClient } from '@/lib/supabase/server'
 import { revalidatePath } from 'next/cache'
 import { z } from 'zod'
 import {
-  AdjustScheduleSchema,
+  AdjustRentalPeriodSchema,
   RentalSchema,
-  RenewRentalSchema,
   TerminateRentalSchema,
   RegisterPaymentSchema,
   ApplyDiscountSchema,
@@ -21,15 +20,13 @@ import {
   type DelinquencyFacts,
   type DelinquencyPolicy,
   isRentalTerminationWithinMinimum,
-  calculateAdjustedBillingAmount,
-  computeScheduleRegenerationCutoff,
+  planPeriodAdjustment,
   getMoveUpNote,
   getMoveDownNote,
 } from '@gomoto/core'
 import type {
   ActionResult,
   CreateRental,
-  RenewRental,
   TerminateRental,
   RegisterPayment,
   ApplyDiscount,
@@ -45,10 +42,22 @@ const dateString = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Data inválida (YYYY
 import { logAction } from '@/lib/audit'
 import { createCharge, cancelCharge, receivePayment, postTransaction, dimensionsOf } from '@/lib/financial'
 import { getCurrentTenantId } from '@/lib/auth/tenant'
+import { loadPeriodAdjustmentContext } from './_lib/period-adjustment'
 
 function revalidateRentalPaths() {
   revalidatePath('/locacoes')
   revalidatePath('/cobrancas')
+}
+
+/**
+ * Recusa do banco quando o período cruza outra locação do mesmo veículo
+ * (ADR 0036). O trigger já manda as datas no texto; aqui só vira frase.
+ */
+function vehicleOverlapMessage(raw: string): string {
+  const detalhe = raw.split('VEHICLE_PERIOD_OVERLAP:')[1]?.trim()
+  return detalhe
+    ? `Não é possível: ${detalhe}. A moto não pode estar com dois clientes ao mesmo tempo.`
+    : 'O período cruza outra locação deste veículo. A moto não pode estar com dois clientes ao mesmo tempo.'
 }
 
 // ---------------------------------------------------------------------------
@@ -191,6 +200,20 @@ export async function createRental(
   if (error) {
     if (error.message?.includes('VEHICLE_NOT_FOUND')) {
       return { ok: false, error: { code: 'NOT_FOUND', message: 'Veículo não encontrado.' } }
+    }
+    // ADR 0036. A RPC diz o motivo; o índice único é a garantia para qualquer
+    // outro caminho, e cai aqui como 23505.
+    if (
+      error.message?.includes('VEHICLE_ALREADY_RENTED') ||
+      (error.code === '23505' && error.message?.includes('idx_rentals_one_active_per_vehicle'))
+    ) {
+      return {
+        ok: false,
+        error: { code: 'CONFLICT', message: 'Este veículo já está em uma locação ativa. Encerre a locação atual antes de criar outra.' },
+      }
+    }
+    if (error.message?.includes('VEHICLE_PERIOD_OVERLAP')) {
+      return { ok: false, error: { code: 'CONFLICT', message: vehicleOverlapMessage(error.message) } }
     }
     if (error.message?.includes('could not obtain lock')) {
       return { ok: false, error: { code: 'VEHICLE_LOCKED', message: 'Tente novamente em instantes.' } }
@@ -644,112 +667,6 @@ export async function terminateRental(
   revalidatePath('/veiculos')
   revalidatePath('/clientes')
   return { ok: true, data: settlement as RentalSettlement }
-}
-
-// ---------------------------------------------------------------------------
-// renewRental — renovação com recálculo de última cobrança
-// ---------------------------------------------------------------------------
-
-export async function renewRental(
-  data: RenewRental,
-): Promise<ActionResult<void>> {
-  const supabase = await createClient()
-  const { data: { user } } = await supabase.auth.getUser()
-  if (!user) return { ok: false, error: { code: 'UNAUTHORIZED', message: 'Não autorizado' } }
-
-  const tenantId = await getCurrentTenantId(supabase)
-  if (!tenantId) return { ok: false, error: { code: 'UNAUTHORIZED', message: 'Tenant não encontrado' } }
-
-  const parsed = RenewRentalSchema.safeParse(data)
-  if (!parsed.success) {
-    return { ok: false, error: { code: 'VALIDATION_ERROR', message: 'Dados inválidos' } }
-  }
-
-  const { data: rental, error: rentalError } = await supabase
-    .from('rentals')
-    .select('cycle, due_day, cycle_amount, use_pro_rata, end_date, status')
-    .eq('id', parsed.data.lease_id)
-    .eq('tenant_id', tenantId)
-    .single()
-
-  if (rentalError || !rental) {
-    return { ok: false, error: { code: 'NOT_FOUND', message: 'Locação não encontrada.' } }
-  }
-  if (rental.status !== 'active') {
-    return { ok: false, error: { code: 'RENTAL_NOT_ACTIVE', message: 'Locação não está ativa.' } }
-  }
-
-  // Spec 0014: renovar é ACRESCENTAR linhas ao cronograma. O modelo anterior
-  // precisava reconciliar a última cobrança pro rata — atualizar se não paga,
-  // gerar complementar se paga — porque documento e plano eram a mesma coisa.
-  // Aqui nada foi emitido ainda: basta continuar o plano.
-  const { data: lastLine } = await supabase
-    .from('rental_billing_schedules')
-    .select('sequence_number, period_end')
-    .eq('rental_id', parsed.data.lease_id)
-    .eq('tenant_id', tenantId)
-    .order('sequence_number', { ascending: false })
-    .limit(1)
-    .maybeSingle()
-
-  const last = lastLine as { sequence_number: number; period_end: string } | null
-  const renewalStart = last?.period_end ?? rental.end_date
-  const offset = last?.sequence_number ?? 0
-
-  if (!rental.cycle || !rental.due_day || !rental.cycle_amount) {
-    return { ok: false, error: { code: 'VALIDATION_ERROR', message: 'Locação sem ciclo definido.' } }
-  }
-
-  const newLines = generateSchedule({
-    start_date:   renewalStart ?? rental.end_date!,
-    end_date:     parsed.data.new_end_date,
-    cycle:        rental.cycle as 'weekly' | 'monthly',
-    due_day:      rental.due_day,
-    cycle_amount: rental.cycle_amount,
-    use_pro_rata: rental.use_pro_rata ?? true,
-  })
-
-  // Estender o contrato e acrescentar as linhas é uma coisa só: linha gravada
-  // com `end_date` antigo vira cobrança emitida depois do fim da locação.
-  const { error: renewError } = await supabase.rpc('fn_renew_rental', {
-    p_tenant_id: tenantId,
-    p_rental_id: parsed.data.lease_id,
-    p_new_end:   parsed.data.new_end_date,
-    p_lines:     newLines.map((l) => ({
-      sequence_number: offset + l.sequence_number,
-      period_start:    l.period_start,
-      period_end:      l.period_end,
-      due_date:        l.due_date,
-      amount:          l.amount,
-    })),
-  })
-
-  if (renewError) {
-    if (renewError.message?.includes('RENEWAL_NOT_AN_EXTENSION')) {
-      return {
-        ok: false,
-        error: {
-          code: 'VALIDATION_ERROR',
-          message: 'A nova data precisa ser posterior ao fim atual. Para encurtar o contrato, use Encerrar.',
-        },
-      }
-    }
-    if (renewError.message?.includes('RENTAL_NOT_FOUND')) {
-      return { ok: false, error: { code: 'NOT_FOUND', message: 'Locação não encontrada ou não está ativa.' } }
-    }
-    return { ok: false, error: { code: 'INTERNAL_ERROR', message: renewError.message } }
-  }
-
-  await logAction({
-    action: 'update',
-    table: 'rentals',
-    recordId: parsed.data.lease_id,
-    newData: { new_end_date: parsed.data.new_end_date, added_lines: newLines.length },
-  })
-
-  revalidateRentalPaths()
-  revalidatePath(`/locacoes/${parsed.data.lease_id}`)
-  return { ok: true, data: undefined }
 }
 
 // ---------------------------------------------------------------------------
@@ -1499,20 +1416,21 @@ export async function closeRentalFinancial(
 }
 
 // ---------------------------------------------------------------------------
-// adjustRentalSchedule — reajuste sobre o CRONOGRAMA (Spec 0014 / ADR 0024)
+// adjustRentalPeriod — ajuste de período e condições (ADR 0035)
 // ---------------------------------------------------------------------------
-// A reversão da ADR 0009 simplifica drasticamente este fluxo. Antes existiam
-// duas operações: `adjustRental`, que reescrevia o valor de billings emitidos,
-// e `regenerateRentalSchedule`, que cancelava documentos pendentes e regerava
-// — porque o cronograma e o documento eram a mesma coisa.
+// Absorve `renewRental` (só esticava o fim, e recusava encurtar) e
+// `adjustRentalSchedule` (só mudava o valor). Os dois eram recortes do mesmo
+// ato: mudar as condições do contrato e regerar o plano a partir de uma
+// fronteira.
 //
-// Agora o reajuste toca apenas linhas `scheduled`. Período já emitido é
-// documento imutável (Princípio 5): ajustá-lo exige cobrança complementar ou
-// renegociação, nunca reescrita.
+// A decisão de o que cai, o que é cancelado e o que nasce está em
+// `planPeriodAdjustment` — função pura, a MESMA que desenha a prévia na tela.
+// O operador confirma exatamente o que vai acontecer, não uma estimativa
+// paralela.
 
-export async function adjustRentalSchedule(
+export async function adjustRentalPeriod(
   input: unknown,
-): Promise<ActionResult<{ updated_lines: number }>> {
+): Promise<ActionResult<{ superseded: number; created: number; cancelled: number }>> {
   const supabase = await createClient()
   const { data: { user } } = await supabase.auth.getUser()
   if (!user) return { ok: false, error: { code: 'UNAUTHORIZED', message: 'Não autorizado' } }
@@ -1520,7 +1438,7 @@ export async function adjustRentalSchedule(
   const tenantId = await getCurrentTenantId(supabase)
   if (!tenantId) return { ok: false, error: { code: 'UNAUTHORIZED', message: 'Tenant não encontrado' } }
 
-  const parsed = AdjustScheduleSchema.safeParse(input)
+  const parsed = AdjustRentalPeriodSchema.safeParse(input)
   if (!parsed.success) {
     const first = parsed.error.issues[0]
     return {
@@ -1533,34 +1451,136 @@ export async function adjustRentalSchedule(
     }
   }
 
-  const { data: count, error } = await supabase.rpc('adjust_rental_schedule', {
-    p_tenant_id:      tenantId,
-    p_rental_id:      parsed.data.rental_id,
-    p_new_amount:     parsed.data.new_amount,
-    p_effective_from: parsed.data.effective_from,
-    p_justification:  parsed.data.justification,
-    p_adjusted_by:    user.id,
+  const ctx = await loadPeriodAdjustmentContext(supabase, tenantId, parsed.data.rental_id)
+  if (!ctx) return { ok: false, error: { code: 'NOT_FOUND', message: 'Locação não encontrada ou sem ciclo definido.' } }
+  if (ctx.rental.status !== 'active') {
+    return { ok: false, error: { code: 'RENTAL_NOT_ACTIVE', message: 'Locação não está ativa.' } }
+  }
+
+  const plan = planPeriodAdjustment({
+    current:        ctx.rental.params,
+    next: {
+      start_date:   parsed.data.start_date,
+      end_date:     parsed.data.end_date,
+      cycle:        parsed.data.cycle,
+      due_day:      parsed.data.due_day,
+      cycle_amount: parsed.data.cycle_amount,
+      use_pro_rata: parsed.data.use_pro_rata,
+    },
+    contract_type:  ctx.rental.contract_type,
+    lines:          ctx.lines,
+    charges:        ctx.charges,
+    effective_from: parsed.data.effective_from,
+    today:          ctx.today,
+    has_signed_contract: !!ctx.rental.signed_contract_path,
+    other_rentals:  ctx.other_rentals,
+  })
+
+  // Reconferido no servidor sobre o estado ATUAL do banco, não sobre o que a
+  // tela leu: entre a prévia e o clique cabe o job de emissão e um webhook de
+  // pagamento.
+  if (plan.blockers.length > 0) {
+    return { ok: false, error: { code: 'CONFLICT', message: plan.blockers[0]!.message } }
+  }
+  if (plan.changed_fields.length === 0) {
+    return { ok: false, error: { code: 'VALIDATION_ERROR', message: 'Nenhuma condição foi alterada.' } }
+  }
+
+  // Cancelar antes de mexer no plano, e não depois: `cancelCharge` estorna o
+  // lançamento de emissão no razão e encerra o código de pagamento no gateway,
+  // e recusa cobrança com dinheiro alocado. Falha aqui deixa o contrato como
+  // estava — o plano só muda no passo seguinte, que reconfere.
+  for (const charge of plan.cancel_charges) {
+    try {
+      await cancelCharge(
+        supabase, tenantId, charge.charge_id,
+        `Ajuste de período da locação: ${parsed.data.justification}`,
+        user.id,
+      )
+      await logAction({
+        action: 'update',
+        table: 'charges',
+        recordId: charge.charge_id,
+        newData: { status: 'cancelled', reason: 'rental_period_adjustment' },
+      })
+    } catch (err) {
+      return {
+        ok: false,
+        error: {
+          code: 'INTERNAL_ERROR',
+          message: `Falha ao cancelar a cobrança #${charge.charge_number}: ${String(err)}. Nada foi alterado no contrato.`,
+        },
+      }
+    }
+  }
+
+  const { data: result, error } = await supabase.rpc('fn_adjust_rental_period', {
+    p_tenant_id:          tenantId,
+    p_rental_id:          parsed.data.rental_id,
+    p_params: {
+      start_date:   parsed.data.start_date,
+      end_date:     parsed.data.end_date,
+      cycle:        parsed.data.cycle,
+      due_day:      parsed.data.due_day,
+      cycle_amount: parsed.data.cycle_amount,
+      use_pro_rata: parsed.data.use_pro_rata,
+    },
+    p_effective_from:     parsed.data.effective_from,
+    p_supersede_line_ids: plan.supersede_lines.map((l) => l.id),
+    p_new_lines:          plan.new_lines.map((l) => ({
+      sequence_number: l.sequence_number,
+      period_start:    l.period_start,
+      period_end:      l.period_end,
+      due_date:        l.due_date,
+      amount:          l.amount,
+    })),
+    p_justification:      parsed.data.justification,
+    p_adjusted_by:        user.id,
   })
 
   if (error) {
-    if (error.message?.includes('RENTAL_NOT_FOUND')) {
-      return { ok: false, error: { code: 'NOT_FOUND', message: 'Locação não encontrada.' } }
+    if (error.message?.includes('RENTAL_NOT_ACTIVE')) {
+      return { ok: false, error: { code: 'RENTAL_NOT_ACTIVE', message: 'Locação não está ativa.' } }
+    }
+    if (error.message?.includes('VEHICLE_PERIOD_OVERLAP')) {
+      return { ok: false, error: { code: 'CONFLICT', message: vehicleOverlapMessage(error.message) } }
+    }
+    if (error.message?.includes('LINE_HAS_LIVE_CHARGE')) {
+      return {
+        ok: false,
+        error: {
+          code: 'CONFLICT',
+          message: 'Uma cobrança do período foi emitida enquanto você preenchia o formulário. Recarregue a tela e confira a prévia de novo.',
+        },
+      }
     }
     return { ok: false, error: { code: 'INTERNAL_ERROR', message: error.message } }
   }
 
-  const updated = (count as number | null) ?? 0
+  const summary = (result ?? { superseded: 0, created: 0, cancelled: 0 }) as {
+    superseded: number; created: number; cancelled: number
+  }
 
   await logAction({
     action: 'update',
-    table: 'rental_billing_schedules',
+    table: 'rentals',
     recordId: parsed.data.rental_id,
-    newData: { new_amount: parsed.data.new_amount, updated_lines: updated },
+    oldData: ctx.rental.params,
+    newData: {
+      start_date:   parsed.data.start_date,
+      end_date:     parsed.data.end_date,
+      cycle:        parsed.data.cycle,
+      due_day:      parsed.data.due_day,
+      cycle_amount: parsed.data.cycle_amount,
+      use_pro_rata: parsed.data.use_pro_rata,
+      effective_from: parsed.data.effective_from,
+      ...summary,
+    },
   })
 
   revalidateRentalPaths()
   revalidatePath(`/locacoes/${parsed.data.rental_id}`)
   revalidatePath(`/locacoes/${parsed.data.rental_id}/financeiro`)
-  return { ok: true, data: { updated_lines: updated } }
+  revalidatePath('/veiculos')
+  return { ok: true, data: summary }
 }
-

@@ -446,6 +446,10 @@ export async function listRentalSchedule(
     .from('rental_billing_schedules')
     .select('*')
     .eq('rental_id', rentalId)
+    // Cronológica: depois de um ajuste de período (ADR 0035) a numeração das
+    // linhas novas continua de onde parou, então ela deixa de ser ordem de
+    // tempo.
+    .order('period_start', { ascending: true })
     .order('sequence_number', { ascending: true })
 
   if (error) throw error
