@@ -123,6 +123,10 @@ test.describe('Encerramento antecipado preserva garantias emitidas (RN-003)', ()
     await page.goto(`/locacoes/${rentalId}/encerrar`)
     await waitForPageLoad(page)
     await page.locator('input[type=date]').first().fill('2026-08-20')
+    // Spec 0014: km final é obrigatório em todo encerramento. O veículo de
+    // teste nasce com km_current = 0 e a locação não passa km_initial — 0
+    // satisfaz o piso.
+    await page.locator('input[type=number]').first().fill('0')
 
     // A apuração é carregada por hook: espera o valor em aberto aparecer antes
     // de procurar a confirmação. Sem isso o teste lê a tela ainda vazia.
@@ -372,6 +376,8 @@ test.describe('Encerramento liquida a caução', () => {
     // Encerra retendo 300 e devolvendo 500.
     await page.goto(`/locacoes/${rId}/encerrar`)
     await waitForPageLoad(page)
+    // Spec 0014: km final é obrigatório em todo encerramento.
+    await page.locator('input[type=number]').first().fill('0')
 
     await expect(page.getByText('Destino da caução')).toBeVisible({ timeout: 10_000 })
     // O rótulo mudou de "Reter parte" para "Abater parte da dívida" (ADR 0026):

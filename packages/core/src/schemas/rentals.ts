@@ -22,6 +22,10 @@ export const RentalSchema = z.object({
   start_date:         dateString,
   end_date:           dateString,
   use_pro_rata:       z.boolean().default(true),
+  // Km do veículo na entrega (Spec 0014, RN-004) — congelado na criação,
+  // fonte do km impresso no contrato (RF-004). Validado contra o km atual do
+  // veículo (RN-002) pela RPC, que é quem trava a linha do veículo.
+  km_initial:         z.number().int().nonnegative({ error: 'Km inicial inválido' }),
   security_deposit:   z.number().min(0).nullable().optional(),
   // Se a caução já foi paga no momento da criação (default true — cobrança
   // nasce 'paid'). Se false, gera cobrança 'pending' aguardando pagamento.
@@ -120,6 +124,11 @@ export const TerminateRentalSchema = z.object({
    * encerramento, não consequência.
    */
   force:            z.boolean().optional().default(false),
+  // Km do veículo na devolução (Spec 0014, RN-004) — exigido em TODO
+  // encerramento, mesmo de locação criada antes desta feature (km_initial
+  // nulo). Validado contra o km atual do veículo e contra km_initial (RN-002
+  // + RN-003) pela RPC, que é quem trava a linha do veículo.
+  km_final:         z.number().int().nonnegative({ error: 'Km final inválido' }),
 })
 
 export type TerminateRental = z.infer<typeof TerminateRentalSchema>

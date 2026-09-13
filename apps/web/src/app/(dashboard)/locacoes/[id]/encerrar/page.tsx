@@ -15,7 +15,7 @@ export default async function TerminateRentalPage({
 
   const { data, error } = await supabase
     .from('rentals')
-    .select('*, customer:customers(id,name), vehicle:vehicles(id,license_plate,make,model)')
+    .select('*, customer:customers(id,name), vehicle:vehicles(id,license_plate,make,model,km_current)')
     .eq('id', id)
     .eq('tenant_id', tenantId)
     .single()

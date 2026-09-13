@@ -129,6 +129,15 @@ export function displayPeriodEnd(periodEndIso: string): string {
 }
 
 // ---------------------------------------------------------------------------
+// Registro de KM (Spec 0014)
+// ---------------------------------------------------------------------------
+
+/** RN-002 + RN-003: piso do km final — o maior entre o km atual do veículo e o km inicial da locação. */
+export function minimumFinalKm(vehicleKmCurrent: number, rentalKmInitial: number): number {
+  return Math.max(vehicleKmCurrent, rentalKmInitial)
+}
+
+// ---------------------------------------------------------------------------
 // Vigência de locações
 // ---------------------------------------------------------------------------
 

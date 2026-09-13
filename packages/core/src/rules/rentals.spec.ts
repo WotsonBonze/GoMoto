@@ -12,6 +12,7 @@ import {
   RENTAL_MINIMUM_DURATION,
   rentalPeriodsOverlap,
   displayPeriodEnd,
+  minimumFinalKm,
 } from './rentals'
 import { RentalSchema, RenewRentalSchema, TerminateRentalSchema } from '../schemas/rentals'
 import type { CycleCharge } from './rentals'
@@ -321,6 +322,7 @@ describe('RentalSchema', () => {
     start_date:     '2025-01-01',
     end_date:       '2025-12-01',
     use_pro_rata:   true,
+    km_initial:     8000,
   }
 
   it('valida dados corretos', () => {
@@ -346,6 +348,27 @@ describe('RentalSchema', () => {
   it('rejeita contract_type inválido', () => {
     const result = RentalSchema.safeParse({ ...validRental, contract_type: 'loyalty' })
     expect(result.success).toBe(false)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// minimumFinalKm (Spec 0014, RN-002 + RN-003)
+// ---------------------------------------------------------------------------
+
+describe('minimumFinalKm', () => {
+  it('retorna o km do veículo quando ele é maior que o km inicial da locação', () => {
+    expect(minimumFinalKm(15000, 12000)).toBe(15000)
+  })
+
+  it('retorna o km inicial da locação quando ele é maior que o km atual do veículo', () => {
+    // Ex.: outro trabalho registrou km no veículo entre a criação e o encerramento,
+    // mas depois voltou a cair — o piso não pode ser menor que o que a própria
+    // locação já registrou na entrega.
+    expect(minimumFinalKm(10000, 12000)).toBe(12000)
+  })
+
+  it('empate: retorna o valor comum', () => {
+    expect(minimumFinalKm(12000, 12000)).toBe(12000)
   })
 })
 

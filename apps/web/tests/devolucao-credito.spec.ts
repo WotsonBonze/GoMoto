@@ -191,6 +191,7 @@ test.describe('Encerramento apura o crédito', () => {
       p_termination_date: hoje(),
       p_new_status: 'closed',
       p_force: true,
+      p_km_final: 0,
     })
     expect(error, error?.message).toBeNull()
 

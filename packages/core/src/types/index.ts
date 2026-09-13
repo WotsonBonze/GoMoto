@@ -412,6 +412,10 @@ export interface Rental {
   end_date?: string | null;
   /** @deprecated Use cycle_amount. */
   monthly_amount?: number | null;
+  /** Km do veículo na entrega, congelado na criação (Spec 0014, RF-004). `null` em locação anterior a esta feature. */
+  km_initial?: number | null;
+  /** Km do veículo na devolução, gravado no encerramento (Spec 0014). */
+  km_final?: number | null;
   status: 'active' | 'closed' | 'transferred';
   observations?: string | null;
   contract_template_id?: string | null;

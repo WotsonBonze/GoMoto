@@ -126,6 +126,7 @@ export default async function RentalContractTab({
             start_date: rental.start_date ?? '',
             end_date: rental.end_date ?? '',
             security_deposit: deposit?.amount ?? null,
+            km_initial: rental.km_initial,
           }}
           tenantName={tenantName}
         />

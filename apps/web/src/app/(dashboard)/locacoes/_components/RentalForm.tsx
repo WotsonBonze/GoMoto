@@ -41,6 +41,7 @@ type FormState = {
   start_date:       string
   end_date:         string
   use_pro_rata:     boolean
+  km_initial:       string
   security_deposit: string
   down_payment:          string
   down_payment_due_date: string
@@ -110,6 +111,7 @@ function buildInitialForm(
     start_date:       d?.start_date ?? '',
     end_date:         d?.end_date ?? '',
     use_pro_rata:     d?.use_pro_rata ?? true,
+    km_initial:       d?.km_initial != null ? String(d.km_initial) : '',
     security_deposit: d?.security_deposit != null ? String(d.security_deposit) : '',
     down_payment:          d?.down_payment != null ? String(d.down_payment) : '',
     down_payment_due_date: d?.down_payment_due_date ?? '',
@@ -246,6 +248,7 @@ export function RentalForm({ rentalId, initialData, defaultCustomerId, tenantNam
           start_date:   form.start_date,
           end_date:     form.end_date,
           security_deposit: form.security_deposit ? parseFloat(form.security_deposit) : null,
+          km_initial:   form.km_initial ? parseInt(form.km_initial, 10) : null,
         },
         tenantName: tenantName ?? '',
       })
@@ -394,7 +397,8 @@ export function RentalForm({ rentalId, initialData, defaultCustomerId, tenantNam
 
   const isFormReady = Boolean(
     form.vehicle_id && form.customer_id && form.start_date && form.end_date &&
-    form.cycle_amount && form.due_day && form.end_date > form.start_date
+    form.cycle_amount && form.due_day && form.end_date > form.start_date &&
+    (isEditMode || form.km_initial !== '')
   )
 
   function validateStep() {
@@ -407,6 +411,15 @@ export function RentalForm({ rentalId, initialData, defaultCustomerId, tenantNam
       errors.end_date = 'Data de fim deve ser posterior ao início'
     if (!form.cycle_amount || parseFloat(form.cycle_amount) <= 0)
       errors.cycle_amount = 'Informe o valor do ciclo'
+    if (!isEditMode) {
+      const km = parseInt(form.km_initial, 10)
+      const vehicleKm = vehicles.find(v => v.id === form.vehicle_id)?.km_current ?? 0
+      if (form.km_initial === '' || isNaN(km) || km < 0) {
+        errors.km_initial = 'Informe o km inicial'
+      } else if (km < vehicleKm) {
+        errors.km_initial = `Km não pode ser menor que ${vehicleKm.toLocaleString('pt-BR')} (km atual do veículo)`
+      }
+    }
     setFieldErrors(errors)
     return Object.keys(errors).length === 0
   }
@@ -455,6 +468,7 @@ export function RentalForm({ rentalId, initialData, defaultCustomerId, tenantNam
         start_date:       form.start_date,
         end_date:         form.end_date,
         use_pro_rata:     form.use_pro_rata,
+        km_initial:       parseInt(form.km_initial, 10),
         security_deposit:     form.security_deposit ? parseFloat(form.security_deposit) : null,
         deposit_paid:         depositPaid,
         deposit_payment_date: depositPaid ? depositPaymentDate : undefined,
@@ -604,7 +618,18 @@ export function RentalForm({ rentalId, initialData, defaultCustomerId, tenantNam
                     <select
                       className={fieldErrors.vehicle_id ? inputErrCls : selectCls}
                       value={form.vehicle_id}
-                      onChange={e => set('vehicle_id', e.target.value)}
+                      onChange={e => {
+                        const vehicleId = e.target.value
+                        const vehicle = vehicles.find(v => v.id === vehicleId)
+                        setForm(f => ({
+                          ...f,
+                          vehicle_id: vehicleId,
+                          // Pré-preenchido com o km atual do veículo — editável,
+                          // mas evita o operador digitar do zero o caso comum
+                          // (entrega no mesmo km que o veículo já registra).
+                          km_initial: vehicle?.km_current != null ? String(vehicle.km_current) : f.km_initial,
+                        }))
+                      }}
                     >
                       <option value="">Selecione um veículo…</option>
                       {vehicles.map(v => (
@@ -617,6 +642,27 @@ export function RentalForm({ rentalId, initialData, defaultCustomerId, tenantNam
                       <p className="mt-1 text-[12px] text-danger">{fieldErrors.vehicle_id}</p>
                     )}
                   </div>
+                </div>
+              )}
+              {!isEditMode && form.vehicle_id && (
+                <div className="mt-4 max-w-xs">
+                  <label className={labelCls}>Km inicial *</label>
+                  <input
+                    type="number"
+                    min="0"
+                    step="1"
+                    placeholder="Km do veículo na entrega"
+                    className={fieldErrors.km_initial ? inputErrCls : inputCls}
+                    value={form.km_initial}
+                    onChange={e => set('km_initial', e.target.value)}
+                  />
+                  {fieldErrors.km_initial ? (
+                    <p className="mt-1 text-[12px] text-danger">{fieldErrors.km_initial}</p>
+                  ) : (
+                    <p className="mt-1 text-[12px] text-fg-mute">
+                      Km do veículo no momento da entrega — é o km impresso no contrato.
+                    </p>
+                  )}
                 </div>
               )}
             </section>
@@ -1074,6 +1120,7 @@ export function RentalForm({ rentalId, initialData, defaultCustomerId, tenantNam
                   ['Início', form.start_date ? formatDate(form.start_date) : '—'],
                   ['Fim',    form.end_date   ? formatDate(form.end_date)   : '—'],
                   ['Pro rata',    form.use_pro_rata ? 'Sim' : 'Não'],
+                  ['Km inicial',  form.km_initial ? `${parseInt(form.km_initial, 10).toLocaleString('pt-BR')} km` : '—'],
                   ...(form.security_deposit
                     ? [['Caução', formatCurrency(parseFloat(form.security_deposit))]]
                     : []),

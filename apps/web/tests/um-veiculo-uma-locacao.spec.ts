@@ -61,6 +61,11 @@ async function encerrar(rentalId: string, em: string) {
     p_termination_date: em,
     p_new_status: 'closed',
     p_force: true,
+    // Spec 0014: km_final é obrigatório em todo encerramento. O teste aqui é
+    // sobre período/sobreposição, não sobre km — 0 satisfaz o piso porque os
+    // veículos de teste nascem com km_current = 0 e as locações destes specs
+    // não passam km_initial.
+    p_km_final: 0,
   })
   if (error) throw new Error(`Setup falhou ao encerrar: ${error.message}`)
 }

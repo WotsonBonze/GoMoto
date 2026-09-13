@@ -9,6 +9,7 @@ import { useRentalOpenCharges, useDepositBalance, useRentalSchedule, useCustomer
 import {
   getEarlyTerminationImpact,
   CONTRACT_TERMINATION_FINE_BRL,
+  minimumFinalKm,
 } from '@gomoto/core'
 import type { Rental } from '@gomoto/core'
 import { formatCurrency, formatDate } from '@/lib/utils'
@@ -59,6 +60,14 @@ export function TerminateForm({ rental }: TerminateFormProps) {
     rental.end_date && rental.end_date < hoje ? rental.end_date : hoje,
   )
   const [error, setError] = useState('')
+
+  // Km final (Spec 0014, RN-002 + RN-003 + RN-004) — obrigatório em todo
+  // encerramento, mesmo de locação anterior a esta feature (km_initial nulo
+  // entra como 0 no piso). Atualiza vehicles.km_current na mesma transação.
+  const [kmFinal, setKmFinal] = useState('')
+  const pisoKm = minimumFinalKm(rental.vehicle?.km_current ?? 0, rental.km_initial ?? 0)
+  const kmFinalNumero = kmFinal === '' ? null : Number(kmFinal)
+  const kmFinalInvalido = kmFinalNumero === null || isNaN(kmFinalNumero) || kmFinalNumero < pisoKm
 
   // Spec 0014: a apuração passa a olhar três coisas distintas — o que foi
   // emitido e não pago, o saldo de caução, e o cronograma ainda não emitido.
@@ -257,12 +266,18 @@ export function TerminateForm({ rental }: TerminateFormProps) {
       return
     }
 
+    if (kmFinalInvalido || kmFinalNumero === null) {
+      setError(`Informe o km final — não pode ser menor que ${pisoKm.toLocaleString('pt-BR')} km.`)
+      return
+    }
+
     startTransition(async () => {
       const result = await terminateRental({
         lease_id:         rental.id,
         termination_date: terminationDate,
         new_status:       newStatus,
         force,
+        km_final:         kmFinalNumero,
       })
       if (!result.ok) { setError(result.error.message); return }
 
@@ -334,7 +349,7 @@ export function TerminateForm({ rental }: TerminateFormProps) {
         <button
           type="button"
           onClick={handleConfirm}
-          disabled={isPending || !terminationDate || (openAmount > 0 && !force)}
+          disabled={isPending || !terminationDate || kmFinalInvalido || (openAmount > 0 && !force)}
           className="inline-flex h-8 items-center rounded-full bg-danger-bg px-5 text-[13px] font-bold text-danger transition-opacity hover:opacity-80 disabled:opacity-60"
         >
           {isPending ? 'Encerrando…' : 'Confirmar Encerramento'}
@@ -385,6 +400,31 @@ export function TerminateForm({ rental }: TerminateFormProps) {
                   Use uma data passada se a devolução foi antes do registro. Data futura não é
                   aceita: a locação encerra e o veículo é liberado no ato.
                 </p>
+              </div>
+            </section>
+
+            <section>
+              <h2 className="mb-3 text-[14px] font-bold text-primary">Km final</h2>
+              <div className="rounded-xl border border-divider bg-surface p-4">
+                <input
+                  type="number"
+                  min={pisoKm}
+                  step="1"
+                  placeholder={`Mínimo ${pisoKm.toLocaleString('pt-BR')}`}
+                  value={kmFinal}
+                  onChange={e => setKmFinal(e.target.value)}
+                  className="h-9 w-full rounded-lg border border-border bg-surface-2 px-3 text-[13px] text-fg outline-none transition-all focus:border-primary"
+                />
+                <p className="mt-2 text-[12px] leading-relaxed text-fg-mute">
+                  Km do veículo na devolução. Não pode ser menor que{' '}
+                  <strong className="font-medium text-fg-soft">{pisoKm.toLocaleString('pt-BR')} km</strong>
+                  {' '}(o maior entre o km atual do veículo e o km registrado na entrega desta locação).
+                </p>
+                {kmFinal !== '' && kmFinalInvalido && (
+                  <p className="mt-1 text-[12px] text-danger">
+                    Km não pode ser menor que {pisoKm.toLocaleString('pt-BR')}.
+                  </p>
+                )}
               </div>
             </section>
 

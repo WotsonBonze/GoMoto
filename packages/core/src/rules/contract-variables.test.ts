@@ -92,6 +92,30 @@ describe('resolveContractVariables', () => {
     expect(vars.caucao).toBe('Não há caução')
   })
 
+  // Spec 0014, RF-004: km_inicial precisa vir da LOCAÇÃO (congelado na
+  // entrega), não do veículo (mutável — muda a cada km rodado depois da
+  // entrega, o que fazia o PDF reimpresso mudar de km sozinho).
+  it('km_inicial usa rental.km_initial quando presente, mesmo diferente do km atual do veículo', () => {
+    const vars = resolveContractVariables({
+      ...baseInput,
+      vehicle: { ...baseInput.vehicle, km_current: 20000 },
+      rental: { ...baseInput.rental, km_initial: 12540 },
+    })
+    expect(vars.km_inicial).toBe('12.540')
+  })
+
+  // Locação anterior a esta feature: km_initial é null no banco. Sem
+  // fallback, o contrato reimpresso sairia sem km — melhor exibir o km atual
+  // do veículo, como sempre exibiu, do que exibir vazio.
+  it('km_inicial cai no km atual do veículo quando rental.km_initial é null/ausente', () => {
+    const vars = resolveContractVariables({
+      ...baseInput,
+      vehicle: { ...baseInput.vehicle, km_current: 20000 },
+      rental: { ...baseInput.rental, km_initial: null },
+    })
+    expect(vars.km_inicial).toBe('20.000')
+  })
+
   it('ciclo semanal usa nome do dia da semana', () => {
     const vars = resolveContractVariables({
       ...baseInput,

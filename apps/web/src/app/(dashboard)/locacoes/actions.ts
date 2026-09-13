@@ -60,6 +60,21 @@ function vehicleOverlapMessage(raw: string): string {
     : 'O período cruza outra locação deste veículo. A moto não pode estar com dois clientes ao mesmo tempo.'
 }
 
+/**
+ * Recusa do banco quando o km informado é menor que o mínimo aceito
+ * (Spec 0014, RN-002/RN-003) — mesmo padrão de `vehicleOverlapMessage`.
+ */
+function kmBelowMinimumMessage(raw: string, field: 'km_initial' | 'km_final') {
+  const minimo = raw.split('minimo=')[1]?.trim()
+  return {
+    code: 'VALIDATION_ERROR' as const,
+    field,
+    message: minimo
+      ? `Km não pode ser menor que ${Number(minimo).toLocaleString('pt-BR')} (km atual do veículo).`
+      : 'Km informado é menor que o mínimo aceito.',
+  }
+}
+
 // ---------------------------------------------------------------------------
 // createRental — criação de locação com cobranças via RPC atômico
 // ---------------------------------------------------------------------------
@@ -193,6 +208,7 @@ export async function createRental(
       checkin_checkout_inspection_profile_id: parsed.data.checkin_checkout_inspection_profile_id ?? null,
       periodic_inspection_profile_id:         parsed.data.periodic_inspection_profile_id ?? null,
       periodic_inspection_frequency_days:     parsed.data.periodic_inspection_frequency_days ?? null,
+      km_initial:    parsed.data.km_initial,
     },
     p_schedule: schedule,
   })
@@ -214,6 +230,9 @@ export async function createRental(
     }
     if (error.message?.includes('VEHICLE_PERIOD_OVERLAP')) {
       return { ok: false, error: { code: 'CONFLICT', message: vehicleOverlapMessage(error.message) } }
+    }
+    if (error.message?.includes('KM_BELOW_MINIMUM')) {
+      return { ok: false, error: kmBelowMinimumMessage(error.message, 'km_initial') }
     }
     if (error.message?.includes('could not obtain lock')) {
       return { ok: false, error: { code: 'VEHICLE_LOCKED', message: 'Tente novamente em instantes.' } }
@@ -644,6 +663,7 @@ export async function terminateRental(
     p_termination_date: parsed.data.termination_date,
     p_new_status:       newStatus,
     p_force:            parsed.data.force ?? false,
+    p_km_final:         parsed.data.km_final,
   })
 
   if (error) {
@@ -658,6 +678,12 @@ export async function terminateRental(
           message: 'Há cobranças em aberto. Quite, cancele ou confirme o encerramento mesmo assim.',
         },
       }
+    }
+    if (error.message?.includes('KM_FINAL_REQUIRED')) {
+      return { ok: false, error: { code: 'VALIDATION_ERROR', field: 'km_final', message: 'Informe o km final.' } }
+    }
+    if (error.message?.includes('KM_BELOW_MINIMUM')) {
+      return { ok: false, error: kmBelowMinimumMessage(error.message, 'km_final') }
     }
     return { ok: false, error: { code: 'INTERNAL_ERROR', message: error.message } }
   }

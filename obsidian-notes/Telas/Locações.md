@@ -97,6 +97,17 @@ português. A prévia do `/ajustar` recebe as outras locações do veículo
 (`other_rentals`) e bloqueia antes do clique. O formulário de criação continua listando
 só veículos `available`, mas isso agora é conveniência, não a garantia.
 
+## Registro de KM (Spec 0014, 2026-09-12)
+
+Ver [[Specs/0014-registro-km-locacao]] para o detalhamento completo. Resumo para quem só mexe em tela:
+
+- **`RentalForm.tsx`** (criação): campo "Km inicial \*" aparece assim que um veículo é selecionado, pré-preenchido com `vehicle.km_current` — editável, pois o km real da entrega pode diferir do que o cadastro do veículo registra naquele momento. Entra no payload de `createRental` e na chamada de `resolveContractVariables` usada por "Gerar contrato" (o contrato ainda não existe no banco nesse ponto — por isso o valor vem do form, não de `rental.km_initial`).
+- **`TerminateForm.tsx`** (encerramento): campo "Km final" obrigatório, com piso calculado por `minimumFinalKm(vehicle.km_current, rental.km_initial)` (`@gomoto/core`) — o maior entre os dois. Bloqueia "Confirmar Encerramento" enquanto abaixo do piso; a RPC `terminate_rental` é a fonte de verdade (`KM_BELOW_MINIMUM`), o cálculo na tela é só feedback imediato.
+- **Detalhe (`(tabs)/page.tsx`)**: card "Veículo" exibe km inicial, km final e km rodado (`km_final - km_initial`). `—` quando `km_initial`/`km_final` são `null` — locação criada antes desta feature.
+- **Contrato**: a variável `{{km_inicial}}` deixou de resolver de `vehicle.km_current` (mutável — muda a cada km rodado depois da entrega) e passou a resolver de `rentals.km_initial` (congelado na criação). Corrige um bug real: o PDF reimpresso mudava de km sozinho conforme o veículo rodava. `vehicle.km_current` continua como fallback para locação anterior a esta feature (`km_initial` nulo).
+- **`km_final` é exigido em TODO encerramento**, inclusive de locação criada antes desta feature (`km_initial` nulo entra como 0 no piso) — decisão de escopo da Spec, sem carve-out para locação legada. Isso quebrou toda a suíte E2E que encerrava locação via RPC direta sem passar o campo nas fixtures — corrigido no mesmo PR (`p_km_final` acrescentado a cada chamada direta de `terminate_rental` em `apps/web/tests/`).
+- **Pegadinha de banco**: `terminate_rental` ganhou um parâmetro novo (`p_km_final`) — para o Postgres isso é uma função DIFERENTE, não uma substituição. `CREATE OR REPLACE FUNCTION` teria criado um segundo overload e deixado a versão de 5 parâmetros (sem exigir km) viva ao lado da nova. A migration precisa de `DROP FUNCTION IF EXISTS terminate_rental(UUID, UUID, DATE, TEXT, BOOLEAN)` antes do `CREATE OR REPLACE`, e — como o `DROP` também apaga as concessões (ADR 0034) — de `GRANT EXECUTE ... TO authenticated, service_role` explícito depois, ou `authenticated` perde a capacidade de encerrar locação em silêncio.
+
 ## Bug de cobrança em dobro no primeiro ciclo (corrigido 2026-09-10)
 
 Achado enquanto se escrevia o teste do ajuste. Com `use_pro_rata: false`, quando o
