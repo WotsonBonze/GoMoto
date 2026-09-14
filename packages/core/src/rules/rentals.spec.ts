@@ -5,6 +5,7 @@ import {
   isRentalTerminationWithinMinimum,
   calculateMinimumEndDateForRental,
   getEarlyTerminationImpact,
+  isWithinConfiguredMinimumTerm,
   calculateAdjustedBillingAmount,
   previewRentalAdjustment,
   computeScheduleRegenerationCutoff,
@@ -269,7 +270,36 @@ describe('calculateMinimumEndDateForRental', () => {
 })
 
 // ---------------------------------------------------------------------------
-// getEarlyTerminationImpact
+// isWithinConfiguredMinimumTerm (Spec 0015)
+// ---------------------------------------------------------------------------
+
+describe('isWithinConfiguredMinimumTerm', () => {
+  it('true quando hoje é anterior a start_date + minimum_term_days', () => {
+    const today = new Date('2026-02-01')
+    expect(isWithinConfiguredMinimumTerm({ start_date: '2026-01-01', minimum_term_days: 90 }, today)).toBe(true)
+  })
+
+  it('false exatamente na data-limite (start_date + minimum_term_days) — CA-006', () => {
+    // T00:00:00 explícito: sem ele, "2026-04-01" é parseado como UTC e vira
+    // 31/03 no horário de Brasília — o mesmo cuidado de parseIsoDate().
+    const today = new Date('2026-04-01T00:00:00') // 2026-01-01 + 90 dias
+    expect(isWithinConfiguredMinimumTerm({ start_date: '2026-01-01', minimum_term_days: 90 }, today)).toBe(false)
+  })
+
+  it('false depois da data-limite', () => {
+    const today = new Date('2026-05-01')
+    expect(isWithinConfiguredMinimumTerm({ start_date: '2026-01-01', minimum_term_days: 90 }, today)).toBe(false)
+  })
+
+  it('false quando minimum_term_days é null/undefined (RN-003)', () => {
+    const today = new Date('2026-01-15')
+    expect(isWithinConfiguredMinimumTerm({ start_date: '2026-01-01', minimum_term_days: null }, today)).toBe(false)
+    expect(isWithinConfiguredMinimumTerm({ start_date: '2026-01-01', minimum_term_days: undefined }, today)).toBe(false)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// getEarlyTerminationImpact (Spec 0015: fine/prazo mínimo por locação)
 // ---------------------------------------------------------------------------
 
 describe('getEarlyTerminationImpact', () => {
@@ -279,30 +309,44 @@ describe('getEarlyTerminationImpact', () => {
     { due_date: '2025-03-10', status: 'pending' },
     { due_date: '2025-04-10', status: 'pending' },
   ]
+  const fineConfig = { early_termination_fine_amount: 1000, minimum_term_days: 90 }
 
   it('conta cobranças vencidas e futuras corretamente', () => {
     const today = new Date('2025-02-15')
-    const impact = getEarlyTerminationImpact(charges, today, '2025-01-01', 'rental')
+    const impact = getEarlyTerminationImpact(charges, today, '2025-01-01', fineConfig)
     // jan/10 e fev/10 são passadas; mar/10 e abr/10 são futuras
     expect(impact.overdue_count).toBe(2)
     expect(impact.future_count).toBe(2)
   })
 
-  it('within_minimum = true se dentro do período mínimo (rental)', () => {
-    const today = new Date('2025-02-15')  // 45 dias, < 3 meses
-    const impact = getEarlyTerminationImpact(charges, today, '2025-01-01', 'rental')
+  it('within_minimum = true e fine_amount = valor configurado, dentro do prazo', () => {
+    const today = new Date('2025-02-15')  // 45 dias, < 90
+    const impact = getEarlyTerminationImpact(charges, today, '2025-01-01', fineConfig)
     expect(impact.within_minimum).toBe(true)
+    expect(impact.fine_amount).toBe(1000)
   })
 
-  it('fine_amount > 0 quando within_minimum = true', () => {
+  it('fine_amount = 0 quando fora do prazo mínimo, mesmo com config', () => {
+    const today = new Date('2025-05-01')  // > 90 dias
+    const impact = getEarlyTerminationImpact(charges, today, '2025-01-01', fineConfig)
+    expect(impact.within_minimum).toBe(false)
+    expect(impact.fine_amount).toBe(0)
+  })
+
+  it('fine_amount = 0 quando não há multa configurada, mesmo dentro do prazo (RN-003)', () => {
     const today = new Date('2025-02-15')
-    const impact = getEarlyTerminationImpact(charges, today, '2025-01-01', 'rental')
-    expect(impact.fine_amount).toBeGreaterThan(0)
+    const impact = getEarlyTerminationImpact(charges, today, '2025-01-01', {
+      early_termination_fine_amount: null, minimum_term_days: 90,
+    })
+    expect(impact.fine_amount).toBe(0)
   })
 
-  it('fine_amount = 0 quando beyond minimum period', () => {
-    const today = new Date('2025-05-01')  // > 3 meses
-    const impact = getEarlyTerminationImpact(charges, today, '2025-01-01', 'rental')
+  it('fine_amount = 0 quando não há prazo mínimo configurado (RN-003)', () => {
+    const today = new Date('2025-02-15')
+    const impact = getEarlyTerminationImpact(charges, today, '2025-01-01', {
+      early_termination_fine_amount: 1000, minimum_term_days: null,
+    })
+    expect(impact.within_minimum).toBe(false)
     expect(impact.fine_amount).toBe(0)
   })
 })

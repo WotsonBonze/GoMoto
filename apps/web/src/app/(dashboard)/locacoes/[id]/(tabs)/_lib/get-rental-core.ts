@@ -16,6 +16,8 @@ export type RentalCore = {
   use_pro_rata: boolean | null
   km_initial: number | null
   km_final: number | null
+  early_termination_fine_amount: number | null
+  minimum_term_days: number | null
   observations: string | null
   contract_template_id: string | null
   signed_contract_path: string | null

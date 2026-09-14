@@ -1,6 +1,7 @@
 import Link from 'next/link'
 import type { SupabaseClient } from '@supabase/supabase-js'
 import { CONTRACT_CUSTOMER_FIELDS, CONTRACT_VEHICLE_FIELDS, warnMissingContractFields } from '@gomoto/core'
+import { formatCurrency } from '@/lib/utils'
 import { ContractPreviewPanel } from '../../../_components/ContractPreviewPanel'
 import { SignedContractUpload } from '../../../_components/SignedContractUpload'
 import { getRentalCore } from '../_lib/get-rental-core'
@@ -12,6 +13,31 @@ async function getSignedContractUrl(supabase: SupabaseClient, path: string | nul
   if (!path) return null
   const { data } = await supabase.storage.from(SIGNED_CONTRACT_BUCKET).createSignedUrl(path, 3600)
   return data?.signedUrl ?? null
+}
+
+/** Fim do prazo mínimo (Spec 0015, RN-001) — só para exibição, mesmo cálculo de `isWithinConfiguredMinimumTerm`. */
+function minimumTermEndDate(startDate: string | null, minimumTermDays: number | null): string | null {
+  if (!startDate || !minimumTermDays) return null
+  const d = new Date(`${startDate}T12:00:00`)
+  d.setDate(d.getDate() + minimumTermDays)
+  return d.toISOString().slice(0, 10)
+}
+
+/** Linha "Multa por rescisão antecipada" — só aparece se algum dos dois campos estiver configurado. */
+function earlyTerminationFineValue(
+  fineAmount: number | null, minimumTermDays: number | null, startDate: string | null,
+): string | null {
+  if (fineAmount == null && minimumTermDays == null) return null
+
+  const parts: string[] = []
+  parts.push(fineAmount != null ? formatCurrency(fineAmount) : 'valor não configurado')
+  if (minimumTermDays != null) {
+    const endDate = minimumTermEndDate(startDate, minimumTermDays)
+    parts.push(`prazo mínimo ${minimumTermDays} dia${minimumTermDays !== 1 ? 's' : ''}${endDate ? ` (até ${fmt(endDate)})` : ''}`)
+  } else {
+    parts.push('sem prazo mínimo configurado')
+  }
+  return parts.join(' · ')
 }
 
 export default async function RentalContractTab({
@@ -49,6 +75,9 @@ export default async function RentalContractTab({
   const adjustments = adjustmentsResult.data ?? []
   const signedContractUrl = await getSignedContractUrl(supabase, rental.signed_contract_path)
   const tenantName  = tenantResult.data?.legal_name ?? tenantResult.data?.name ?? ''
+  const earlyTerminationFine = earlyTerminationFineValue(
+    rental.early_termination_fine_amount, rental.minimum_term_days, rental.start_date,
+  )
 
   return (
     <section>
@@ -62,6 +91,7 @@ export default async function RentalContractTab({
               ['Início',      fmt(rental.start_date)],
               ['Fim',         fmt(rental.end_date)],
               ['Pro rata',    rental.use_pro_rata ? 'Sim' : 'Não'],
+              ...(earlyTerminationFine ? [['Multa por rescisão antecipada', earlyTerminationFine]] : []),
               ...(rental.observations ? [['Observações', rental.observations]] : []),
             ] as [string, string][]).map(([label, value]) => (
               <tr key={label} className="border-b border-divider last:border-0">

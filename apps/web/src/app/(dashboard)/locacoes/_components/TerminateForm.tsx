@@ -8,7 +8,7 @@ import { AlertTriangle, ChevronRight, Bike, CalendarX2, ReceiptText } from 'luci
 import { useRentalOpenCharges, useDepositBalance, useRentalSchedule, useCustomerCreditBalance } from '@gomoto/data'
 import {
   getEarlyTerminationImpact,
-  CONTRACT_TERMINATION_FINE_BRL,
+  isRentalTerminationWithinMinimum,
   minimumFinalKm,
 } from '@gomoto/core'
 import type { Rental } from '@gomoto/core'
@@ -137,15 +137,25 @@ export function TerminateForm({ rental }: TerminateFormProps) {
     return { count: lines.length, total: lines.reduce((s, l) => s + l.amount, 0) }
   }, [scheduleQuery.data, terminationDate])
 
+  // Spec 0015: multa e prazo mínimo agora são configuráveis por locação —
+  // `getEarlyTerminationImpact` lê a config da própria locação, não mais uma
+  // constante por contract_type. Só para feedback instantâneo: o valor e a
+  // elegibilidade finais são sempre recalculados de novo na RPC.
   const impact = useMemo(() => {
     if (!rental.start_date) return null
     return getEarlyTerminationImpact(
       openCharges.map(c => ({ due_date: c.due_date, status: 'pending' })),
       new Date(),
       rental.start_date,
-      rental.contract_type ?? 'rental',
+      {
+        early_termination_fine_amount: rental.early_termination_fine_amount,
+        minimum_term_days: rental.minimum_term_days,
+      },
     )
-  }, [openCharges, rental.start_date, rental.contract_type])
+  }, [openCharges, rental.start_date, rental.early_termination_fine_amount, rental.minimum_term_days])
+
+  const multaAplicavel = !!impact?.within_minimum && (impact?.fine_amount ?? 0) > 0
+  const multaValor = impact?.fine_amount ?? 0
 
   /** Encerrar com débito em aberto exige confirmação explícita (F-08). */
   const [force, setForce] = useState(false)
@@ -173,10 +183,26 @@ export function TerminateForm({ rental }: TerminateFormProps) {
    */
   const [creditEscolhido, setCreditAction] = useState<CreditAction | null>(null)
 
+  // Elegibilidade de transferência do rent_to_own (compra programada) — regra
+  // FIXA de 2 anos, independente da multa configurável (Spec 0015). Não usa
+  // `impact` (que agora é sobre a multa): repurpose-ar essa checagem quebraria
+  // a transferência de qualquer rent_to_own sem multa configurada.
   const newStatus =
-    rental.contract_type === 'rent_to_own' && impact && !impact.within_minimum
+    rental.contract_type === 'rent_to_own' &&
+    rental.start_date &&
+    !isRentalTerminationWithinMinimum({ start_date: rental.start_date, rental_type: 'rent_to_own' }, new Date())
       ? 'transferred'
       : 'closed'
+
+  /**
+   * Multa por rescisão antecipada (Spec 0015). RF-004: decisão explícita de
+   * cobrar ou não, antes de confirmar. `null` = ainda não decidido — o botão
+   * de confirmar fica bloqueado até o operador escolher (mesmo padrão de
+   * `force` para débito em aberto).
+   */
+  const [multaDecisao, setMultaDecisao] = useState<'charge' | 'skip' | null>(null)
+  const [multaCaucaoAmount, setMultaCaucaoAmount] = useState('')
+  const [multaCreditoAmount, setMultaCreditoAmount] = useState('')
 
   /**
    * Reter só existe contra dívida (ADR 0026, fase 3): sem dívida a caução é
@@ -245,6 +271,33 @@ export function TerminateForm({ rental }: TerminateFormProps) {
 
   const emAbertoFinal = Math.round(Math.max(0, emAbertoDepoisDaCaucao - creditoParaAbater) * 100) / 100
 
+  /**
+   * Destino da multa (Spec 0015, RF-006/RN-005/RN-006) — decisão PRÓPRIA,
+   * independente da dívida existente acima, mas compartilhando o mesmo saldo
+   * físico de caução/crédito: o que sobrou depois do que já foi destinado à
+   * dívida é o que fica disponível para a multa (a RPC confirma os dois
+   * abatimentos na mesma transação do encerramento; o que a dívida já
+   * reservou não pode ser contado de novo aqui).
+   */
+  const caucaoDisponivelParaMulta  = Math.max(0, Math.round((depositBalance - caucaoParaAbater) * 100) / 100)
+  const creditoDisponivelParaMulta = Math.max(0, Math.round((creditBalance - creditoParaAbater) * 100) / 100)
+
+  const multaCaucaoParaAbater = multaDecisao === 'charge'
+    ? Math.max(0, Math.min(
+        Math.round((Number(multaCaucaoAmount.replace(',', '.')) || 0) * 100) / 100,
+        caucaoDisponivelParaMulta,
+        multaValor,
+      ))
+    : 0
+  const multaCreditoParaAbater = multaDecisao === 'charge'
+    ? Math.max(0, Math.min(
+        Math.round((Number(multaCreditoAmount.replace(',', '.')) || 0) * 100) / 100,
+        creditoDisponivelParaMulta,
+        Math.round((multaValor - multaCaucaoParaAbater) * 100) / 100,
+      ))
+    : 0
+  const multaEmAberto = Math.round(Math.max(0, multaValor - multaCaucaoParaAbater - multaCreditoParaAbater) * 100) / 100
+
   function handleConfirm() {
     setError('')
 
@@ -271,6 +324,13 @@ export function TerminateForm({ rental }: TerminateFormProps) {
       return
     }
 
+    // RF-004: a decisão de cobrar ou não a multa é explícita — sem default,
+    // sem silêncio (RN-004: não pode ser desfeita depois de confirmada).
+    if (multaAplicavel && multaDecisao === null) {
+      setError('Decida se a multa por rescisão antecipada será cobrada.')
+      return
+    }
+
     startTransition(async () => {
       const result = await terminateRental({
         lease_id:         rental.id,
@@ -278,6 +338,9 @@ export function TerminateForm({ rental }: TerminateFormProps) {
         new_status:       newStatus,
         force,
         km_final:         kmFinalNumero,
+        charge_fine:          multaAplicavel && multaDecisao === 'charge',
+        fine_deposit_amount:  multaCaucaoParaAbater,
+        fine_credit_amount:   multaCreditoParaAbater,
       })
       if (!result.ok) { setError(result.error.message); return }
 
@@ -349,7 +412,7 @@ export function TerminateForm({ rental }: TerminateFormProps) {
         <button
           type="button"
           onClick={handleConfirm}
-          disabled={isPending || !terminationDate || kmFinalInvalido || (openAmount > 0 && !force)}
+          disabled={isPending || !terminationDate || kmFinalInvalido || (openAmount > 0 && !force) || (multaAplicavel && multaDecisao === null)}
           className="inline-flex h-8 items-center rounded-full bg-danger-bg px-5 text-[13px] font-bold text-danger transition-opacity hover:opacity-80 disabled:opacity-60"
         >
           {isPending ? 'Encerrando…' : 'Confirmar Encerramento'}
@@ -427,6 +490,93 @@ export function TerminateForm({ rental }: TerminateFormProps) {
                 )}
               </div>
             </section>
+
+            {multaAplicavel && (
+              <section>
+                <h2 className="mb-3 text-[14px] font-bold text-primary">Multa por rescisão antecipada</h2>
+                <div className="rounded-xl border border-divider bg-surface p-4">
+                  <p className="text-[12px] leading-relaxed text-fg-mute">
+                    Esta locação está dentro do prazo mínimo configurado — multa de{' '}
+                    <strong className="font-medium text-fg-soft">{formatCurrency(multaValor)}</strong> aplicável.
+                  </p>
+
+                  <div className="mt-3 flex flex-col gap-1">
+                    <label
+                      className={`flex h-9 cursor-pointer items-center gap-2.5 rounded-lg px-3 text-[13px] transition-colors ${
+                        multaDecisao === 'charge' ? 'bg-surface-2 text-fg' : 'text-fg-soft hover:bg-surface-2'
+                      }`}
+                    >
+                      <input
+                        type="radio"
+                        name="multa_decisao"
+                        checked={multaDecisao === 'charge'}
+                        onChange={() => setMultaDecisao('charge')}
+                        className="accent-primary"
+                      />
+                      Cobrar a multa
+                    </label>
+                    <label
+                      className={`flex h-9 cursor-pointer items-center gap-2.5 rounded-lg px-3 text-[13px] transition-colors ${
+                        multaDecisao === 'skip' ? 'bg-surface-2 text-fg' : 'text-fg-soft hover:bg-surface-2'
+                      }`}
+                    >
+                      <input
+                        type="radio"
+                        name="multa_decisao"
+                        checked={multaDecisao === 'skip'}
+                        onChange={() => setMultaDecisao('skip')}
+                        className="accent-primary"
+                      />
+                      Não cobrar a multa
+                    </label>
+                  </div>
+
+                  {multaDecisao === 'charge' && (
+                    <div className="mt-3 space-y-3 border-t border-divider pt-3">
+                      {caucaoDisponivelParaMulta > 0 && (
+                        <div>
+                          <label className="text-[12px] text-fg-mute" htmlFor="multa_caucao">
+                            Abater da caução (disponível {formatCurrency(caucaoDisponivelParaMulta)})
+                          </label>
+                          <input
+                            id="multa_caucao"
+                            type="number"
+                            step="0.01"
+                            min="0"
+                            max={Math.min(caucaoDisponivelParaMulta, multaValor)}
+                            value={multaCaucaoAmount}
+                            onChange={(e) => setMultaCaucaoAmount(e.target.value)}
+                            className="mt-1 h-9 w-full rounded-lg border border-border bg-bg px-3 text-[13px] text-fg outline-none focus:border-primary"
+                            placeholder="0,00"
+                          />
+                        </div>
+                      )}
+                      {creditoDisponivelParaMulta > 0 && (
+                        <div>
+                          <label className="text-[12px] text-fg-mute" htmlFor="multa_credito">
+                            Abater do crédito (disponível {formatCurrency(creditoDisponivelParaMulta)})
+                          </label>
+                          <input
+                            id="multa_credito"
+                            type="number"
+                            step="0.01"
+                            min="0"
+                            max={Math.min(creditoDisponivelParaMulta, Math.round((multaValor - multaCaucaoParaAbater) * 100) / 100)}
+                            value={multaCreditoAmount}
+                            onChange={(e) => setMultaCreditoAmount(e.target.value)}
+                            className="mt-1 h-9 w-full rounded-lg border border-border bg-bg px-3 text-[13px] text-fg outline-none focus:border-primary"
+                            placeholder="0,00"
+                          />
+                        </div>
+                      )}
+                      <p className="text-[12px] text-fg-mute">
+                        Restante vira cobrança em aberto: <strong className="font-medium text-fg-soft">{formatCurrency(multaEmAberto)}</strong>
+                      </p>
+                    </div>
+                  )}
+                </div>
+              </section>
+            )}
 
             {depositBalance > 0 && (
               <section>
@@ -799,12 +949,19 @@ export function TerminateForm({ rental }: TerminateFormProps) {
                   </li>
                 )}
 
-                {impact?.within_minimum && (
+                {multaAplicavel && (
                   <li className="flex items-start gap-3 px-4 py-3 text-[13px] text-warning">
                     <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
                     <span>
-                      Rescisão dentro da vigência mínima —{' '}
-                      <strong>multa contratual de {formatCurrency(CONTRACT_TERMINATION_FINE_BRL)} aplicável</strong>.
+                      Rescisão dentro do prazo mínimo configurado — multa de{' '}
+                      <strong>
+                        {formatCurrency(multaValor)}{' '}
+                        {multaDecisao === 'charge'
+                          ? 'será cobrada'
+                          : multaDecisao === 'skip'
+                            ? 'não será cobrada'
+                            : 'aplicável — decida ao lado'}
+                      </strong>.
                     </span>
                   </li>
                 )}

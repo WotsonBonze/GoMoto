@@ -98,3 +98,63 @@ describe('TerminateRentalSchema — km_final obrigatório (RN-004)', () => {
     expect(result.success).toBe(true)
   })
 })
+
+// ---------------------------------------------------------------------------
+// Multa por rescisão antecipada (Spec 0015)
+// ---------------------------------------------------------------------------
+
+describe('RentalSchema — multa/prazo mínimo opcionais (RF-001)', () => {
+  it('aceita payload sem early_termination_fine_amount/minimum_term_days', () => {
+    const result = RentalSchema.safeParse(base)
+    expect(result.success).toBe(true)
+  })
+
+  it('aceita ambos configurados', () => {
+    const result = RentalSchema.safeParse({
+      ...base, early_termination_fine_amount: 1000, minimum_term_days: 90,
+    })
+    expect(result.success).toBe(true)
+  })
+
+  it('rejeita early_termination_fine_amount <= 0', () => {
+    const result = RentalSchema.safeParse({ ...base, early_termination_fine_amount: 0 })
+    expect(result.success).toBe(false)
+  })
+
+  it('rejeita minimum_term_days <= 0', () => {
+    const result = RentalSchema.safeParse({ ...base, minimum_term_days: 0 })
+    expect(result.success).toBe(false)
+  })
+})
+
+describe('TerminateRentalSchema — decisão da multa (RF-004/RF-006/RN-005)', () => {
+  const baseTermination = {
+    lease_id: randomUUID(),
+    termination_date: '2026-06-01',
+    km_final: 15000,
+  }
+
+  it('charge_fine default é false, sem abatimentos', () => {
+    const result = TerminateRentalSchema.safeParse(baseTermination)
+    expect(result.success).toBe(true)
+    if (result.success) {
+      expect(result.data.charge_fine).toBe(false)
+      expect(result.data.fine_deposit_amount).toBe(0)
+      expect(result.data.fine_credit_amount).toBe(0)
+    }
+  })
+
+  it('rejeita abatimento de caução/crédito quando charge_fine = false', () => {
+    const result = TerminateRentalSchema.safeParse({
+      ...baseTermination, charge_fine: false, fine_deposit_amount: 100,
+    })
+    expect(result.success).toBe(false)
+  })
+
+  it('aceita abatimentos quando charge_fine = true', () => {
+    const result = TerminateRentalSchema.safeParse({
+      ...baseTermination, charge_fine: true, fine_deposit_amount: 400, fine_credit_amount: 100,
+    })
+    expect(result.success).toBe(true)
+  })
+})

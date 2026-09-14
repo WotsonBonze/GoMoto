@@ -49,6 +49,11 @@ export const RentalSchema = z.object({
   checkin_checkout_inspection_profile_id: z.string().uuid().nullable().optional(),
   periodic_inspection_profile_id:         z.string().uuid().nullable().optional(),
   periodic_inspection_frequency_days:     z.number().int().positive().nullable().optional(),
+  // Multa por rescisão antecipada e prazo mínimo de contrato (Spec 0015) —
+  // opcionais e configuráveis por locação; `null`/ausente = sem proteção
+  // configurada (RN-003), sem herdar valor fixo por tipo de contrato.
+  early_termination_fine_amount: z.number().positive({ error: 'Multa deve ser maior que zero' }).nullable().optional(),
+  minimum_term_days:             z.number().int().positive({ error: 'Prazo mínimo deve ser maior que zero dias' }).nullable().optional(),
 }).refine((d) => d.end_date > d.start_date, {
   message: 'Data de fim deve ser posterior à data de início',
   path: ['end_date'],
@@ -129,7 +134,18 @@ export const TerminateRentalSchema = z.object({
   // nulo). Validado contra o km atual do veículo e contra km_initial (RN-002
   // + RN-003) pela RPC, que é quem trava a linha do veículo.
   km_final:         z.number().int().nonnegative({ error: 'Km final inválido' }),
-})
+  // Multa por rescisão antecipada (Spec 0015): a decisão de cobrar é tomada
+  // no encerramento e não pode ser desfeita depois (RN-004). Os valores de
+  // abatimento só fazem sentido quando charge_fine = true — o valor total da
+  // multa e os tetos de saldo (RN-006) são recalculados e validados na RPC
+  // `terminate_rental`, nunca aqui (o Zod não conhece a config da locação).
+  charge_fine:          z.boolean().optional().default(false),
+  fine_deposit_amount:  z.number().min(0).optional().default(0),
+  fine_credit_amount:   z.number().min(0).optional().default(0),
+}).refine(
+  (d) => d.charge_fine || (d.fine_deposit_amount === 0 && d.fine_credit_amount === 0),
+  { message: 'Só é possível abater caução/crédito quando a multa é cobrada', path: ['charge_fine'] },
+)
 
 export type TerminateRental = z.infer<typeof TerminateRentalSchema>
 

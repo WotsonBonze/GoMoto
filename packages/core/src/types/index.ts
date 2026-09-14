@@ -416,6 +416,10 @@ export interface Rental {
   km_initial?: number | null;
   /** Km do veículo na devolução, gravado no encerramento (Spec 0014). */
   km_final?: number | null;
+  /** Multa por rescisão antecipada configurada para esta locação (Spec 0015). `null` = sem multa configurada (RN-003). */
+  early_termination_fine_amount?: number | null;
+  /** Prazo mínimo de vigência, em dias corridos a partir de start_date (Spec 0015, RN-001). `null` = sem prazo mínimo configurado. */
+  minimum_term_days?: number | null;
   status: 'active' | 'closed' | 'transferred';
   observations?: string | null;
   contract_template_id?: string | null;

@@ -209,6 +209,8 @@ export async function createRental(
       periodic_inspection_profile_id:         parsed.data.periodic_inspection_profile_id ?? null,
       periodic_inspection_frequency_days:     parsed.data.periodic_inspection_frequency_days ?? null,
       km_initial:    parsed.data.km_initial,
+      early_termination_fine_amount: parsed.data.early_termination_fine_amount ?? null,
+      minimum_term_days:             parsed.data.minimum_term_days ?? null,
     },
     p_schedule: schedule,
   })
@@ -361,7 +363,11 @@ export async function createRental(
     action: 'create',
     table: 'rentals',
     recordId: rentalId,
-    newData: { schedule_lines: schedule.length },
+    newData: {
+      schedule_lines: schedule.length,
+      early_termination_fine_amount: parsed.data.early_termination_fine_amount ?? null,
+      minimum_term_days: parsed.data.minimum_term_days ?? null,
+    },
   })
 
   // Remove da fila ao iniciar locação (best-effort).
@@ -385,7 +391,10 @@ export async function createRental(
 
 export async function updateRental(
   leaseId: string,
-  data: Pick<CreateRental, 'observations' | 'security_deposit' | 'down_payment' | 'down_payment_due_date'>,
+  data: Pick<CreateRental,
+    | 'observations' | 'security_deposit' | 'down_payment' | 'down_payment_due_date'
+    | 'early_termination_fine_amount' | 'minimum_term_days'
+  >,
 ): Promise<ActionResult<void>> {
   const supabase = await createClient()
   const { data: { user } } = await supabase.auth.getUser()
@@ -397,14 +406,30 @@ export async function updateRental(
   const updates: Record<string, unknown> = {}
   if (data.observations !== undefined) updates.observations = data.observations
 
+  // Spec 0015 (RF-008/RN-007): multa/prazo mínimo de locação já encerrada não
+  // pode ser alterada. A guarda `status='active'` vai na MESMA instrução que
+  // grava — 0 linhas afetadas é o sinal de recusa, sem SELECT prévio que
+  // deixaria uma janela entre checar e escrever.
+  const changesFineConfig = data.early_termination_fine_amount !== undefined || data.minimum_term_days !== undefined
+  if (data.early_termination_fine_amount !== undefined) updates.early_termination_fine_amount = data.early_termination_fine_amount
+  if (data.minimum_term_days !== undefined) updates.minimum_term_days = data.minimum_term_days
+
   if (Object.keys(updates).length > 0) {
-    const { error } = await supabase
+    let query = supabase
       .from('rentals')
       .update(updates)
       .eq('id', leaseId)
       .eq('tenant_id', tenantId)
 
+    if (changesFineConfig) query = query.eq('status', 'active')
+
+    const { data: updatedRows, error } = await query.select('id')
+
     if (error) return { ok: false, error: { code: 'INTERNAL_ERROR', message: error.message } }
+
+    if (changesFineConfig && (!updatedRows || updatedRows.length === 0)) {
+      return { ok: false, error: { code: 'CONFLICT', message: 'Locação já encerrada não pode ser alterada.' } }
+    }
   }
 
   // Caução agora vive na tabela `deposits` (migration 20260719000010)
@@ -566,7 +591,17 @@ export async function updateRental(
     }
   }
 
-  await logAction({ action: 'update', table: 'rentals', recordId: leaseId })
+  await logAction({
+    action: 'update',
+    table: 'rentals',
+    recordId: leaseId,
+    newData: changesFineConfig
+      ? {
+          early_termination_fine_amount: data.early_termination_fine_amount ?? null,
+          minimum_term_days: data.minimum_term_days ?? null,
+        }
+      : undefined,
+  })
   revalidateRentalPaths()
   revalidatePath(`/locacoes/${leaseId}`)
   return { ok: true, data: undefined }
@@ -619,6 +654,13 @@ export type RentalSettlement = {
   credit_balance: number
   cancelled_schedules: number
   requires_settlement: boolean
+  /** Spec 0015 — resumo da decisão da multa por rescisão antecipada. */
+  fine_eligible: boolean
+  fine_charged: boolean
+  fine_amount: number
+  fine_deposit_amount: number
+  fine_credit_amount: number
+  fine_charge_id: string | null
 }
 
 export async function terminateRental(
@@ -657,13 +699,22 @@ export async function terminateRental(
   // Spec 0014: a RPC agora APURA antes de encerrar e recusa débito em aberto
   // sem p_force. Antes, cancelava pendentes e liberava o veículo sem olhar
   // dívida nem caução (F-08).
+  //
+  // Spec 0015: a decisão da multa (cobrar? abater de quê?) entra na MESMA
+  // chamada — a RPC recalcula elegibilidade e valor a partir da própria
+  // locação e faz cobrança + abatimentos na mesma transação do encerramento
+  // (RN-009: falha parcial nunca deixa a locação encerrada com multa pela
+  // metade).
   const { data: settlement, error } = await supabase.rpc('terminate_rental', {
-    p_tenant_id:        tenantId,
-    p_rental_id:        parsed.data.lease_id,
-    p_termination_date: parsed.data.termination_date,
-    p_new_status:       newStatus,
-    p_force:            parsed.data.force ?? false,
-    p_km_final:         parsed.data.km_final,
+    p_tenant_id:            tenantId,
+    p_rental_id:            parsed.data.lease_id,
+    p_termination_date:     parsed.data.termination_date,
+    p_new_status:           newStatus,
+    p_force:                parsed.data.force ?? false,
+    p_km_final:             parsed.data.km_final,
+    p_charge_fine:          parsed.data.charge_fine,
+    p_fine_deposit_amount:  parsed.data.fine_deposit_amount,
+    p_fine_credit_amount:   parsed.data.fine_credit_amount,
   })
 
   if (error) {
@@ -685,14 +736,64 @@ export async function terminateRental(
     if (error.message?.includes('KM_BELOW_MINIMUM')) {
       return { ok: false, error: kmBelowMinimumMessage(error.message, 'km_final') }
     }
+    if (error.message?.includes('FINE_NOT_APPLICABLE')) {
+      return {
+        ok: false,
+        error: { code: 'CONFLICT', message: 'A multa não é mais aplicável a esta locação. Recarregue a página e tente novamente.' },
+      }
+    }
+    if (error.message?.includes('FINE_ALLOCATION_EXCEEDS_TOTAL')) {
+      return {
+        ok: false,
+        error: { code: 'VALIDATION_ERROR', field: 'fine_deposit_amount', message: 'A soma dos abatimentos não pode exceder o valor da multa.' },
+      }
+    }
+    if (error.message?.includes('AMOUNT_EXCEEDS_DEPOSIT')) {
+      return {
+        ok: false,
+        error: { code: 'VALIDATION_ERROR', field: 'fine_deposit_amount', message: 'Valor a abater da caução excede o saldo disponível.' },
+      }
+    }
+    if (error.message?.includes('AMOUNT_EXCEEDS_BALANCE')) {
+      return {
+        ok: false,
+        error: { code: 'VALIDATION_ERROR', field: 'fine_credit_amount', message: 'Valor a abater do crédito excede o saldo do cliente.' },
+      }
+    }
+    if (error.message?.includes('DEPOSIT_NOT_FOUND')) {
+      return {
+        ok: false,
+        error: { code: 'NOT_FOUND', field: 'fine_deposit_amount', message: 'Esta locação não tem caução em aberto para abater a multa.' },
+      }
+    }
+    console.error(JSON.stringify({
+      ts: new Date().toISOString(), level: 'error', action: 'rental.terminate_with_fine_failed',
+      tenant_id: tenantId, rental_id: parsed.data.lease_id, charge_fine: parsed.data.charge_fine,
+      error: error.message,
+    }))
     return { ok: false, error: { code: 'INTERNAL_ERROR', message: error.message } }
   }
 
-  await logAction({ action: 'update', table: 'rentals', recordId: parsed.data.lease_id })
+  const result = settlement as RentalSettlement
+
+  await logAction({
+    action: 'update',
+    table: 'rentals',
+    recordId: parsed.data.lease_id,
+    newData: {
+      fine_decision: {
+        charged: result.fine_charged,
+        amount: result.fine_amount,
+        deposit_amount: result.fine_deposit_amount,
+        credit_amount: result.fine_credit_amount,
+        charge_id: result.fine_charge_id,
+      },
+    },
+  })
   revalidateRentalPaths()
   revalidatePath('/veiculos')
   revalidatePath('/clientes')
-  return { ok: true, data: settlement as RentalSettlement }
+  return { ok: true, data: result }
 }
 
 // ---------------------------------------------------------------------------

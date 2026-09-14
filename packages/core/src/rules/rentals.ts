@@ -8,8 +8,16 @@
 // Constantes
 // ---------------------------------------------------------------------------
 
-export const CONTRACT_TERMINATION_FINE_BRL = 1000
-
+/**
+ * Spec 0015: NÃO usar para calcular a multa por rescisão antecipada — desde
+ * essa Spec, multa e prazo mínimo são configuráveis por locação
+ * (`rentals.early_termination_fine_amount`/`minimum_term_days`, ver
+ * `isWithinConfiguredMinimumTerm`). Esta constante segue existindo só para a
+ * elegibilidade de transferência de propriedade do `rent_to_own` (o
+ * encerramento vira `status='transferred'` em vez de `'closed'` quando o
+ * cliente já pagou os 2 anos) — uma regra alheia à multa, que este PRD nunca
+ * pediu para mudar.
+ */
 export const RENTAL_MINIMUM_DURATION = {
   rental:      { months: 3 },
   rent_to_own: { years: 2 },
@@ -514,26 +522,52 @@ export function generateCycleCharges(input: CycleChargeInput): CycleCharge[] {
 // EarlyTerminationImpact
 // ---------------------------------------------------------------------------
 
+/**
+ * Spec 0015: multa e prazo mínimo por rescisão antecipada são configuráveis
+ * por locação — `null`/`undefined` em qualquer um dos dois significa "sem
+ * configuração" (RN-003: nunca exibe nem cobra). Independente de
+ * `isRentalTerminationWithinMinimum` (que segue servindo só à elegibilidade
+ * de transferência do `rent_to_own`, ver comentário de `RENTAL_MINIMUM_DURATION`).
+ */
+export function isWithinConfiguredMinimumTerm(
+  input: { start_date: string; minimum_term_days: number | null | undefined },
+  today: Date = new Date(),
+): boolean {
+  if (input.minimum_term_days == null) return false
+
+  const todayMidnight = new Date(today)
+  todayMidnight.setHours(0, 0, 0, 0)
+
+  const start = parseIsoDate(input.start_date)
+  const minEnd = new Date(start)
+  minEnd.setDate(minEnd.getDate() + input.minimum_term_days)
+
+  return todayMidnight < minEnd
+}
+
 export interface EarlyTerminationImpact {
   /** Cobranças pendentes com due_date < today (permanecerão abertas). */
   overdue_count: number
   /** Cobranças pendentes com due_date >= today (serão canceladas). */
   future_count: number
-  /** Encerramento dentro da vigência mínima (multa aplicável). */
+  /** Encerramento dentro do prazo mínimo configurado (multa aplicável). */
   within_minimum: boolean
-  /** Valor da multa (R$ 1.000 se within_minimum, 0 caso contrário). */
+  /** Valor da multa configurada na locação, ou 0 se não aplicável/configurada. */
   fine_amount: number
 }
 
 /**
  * Calcula o impacto do encerramento antecipado de uma locação.
- * Usado pelo UI antes da confirmação (RF-037, RF-039).
+ * Usado pelo UI antes da confirmação (RF-003). A elegibilidade e o valor
+ * finais são sempre recalculados de novo no banco (`terminate_rental`,
+ * Spec 0015) — este cálculo é só para feedback instantâneo, nunca fonte de
+ * verdade.
  */
 export function getEarlyTerminationImpact(
   charges: Array<{ due_date: string; status: string }>,
   today: Date,
   startDate: string,
-  rentalType: RentalType = 'rental',
+  fineConfig: { early_termination_fine_amount?: number | null; minimum_term_days?: number | null },
 ): EarlyTerminationImpact {
   const todayMidnight = new Date(today)
   todayMidnight.setHours(0, 0, 0, 0)
@@ -548,16 +582,18 @@ export function getEarlyTerminationImpact(
     c => parseIsoDate(c.due_date).getTime() >= todayMidnight.getTime(),
   ).length
 
-  const within_minimum = isRentalTerminationWithinMinimum(
-    { start_date: startDate, rental_type: rentalType },
+  const within_minimum = isWithinConfiguredMinimumTerm(
+    { start_date: startDate, minimum_term_days: fineConfig.minimum_term_days },
     today,
   )
+
+  const hasFineConfigured = fineConfig.early_termination_fine_amount != null
 
   return {
     overdue_count,
     future_count,
     within_minimum,
-    fine_amount: within_minimum ? CONTRACT_TERMINATION_FINE_BRL : 0,
+    fine_amount: within_minimum && hasFineConfigured ? fineConfig.early_termination_fine_amount! : 0,
   }
 }
 

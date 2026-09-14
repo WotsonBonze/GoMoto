@@ -50,6 +50,10 @@ type FormState = {
   checkin_checkout_inspection_profile_id: string
   periodic_inspection_profile_id:         string
   periodic_inspection_frequency_days:     string
+  // Multa por rescisão antecipada e prazo mínimo de contrato (Spec 0015) —
+  // opcionais, configuráveis por locação.
+  early_termination_fine_amount: string
+  minimum_term_days:             string
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -120,6 +124,8 @@ function buildInitialForm(
     checkin_checkout_inspection_profile_id: '',
     periodic_inspection_profile_id:         '',
     periodic_inspection_frequency_days:     '',
+    early_termination_fine_amount: d?.early_termination_fine_amount != null ? String(d.early_termination_fine_amount) : '',
+    minimum_term_days:             d?.minimum_term_days != null ? String(d.minimum_term_days) : '',
   }
 }
 
@@ -442,6 +448,8 @@ export function RentalForm({ rentalId, initialData, defaultCustomerId, tenantNam
             down_payment:          form.down_payment ? parseFloat(form.down_payment) : null,
             down_payment_due_date: form.down_payment_due_date || undefined,
           } : {}),
+          early_termination_fine_amount: form.early_termination_fine_amount ? parseFloat(form.early_termination_fine_amount) : null,
+          minimum_term_days:             form.minimum_term_days ? parseInt(form.minimum_term_days, 10) : null,
         })
         if (!result.ok) { setGlobalError(result.error.message); return }
 
@@ -484,6 +492,8 @@ export function RentalForm({ rentalId, initialData, defaultCustomerId, tenantNam
         periodic_inspection_frequency_days:     form.periodic_inspection_profile_id && form.periodic_inspection_frequency_days
           ? parseInt(form.periodic_inspection_frequency_days, 10)
           : null,
+        early_termination_fine_amount: form.early_termination_fine_amount ? parseFloat(form.early_termination_fine_amount) : null,
+        minimum_term_days:             form.minimum_term_days ? parseInt(form.minimum_term_days, 10) : null,
       })
       if (!result.ok) { setGlobalError(result.error.message); return }
       router.push(`/locacoes/${result.data.lease_id}`)
@@ -706,6 +716,40 @@ export function RentalForm({ rentalId, initialData, defaultCustomerId, tenantNam
                     Para encerrar o contrato e liberar o veículo → <Link href={`/locacoes/${rentalId}/encerrar`} className="text-primary hover:underline">Encerrar</Link>.{' '}
                     Tipo, ciclo, dia de vencimento, início e pro rata não podem ser alterados — encerre esta locação e crie uma nova.
                   </p>
+
+                  {/* Multa/prazo mínimo (Spec 0015) — diferente do resto desta
+                      seção, continuam editáveis em locação ativa (RF-002). A
+                      Server Action recusa se a locação já foi encerrada. */}
+                  <div className="grid max-w-md grid-cols-2 gap-4 border-t border-divider pt-4">
+                    <div>
+                      <label className={labelCls}>Multa por rescisão antecipada (R$)</label>
+                      <input
+                        type="number"
+                        min="0"
+                        step="0.01"
+                        placeholder="0,00 — opcional"
+                        className={inputCls}
+                        value={form.early_termination_fine_amount}
+                        onChange={e => set('early_termination_fine_amount', e.target.value)}
+                      />
+                    </div>
+                    <div>
+                      <label className={labelCls}>Prazo mínimo (dias)</label>
+                      <input
+                        type="number"
+                        min="1"
+                        step="1"
+                        placeholder="Opcional"
+                        className={inputCls}
+                        value={form.minimum_term_days}
+                        onChange={e => set('minimum_term_days', e.target.value)}
+                      />
+                    </div>
+                  </div>
+                  <p className="text-[12px] text-fg-mute">
+                    Configuração opcional. Se preenchidos, o encerramento dentro do prazo mínimo
+                    exibe a multa e o operador decide, na hora, se cobra.
+                  </p>
                 </div>
               ) : (
                 <div className="space-y-4">
@@ -842,6 +886,39 @@ export function RentalForm({ rentalId, initialData, defaultCustomerId, tenantNam
                     />
                     Calcular pro rata na primeira e última cobranças
                   </label>
+
+                  {/* Multa por rescisão antecipada e prazo mínimo (Spec 0015) —
+                      opcionais, configuráveis por locação. */}
+                  <div className="grid max-w-md grid-cols-2 gap-4">
+                    <div>
+                      <label className={labelCls}>Multa por rescisão antecipada (R$)</label>
+                      <input
+                        type="number"
+                        min="0"
+                        step="0.01"
+                        placeholder="0,00 — opcional"
+                        className={inputCls}
+                        value={form.early_termination_fine_amount}
+                        onChange={e => set('early_termination_fine_amount', e.target.value)}
+                      />
+                    </div>
+                    <div>
+                      <label className={labelCls}>Prazo mínimo (dias)</label>
+                      <input
+                        type="number"
+                        min="1"
+                        step="1"
+                        placeholder="Opcional"
+                        className={inputCls}
+                        value={form.minimum_term_days}
+                        onChange={e => set('minimum_term_days', e.target.value)}
+                      />
+                    </div>
+                  </div>
+                  <p className="text-[12px] text-fg-mute">
+                    Configuração opcional. Se preenchidos, o encerramento dentro do prazo mínimo
+                    exibe a multa e o operador decide, na hora, se cobra.
+                  </p>
                 </div>
               )}
             </section>
