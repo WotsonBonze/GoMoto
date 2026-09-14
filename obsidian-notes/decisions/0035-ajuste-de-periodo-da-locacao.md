@@ -49,6 +49,21 @@ passa a exigir que o operador puxe a data para trás e veja a lista do que cai.
 
 A vigência **mínima** é o fim do último período cujo dinheiro já entrou. Antes
 dela não há ajuste: desfazer recebimento é estorno de pagamento, operação própria.
+Sem nenhuma cobrança de ciclo paga, não há piso nenhum — `min_effective_from` é `''`,
+que nunca bloqueia (comparação lexicográfica: qualquer data ISO real é "maior"). Caução
+e entrada nunca entram nessa conta: `loadPeriodAdjustmentContext` já filtra
+`source_module = 'rental'` ao carregar as cobranças que alimentam o cálculo.
+
+**Bug corrigido em 2026-09-15** (achado em produção): `minEffectiveFrom` usava
+`next.start_date` — a data nova que o operador está digitando — como *fallback*
+quando nada estava pago. Numa locação com todas as cobranças de ciclo em aberto
+(inadimplente há mais de um ano, só a caução paga) e o operador antecipando a
+vigência para regerar o cronograma inteiro, o piso "sem dado" coincidia, por
+acidente, com o próprio valor que ele tinha acabado de digitar — a mensagem "Há
+período já pago até 24/08/2025" aparecia para uma vigência sem nenhum centavo
+pago. Sintoma relatado como "caução/entrada bloqueiam o ajuste"; causa real era
+o fallback do piso, não as cobranças de garantia. Corrigido em TS puro
+(`packages/core`), sem migration — basta o deploy.
 
 ### Por que `superseded` e não `cancelled`
 

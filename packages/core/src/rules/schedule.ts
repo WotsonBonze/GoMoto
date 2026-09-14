@@ -185,6 +185,7 @@ export type PlannedScheduleLine = ScheduleLine & {
 export type PeriodAdjustmentPlan = {
   changed_fields: Array<keyof RentalScheduleParams>
   effective_from: string
+  /** '' quando nada foi pago — sem piso nenhum. Ver `minEffectiveFrom`. */
   min_effective_from: string
   default_effective_from: string
   /** Impedimentos: enquanto houver um, a operação não pode ser confirmada. */
@@ -236,11 +237,19 @@ function isLive(l: ScheduleLineRow): boolean {
  * Antes dela não há ajuste possível — mexer no plano exigiria cancelar uma
  * cobrança com pagamento alocado, e `cancelCharge` recusa (com razão: desfazer
  * recebimento é estorno de pagamento, operação própria e com tela própria).
+ *
+ * Sem NENHUMA cobrança de ciclo paga, não há piso nenhum: devolve `''`. Um
+ * `fallback` aqui já foi `next.start_date` — a data nova que o operador está
+ * digitando — e isso produzia um piso que coincidia, por acidente, com o
+ * próprio valor sendo escolhido. O sintoma: "Há período já pago até
+ * 24/08/2025" para uma vigência de 24/08/2025 sem nenhum centavo pago,
+ * porque o fallback nunca foi alcançado por dinheiro nenhum — só pela mesma
+ * data que o usuário tinha acabado de digitar. `''` é sempre "menor" que
+ * qualquer data ISO real na comparação lexicográfica, então não bloqueia.
  */
 export function minEffectiveFrom(
   lines: ReadonlyArray<ScheduleLineRow>,
   charges: ReadonlyArray<ScheduleLineChargeRow>,
-  fallback: string,
 ): string {
   const paidLineIds = new Set(
     charges.filter((c) => c.paid_amount > 0 || c.status === 'written_off')
@@ -252,7 +261,7 @@ export function minEffectiveFrom(
     if (!paidLineIds.has(l.id)) continue
     if (!max || l.period_end > max) max = l.period_end
   }
-  return max ?? fallback
+  return max ?? ''
 }
 
 /**
@@ -297,9 +306,8 @@ export function planPeriodAdjustment(input: PeriodAdjustmentInput): PeriodAdjust
   const changed_fields = PARAM_KEYS.filter((k) => current[k] !== next[k])
 
   const liveLines = lines.filter(isLive)
-  const fallback  = next.start_date
-  const min_effective_from     = minEffectiveFrom(liveLines, charges, fallback)
-  const default_effective_from = defaultEffectiveFrom(liveLines, fallback)
+  const min_effective_from     = minEffectiveFrom(liveLines, charges)
+  const default_effective_from = defaultEffectiveFrom(liveLines, next.start_date)
   const effective_from = input.effective_from || default_effective_from
 
   const empty: PeriodAdjustmentPlan = {

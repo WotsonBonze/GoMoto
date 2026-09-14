@@ -293,7 +293,25 @@ describe('planPeriodAdjustment — nada emitido', () => {
   it('a vigência sugerida é o início do contrato — regeneração total', () => {
     const plano = planejar({ next: { ...PARAMS, cycle_amount: 1200 } })
     expect(plano.default_effective_from).toBe('2026-06-01')
-    expect(plano.min_effective_from).toBe('2026-06-01')
+    // Sem NENHUMA cobrança paga, não há piso: '' nunca bloqueia (é sempre
+    // "menor" que qualquer data ISO real). Bug real corrigido aqui — o piso
+    // chegou a usar `next.start_date` como fallback, e como isso é a própria
+    // data que o operador está digitando, "Há período já pago até
+    // 24/08/2025" aparecia para uma vigência sem nenhum centavo pago.
+    expect(plano.min_effective_from).toBe('')
+  })
+
+  it('mudar o início para uma data POSTERIOR, sem nada pago, não trava a vigência na data nova', () => {
+    // Reprodução do caso real: início 22/08/2025 → 24/08/2025, nenhuma
+    // cobrança de ciclo paga (só caução, que já nem chega a este cálculo —
+    // é filtrada antes de gerar `charges`). Escolher vigência = início
+    // ANTIGO (22/08) para regerar o cronograma inteiro precisa funcionar.
+    const plano = planejar({
+      next: { ...PARAMS, start_date: '2026-08-24' },
+      effective_from: '2026-08-22',
+    })
+    expect(plano.min_effective_from).toBe('')
+    expect(plano.blockers.map((b) => b.code)).not.toContain('EFFECTIVE_BEFORE_PAID')
   })
 
   it('nenhuma cobrança é cancelada: linha do plano nunca foi documento', () => {
