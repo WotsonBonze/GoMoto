@@ -193,6 +193,57 @@ test.describe('Ajuste de período da locação', () => {
     expect(Number((rental as { cycle_amount: number }).cycle_amount)).toBe(900)
   })
 
+  test('só o prazo muda: o plano existente é reaproveitado, não recriado', async () => {
+    // Ciclo/dia/valor/pro-rata continuam iguais — só `end_date` estende. Todo
+    // o cronograma que já existia deveria sobreviver com o MESMO id; só a
+    // extensão de fato nova deve ser criada. Sem isso, `rental_billing_schedules`
+    // dobra de tamanho (metade `superseded`) a cada renovação, sem motivo.
+    const rentalId = await criarLocacao(PARAMS)
+    const antes = await cronograma(rentalId)
+    expect(antes.length).toBeGreaterThan(1)
+
+    const next = { ...PARAMS, end_date: isoOffset(210) }
+    const plan = await planejar(rentalId, next, '')
+    expect(plan.blockers).toEqual([])
+
+    const { error } = await aplicar(rentalId, next, plan)
+    expect(error).toBeNull()
+
+    const depois = await cronograma(rentalId)
+
+    // Nada do que já existia foi riscado.
+    expect(depois.filter((l) => l.status === 'superseded')).toHaveLength(0)
+
+    // Toda linha antiga continua lá, com o MESMO id — não é uma cópia com
+    // valores iguais, é a linha original intocada.
+    for (const original of antes) {
+      const mesma = depois.find((l) => l.id === original.id)
+      expect(mesma, `linha ${original.sequence_number} foi recriada em vez de mantida`).toBeDefined()
+      expect(mesma!.status).toBe('scheduled')
+      expect(Number(mesma!.amount)).toBe(Number(original.amount))
+    }
+
+    // E só a extensão de fato nova (além do fim antigo) é criada. Sem pro
+    // rata a ponta final é descartada (RN-011), então o último período antigo
+    // pode terminar ANTES de `PARAMS.end_date` — o corte real é o fim da
+    // última linha que já existia, não a data nominal do contrato.
+    const novas = depois.filter((l) => !antes.some((a) => a.id === l.id))
+    expect(novas.length).toBeGreaterThan(0)
+    const fimAntigo = antes.reduce((max, l) => (l.period_end > max ? l.period_end : max), antes[0]!.period_end)
+    for (const nova of novas) expect(nova.period_start >= fimAntigo).toBe(true)
+
+    // A auditoria reflete o que de fato foi tocado — quase nada, além do
+    // acréscimo.
+    const { data: ajuste } = await admin()
+      .from('rental_adjustments')
+      .select('updated_billings_count, created_lines_count')
+      .eq('rental_id', rentalId)
+      .order('adjusted_at', { ascending: false })
+      .limit(1).single()
+    expect((ajuste as { updated_billings_count: number }).updated_billings_count).toBe(0)
+    expect((ajuste as { created_lines_count: number }).created_lines_count).toBe(novas.length)
+  })
+
   test('a numeração continua em vez de reiniciar — a UNIQUE proíbe reuso', async () => {
     const futuro = { ...PARAMS, start_date: isoOffset(30), end_date: isoOffset(210) }
     const rentalId = await criarLocacao(futuro)

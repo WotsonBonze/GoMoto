@@ -411,18 +411,63 @@ export function planPeriodAdjustment(input: PeriodAdjustmentInput): PeriodAdjust
 
   const maxSequence = lines.reduce((m, l) => (l.sequence_number > m ? l.sequence_number : m), 0)
 
-  // A numeração CONTINUA em vez de reiniciar: `UNIQUE (rental_id,
-  // sequence_number)` proíbe reuso, e o histórico do plano precisa continuar
-  // legível ao lado das linhas novas.
-  const new_lines: PlannedScheduleLine[] =
-    blockers.length > 0
-      ? []
-      : generateSchedule({ ...next, start_date: regenFrom }).map((l) => ({
-          ...l,
-          sequence_number: maxSequence + l.sequence_number,
-          emits_now:    l.period_start <= today,
-          born_overdue: l.due_date     <  today,
-        }))
+  // Candidatas a REAPROVEITAR: linhas que seriam substituídas, mas ainda não
+  // viraram documento. Uma linha `issued` só cai na zona de substituição
+  // quando o operador escolhe deliberadamente puxar a vigência para trás do
+  // padrão sugerido (que já protege o que foi emitido) — aí cancelar é o ato
+  // explícito que ele pediu, não algo para esta função presumir que pode
+  // pular só porque os valores bateram.
+  const reusable = new Map(
+    supersede_lines.filter((l) => !l.was_issued).map((l) => [l.period_start, l]),
+  )
+  const reusedIds = new Set<string>()
+
+  // A numeração CONTINUA em vez de reiniciar quando a linha É recriada:
+  // `UNIQUE (rental_id, sequence_number)` proíbe reuso, e o histórico do
+  // plano precisa continuar legível ao lado das linhas novas.
+  //
+  // Regenerar tudo sobre o corte é o modelo simples e robusto da ADR 0035:
+  // sem diff, qualquer combinação dos seis parâmetros sai correta. O custo é
+  // recriar, byte a byte, o que não mudou — comum quando só o prazo
+  // (início/fim) é ajustado e ciclo/valor/vencimento seguem iguais: cada
+  // período do meio regenera idêntico ao que já existia. Quando a linha nova
+  // bate EXATAMENTE com uma candidata (mesmo período, mesmo vencimento, mesmo
+  // valor), a original é reaproveitada em vez de riscada e recriada — sem
+  // efeito nenhum no dinheiro, porque nenhuma das duas nunca virou documento.
+  const new_lines: PlannedScheduleLine[] = []
+  if (blockers.length === 0) {
+    for (const l of generateSchedule({ ...next, start_date: regenFrom })) {
+      const candidate = reusable.get(l.period_start)
+      if (
+        candidate &&
+        candidate.period_end === l.period_end &&
+        candidate.due_date   === l.due_date &&
+        candidate.amount     === l.amount
+      ) {
+        reusedIds.add(candidate.id)
+        continue
+      }
+      new_lines.push({
+        ...l,
+        sequence_number: maxSequence + l.sequence_number,
+        emits_now:    l.period_start <= today,
+        born_overdue: l.due_date     <  today,
+      })
+    }
+  }
+
+  // Linhas reaproveitadas voltam para `keep_lines` e saem de `supersede_lines`
+  // — mutação em vez de reatribuição porque as duas constantes já circulam
+  // por referência (inclusive no `return` mais abaixo).
+  if (reusedIds.size > 0) {
+    const aindaSubstituidas: typeof supersede_lines = []
+    for (const l of supersede_lines) {
+      if (reusedIds.has(l.id)) keep_lines.push(l)
+      else aindaSubstituidas.push(l)
+    }
+    supersede_lines.length = 0
+    supersede_lines.push(...aindaSubstituidas)
+  }
 
   const supersededTotal = round2(supersede_lines.filter(l => !l.was_issued).reduce((s, l) => s + l.amount, 0))
   const cancelledTotal  = round2(cancel_charges.reduce((s, c) => s + c.total_amount, 0))

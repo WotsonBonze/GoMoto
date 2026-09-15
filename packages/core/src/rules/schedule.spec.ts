@@ -278,16 +278,28 @@ function planejar(over: Partial<PeriodAdjustmentInput> = {}): PeriodAdjustmentPl
 }
 
 describe('planPeriodAdjustment — nada emitido', () => {
-  it('regenera o cronograma inteiro quando o início muda', () => {
+  it('início muda: só a ponta regenera, o resto é reaproveitado', () => {
+    // due_day/cycle/valor/pro-rata ficam iguais — mover só o início muda o
+    // PRIMEIRO período (a ponta pro rata desloca), mas 07/01, 08/01... até
+    // 12/01 são exatamente os mesmos vencimentos de antes. Regerar tudo do
+    // zero recriaria 5 linhas idênticas à toa; o reaproveitamento evita isso.
     const lines = cronograma(0)
     const plano = planejar({ lines, next: { ...PARAMS, start_date: '2026-06-15' } })
 
     expect(plano.blockers).toEqual([])
-    expect(plano.keep_lines).toHaveLength(0)
-    expect(plano.supersede_lines).toHaveLength(lines.length)
-    expect(plano.cancel_charges).toHaveLength(0)
     expect(plano.new_lines.length).toBeGreaterThan(0)
     expect(plano.new_lines[0]!.period_start).toBe('2026-06-15')
+
+    // A ponta nova é criada; o restante do cronograma é reaproveitado.
+    expect(plano.keep_lines.length).toBeGreaterThan(0)
+    expect(plano.supersede_lines.length).toBeLessThan(lines.length)
+    expect(plano.cancel_charges).toHaveLength(0)
+
+    // Toda linha reaproveitada continua tendo o MESMO id de antes — não é uma
+    // cópia, é a linha original que não foi tocada.
+    for (const kept of plano.keep_lines) {
+      expect(lines.some((l) => l.id === kept.id)).toBe(true)
+    }
   })
 
   it('a vigência sugerida é o início do contrato — regeneração total', () => {
@@ -328,7 +340,13 @@ describe('planPeriodAdjustment — com período já emitido', () => {
 
     expect(plano.default_effective_from).toBe(lines[2]!.period_end)
     expect(plano.cancel_charges).toHaveLength(0)
-    expect(plano.keep_lines).toHaveLength(3)
+    // Nenhum dos 6 parâmetros muda neste teste (`next` cai no default =
+    // `current`) — as 3 linhas emitidas sobrevivem por estarem antes da
+    // fronteira, e as 3 ainda-não-emitidas são reaproveitadas por saírem
+    // idênticas ao regenerar. O ajuste inteiro vira um no-op de verdade.
+    expect(plano.keep_lines).toHaveLength(6)
+    expect(plano.supersede_lines).toHaveLength(0)
+    expect(plano.new_lines).toHaveLength(0)
   })
 
   it('puxar a vigência para trás cancela a cobrança emitida e aberta', () => {
@@ -399,7 +417,19 @@ describe('planPeriodAdjustment — com período já emitido', () => {
     const plano = planejar({ lines, charges, effective_from: lines[1]!.period_end })
 
     expect(plano.cancel_charges).toHaveLength(0)
-    expect(plano.supersede_lines).toHaveLength(lines.length - 2)
+    // lines[2] é `issued` (mesmo com a cobrança cancelada) e por isso NUNCA é
+    // reaproveitada — mantê-la travaria o período em status 'issued' apontando
+    // pra um documento morto, e `issue_due_charges` só emite linha
+    // 'scheduled'. Ela é riscada e uma linha nova ocupa o lugar. As linhas
+    // seguintes (nunca emitidas) saem idênticas ao regenerar e são
+    // reaproveitadas.
+    expect(plano.supersede_lines).toHaveLength(1)
+    expect(plano.supersede_lines[0]!.id).toBe(lines[2]!.id)
+    expect(plano.new_lines).toHaveLength(1)
+    // As 2 que sobreviveram por estarem antes da fronteira (lines[0],[1]) +
+    // as 3 depois dela que saíram idênticas ao regenerar (lines[3],[4],[5]).
+    // Só lines[2] — a `issued` com cobrança cancelada — fica de fora.
+    expect(plano.keep_lines).toHaveLength(lines.length - 1)
   })
 
   it('mover o início para depois de um período pago é impedimento, não silêncio', () => {
@@ -583,5 +613,91 @@ describe('planPeriodAdjustment — um veículo, uma locação (ADR 0036)', () =>
   it('sem outra locação no veículo, nada muda', () => {
     const plano = planejar({ next: { ...PARAMS, start_date: '2026-05-01' }, other_rentals: [] })
     expect(plano.blockers.map((b) => b.code)).not.toContain('VEHICLE_PERIOD_OVERLAP')
+  })
+})
+
+describe('planPeriodAdjustment — reaproveitamento de linha idêntica', () => {
+  it('só a data muda: reaproveita o que não foi tocado, cria só a ponta nova', () => {
+    // Estender o fim (renovação) é o caso mais comum: ciclo/dia/valor/pro-rata
+    // continuam iguais, só end_date avança. Todo o cronograma já existente
+    // (inclusive além da fronteira padrão) deveria sobreviver intacto.
+    const lines = cronograma(3) // 3 emitidas, 3 no plano
+    const plano = planejar({
+      lines,
+      charges: lines.slice(0, 3).map((l) => cobranca(l)),
+      next: { ...PARAMS, end_date: '2027-06-01' },
+    })
+
+    expect(plano.blockers).toEqual([])
+    // As 6 linhas antigas inteiras sobrevivem (3 emitidas + 3 reaproveitadas).
+    expect(plano.keep_lines).toHaveLength(6)
+    expect(plano.supersede_lines).toHaveLength(0)
+    expect(plano.cancel_charges).toHaveLength(0)
+    // E só a extensão de fato nova aparece em new_lines.
+    expect(plano.new_lines.length).toBeGreaterThan(0)
+    expect(plano.new_lines[0]!.period_start).toBe(lines[5]!.period_end)
+  })
+
+  it('mudar o valor NÃO reaproveita — cada linha do meio sai com o valor novo', () => {
+    const lines = cronograma(0)
+    const plano = planejar({ lines, next: { ...PARAMS, cycle_amount: 1200 } })
+
+    // Ciclo cheio de 1000 nunca bate com o regenerado de 1200: nada reaproveita.
+    expect(plano.keep_lines).toHaveLength(0)
+    expect(plano.supersede_lines).toHaveLength(lines.length)
+    expect(plano.new_lines.every((l) => l.amount === 1200 || l.amount < 1200)).toBe(true)
+  })
+
+  it('mudar o dia de vencimento NÃO reaproveita — as fronteiras dos períodos mudam todas', () => {
+    const lines = cronograma(0)
+    const plano = planejar({ lines, next: { ...PARAMS, due_day: 15 } })
+
+    expect(plano.keep_lines).toHaveLength(0)
+    expect(plano.supersede_lines).toHaveLength(lines.length)
+  })
+
+  it('linha reaproveitada preserva id e sequence_number originais — não é uma cópia', () => {
+    const lines = cronograma(3)
+    const plano = planejar({
+      lines,
+      charges: lines.slice(0, 3).map((l) => cobranca(l)),
+      next: { ...PARAMS, end_date: '2027-06-01' },
+    })
+
+    const reaproveitada = plano.keep_lines.find((l) => l.id === lines[4]!.id)
+    expect(reaproveitada).toBeDefined()
+    expect(reaproveitada!.sequence_number).toBe(lines[4]!.sequence_number)
+    expect(reaproveitada!.period_start).toBe(lines[4]!.period_start)
+    expect(reaproveitada!.amount).toBe(lines[4]!.amount)
+  })
+
+  it('linha issued nunca é reaproveitada, mesmo com valor idêntico — vira new_lines com status scheduled', () => {
+    // Uma linha `issued` cuja cobrança foi cancelada NÃO pode ficar "mantida":
+    // `issue_due_charges` só emite linha `scheduled`, e mantê-la travaria o
+    // período em `issued` apontando pra um documento morto — nunca mais
+    // seria cobrado automaticamente.
+    const lines = cronograma(1)
+    const charges = [cobranca(lines[0]!, { status: 'cancelled' })]
+    const plano = planejar({ lines, charges, effective_from: PARAMS.start_date })
+
+    expect(plano.keep_lines.some((l) => l.id === lines[0]!.id)).toBe(false)
+    expect(plano.supersede_lines.map((l) => l.id)).toContain(lines[0]!.id)
+    const recriada = plano.new_lines.find((l) => l.period_start === lines[0]!.period_start)
+    expect(recriada).toBeDefined()
+    expect(recriada!.amount).toBe(lines[0]!.amount)
+  })
+
+  it('reaproveitar não altera os totais: substituído/criado só contam o que de fato mudou', () => {
+    const lines = cronograma(3)
+    const plano = planejar({
+      lines,
+      charges: lines.slice(0, 3).map((l) => cobranca(l)),
+      next: { ...PARAMS, end_date: '2027-06-01' },
+    })
+
+    // Nada do cronograma existente foi substituído — só a extensão é criada.
+    expect(plano.totals.superseded).toBe(0)
+    expect(plano.totals.created).toBe(plano.new_lines.reduce((s, l) => s + l.amount, 0))
+    expect(plano.totals.delta).toBeCloseTo(plano.totals.created, 2)
   })
 })

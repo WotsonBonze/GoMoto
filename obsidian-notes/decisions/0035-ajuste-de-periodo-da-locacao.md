@@ -85,6 +85,33 @@ recusa substituir qualquer linha cuja cobrança ainda esteja viva
 leitura da tela e a escrita cabem o job de emissão, um webhook de pagamento e outro
 operador. Guarda e escrita na mesma transação.
 
+### Reaproveitamento de linha idêntica (2026-09-15)
+
+Sobre a fronteira, `planPeriodAdjustment` regenera o cronograma inteiro via
+`generateSchedule` — modelo simples e robusto, sem diff, que sai correto pra
+qualquer combinação dos seis parâmetros. O custo: mudar só o prazo (início ou
+fim), mantendo ciclo/dia/valor/pro-rata iguais, fazia CADA período do meio ser
+riscado (`superseded`) e recriado byte a byte idêntico ao que já existia —
+`rental_billing_schedules` dobrava de tamanho a cada renovação, sem nenhum
+motivo real.
+
+Corrigido comparando cada linha regenerada contra as candidatas que seriam
+substituídas: quando bate EXATO (`period_start`, `period_end`, `due_date`,
+`amount`), a linha ORIGINAL é mantida — mesmo `id`, mesmo `sequence_number` —
+em vez de riscada e recriada. Sem efeito nenhum no dinheiro, porque nenhuma das
+duas nunca virou documento.
+
+**Restrito a linhas ainda não emitidas.** Uma linha `issued` nunca é
+reaproveitada, mesmo com valor idêntico — inclusive quando a cobrança dela já
+está `cancelled`. Duas razões:
+1. Só cai na zona de substituição quando o operador escolhe deliberadamente
+   puxar a vigência para trás do padrão sugerido (que já protege o que foi
+   emitido) — cancelar é o ato explícito que ele pediu, não algo pra esta
+   função presumir que pode pular.
+2. Uma linha travada em `issued` apontando pra cobrança cancelada nunca mais
+   seria reemitida: `issue_due_charges` só consome `status='scheduled'`.
+   Substituir por uma linha nova garante que o período volte a ser cobrável.
+
 ### Retroativo avisa, não impede
 
 Uma parcela nova cujo período já começou vira cobrança na rodada seguinte de
