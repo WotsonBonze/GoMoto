@@ -409,6 +409,54 @@ test.describe('Ajuste de período da locação', () => {
     expect(vivas[0]!.period_start).toBe(novoInicio)
   })
 
+  test('mudar só o início: vigência digitada não cancela nada além do geometricamente invalidado', async () => {
+    // Achado ao vivo (2026-09-16): mudar só o início e digitar qualquer valor
+    // em "Aplicar a partir de" cancelava cobrança já emitida que continuava
+    // cabendo no contrato novo, só porque a data caía no meio dela. A vigência
+    // só devia valer quando ciclo/vencimento/valor/pro-rata muda — aqui só a
+    // data muda, então uma vigência agressiva (bem lá na frente) precisa ser
+    // completamente ignorada pela RPC real, não só pela função pura.
+    const rentalId = await criarLocacao()
+    await emitir()
+
+    const antes = await cronograma(rentalId)
+    const primeira = antes[0]!
+    expect(primeira.status).toBe('issued')
+    const emitidasAntes = antes.filter((l) => l.status === 'issued')
+    expect(emitidasAntes.length).toBeGreaterThan(1) // precisa de mais de 1 pra provar que só a 1ª é tocada
+
+    const d = new Date(`${primeira.period_start}T00:00:00`)
+    d.setDate(d.getDate() + 2)
+    const novoInicio = d.toISOString().slice(0, 10)
+
+    const next = { ...PARAMS, start_date: novoInicio }
+    // Vigência agressiva: bem lá na frente, dentro (ou depois) de outra
+    // parcela já emitida. Se a vigência ainda valesse aqui, cancelaria mais
+    // do que só a 1ª.
+    const plan = await planejar(rentalId, next, isoOffset(60))
+    expect(plan.blockers).toEqual([])
+    expect(plan.effective_from_applies).toBe(false)
+    expect(plan.cancel_charges).toHaveLength(1)
+    expect(plan.cancel_charges[0]!.schedule_line_id).toBe(primeira.id)
+
+    for (const c of plan.cancel_charges) {
+      await admin().from('charges')
+        .update({ status: 'cancelled', cancellation_reason: 'E2E' })
+        .eq('id', c.charge_id)
+    }
+    const { error } = await aplicar(rentalId, next, plan)
+    expect(error).toBeNull()
+
+    const depois = await cronograma(rentalId)
+    // As demais parcelas já emitidas (2ª em diante) continuam intocadas —
+    // mesmo id, mesmo status `issued`.
+    for (const emitida of emitidasAntes.slice(1)) {
+      const mesma = depois.find((l) => l.id === emitida.id)
+      expect(mesma, `parcela ${emitida.sequence_number} foi tocada sem necessidade`).toBeDefined()
+      expect(mesma!.status).toBe('issued')
+    }
+  })
+
   test('locação encerrada não aceita ajuste', async () => {
     const futuro = { ...PARAMS, start_date: isoOffset(30), end_date: isoOffset(210) }
     const rentalId = await criarLocacao(futuro)

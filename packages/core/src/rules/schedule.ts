@@ -188,6 +188,18 @@ export type PeriodAdjustmentPlan = {
   /** '' quando nada foi pago — sem piso nenhum. Ver `minEffectiveFrom`. */
   min_effective_from: string
   default_effective_from: string
+  /**
+   * A vigência só existe pra decidir "a partir de quando" um REPREÇO ou
+   * REDESENHO de ciclo passa a valer — não pra decidir SE um período existe.
+   * Isso já é resposta pura de `start_date`/`end_date`: um período que não
+   * cabe mais na janela nova é substituído de qualquer forma, vigência
+   * nenhuma muda isso. Por isso ela só entra em jogo quando `cycle`,
+   * `due_day`, `cycle_amount` ou `use_pro_rata` mudam — mudar só as datas
+   * não deveria (e não deve mais) reabrir cobrança já emitida que continua
+   * cabendo no contrato novo. A tela usa este campo pra decidir se mostra o
+   * controle "Aplicar a partir de".
+   */
+  effective_from_applies: boolean
   /** Impedimentos: enquanto houver um, a operação não pode ser confirmada. */
   blockers: AdjustmentNotice[]
   /** Consequências que o operador precisa ver, mas que não impedem nada. */
@@ -304,6 +316,7 @@ export function planPeriodAdjustment(input: PeriodAdjustmentInput): PeriodAdjust
   const warnings: AdjustmentNotice[] = []
 
   const changed_fields = PARAM_KEYS.filter((k) => current[k] !== next[k])
+  const effective_from_applies = changed_fields.some((k) => k !== 'start_date' && k !== 'end_date')
 
   const liveLines = lines.filter(isLive)
   const min_effective_from     = minEffectiveFrom(liveLines, charges)
@@ -311,7 +324,7 @@ export function planPeriodAdjustment(input: PeriodAdjustmentInput): PeriodAdjust
   const effective_from = input.effective_from || default_effective_from
 
   const empty: PeriodAdjustmentPlan = {
-    changed_fields, effective_from, min_effective_from, default_effective_from,
+    changed_fields, effective_from, min_effective_from, default_effective_from, effective_from_applies,
     blockers, warnings,
     keep_lines: [], supersede_lines: [], cancel_charges: [], new_lines: [],
     totals: { superseded: 0, cancelled: 0, created: 0, delta: 0 },
@@ -347,7 +360,7 @@ export function planPeriodAdjustment(input: PeriodAdjustmentInput): PeriodAdjust
     blockers.push({ code: 'INVALID_DATE', message: 'Data de vigência inválida.' })
     return empty
   }
-  if (effective_from < min_effective_from) {
+  if (effective_from_applies && effective_from < min_effective_from) {
     blockers.push({
       code: 'EFFECTIVE_BEFORE_PAID',
       message: `Há período já pago até ${formatBrDate(min_effective_from)}. A vigência do ajuste não pode ser anterior a essa data — desfazer recebimento é estorno de pagamento.`,
@@ -355,12 +368,19 @@ export function planPeriodAdjustment(input: PeriodAdjustmentInput): PeriodAdjust
     return empty
   }
 
-  // Uma linha SOBREVIVE quando está do lado da história E continua coberta pela
-  // nova vigência. A segunda parte é o que impede um período órfão: mover o
-  // início do contrato para depois de uma parcela deixaria essa parcela
-  // cobrando um período que o contrato passou a dizer que não existiu.
+  // Uma linha SOBREVIVE quando continua cabendo na janela nova. Isso sozinho
+  // já impede período órfão: mover o início do contrato para depois de uma
+  // parcela deixaria essa parcela cobrando um período que o contrato passou a
+  // dizer que não existiu — e isso vale INDEPENDENTE de vigência, porque é
+  // resposta pura de `next.start_date`/`next.end_date`.
+  //
+  // A vigência só entra quando `effective_from_applies`: aí uma linha que
+  // ainda cabe na janela pode mesmo assim ser riscada, se estiver do lado
+  // "futuro" da fronteira — é o mecanismo que permite reprecificar cobrança
+  // já emitida ao mudar ciclo/vencimento/valor/pro-rata. Sem isso mudando,
+  // não existe motivo pra tocar numa linha que já cabe.
   const survives = (l: ScheduleLineRow) =>
-    l.period_end   <= effective_from &&
+    (!effective_from_applies || l.period_end <= effective_from) &&
     l.period_start >= next.start_date &&
     l.period_end   <= next.end_date
 
@@ -419,7 +439,18 @@ export function planPeriodAdjustment(input: PeriodAdjustmentInput): PeriodAdjust
   // fronteira é exatamente o buraco da ponta direita.
   const regenFrom = lastKeptEnd ?? next.start_date
 
-  if (next.end_date <= regenFrom) {
+  // `regenFrom` alcançando `next.end_date` sozinho não é problema: pode ser
+  // só cobertura completa (ex.: início avança até bater exatamente na borda
+  // de um período que já existia — fim não mudou, não sobra nem falta nada).
+  // O sinal de "isso devia ser Encerrar" é mais específico: o FIM encurtou
+  // em relação ao que o contrato já prometia (`current.end_date`) E, mesmo
+  // assim, não nasce nenhuma parcela nova — nem a ponta esquerda (quando
+  // `next.start_date` abre um buraco antes do primeiro período mantido) nem
+  // a regeneração principal. Sem o encurtamento, "nada novo" é só dizer que
+  // o trecho mantido já cobre a janela inteira sozinho — normal.
+  const hasLeftGap = firstKeptStart !== null && next.start_date < firstKeptStart
+  const contractShortened = next.end_date < current.end_date
+  if (contractShortened && !hasLeftGap && next.end_date <= regenFrom) {
     blockers.push({
       code: 'NOTHING_LEFT',
       message: `A nova data de fim não deixa nenhuma parcela após ${formatBrDate(regenFrom)}. Encerrar o contrato é outra operação — use Encerrar.`,
@@ -552,7 +583,7 @@ export function planPeriodAdjustment(input: PeriodAdjustmentInput): PeriodAdjust
   }
 
   return {
-    changed_fields, effective_from, min_effective_from, default_effective_from,
+    changed_fields, effective_from, min_effective_from, default_effective_from, effective_from_applies,
     blockers, warnings,
     keep_lines, supersede_lines, cancel_charges, new_lines,
     totals: {

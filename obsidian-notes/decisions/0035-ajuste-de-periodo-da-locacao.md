@@ -160,6 +160,56 @@ recuo/avanço de início + `effective_from` no meio de período) e em
 `apps/web/tests/ajuste-de-periodo.spec.ts` (mesmo cenário, contra o banco e a
 RPC reais).
 
+### Vigência só existe para ciclo/vencimento/valor/pro-rata (2026-09-16)
+
+O fix acima resolveu o buraco, mas expôs um efeito colateral confuso: a
+"ponta direita" (§ acima) só se abre quando o operador digita uma
+`effective_from` que corta no meio de um período — e nada, além do próprio
+mecanismo de regeneração, impede que ele digite QUALQUER data ali, mesmo numa
+locação onde só início/fim mudaram. Testado ao vivo: mudar só o início e
+puxar "Aplicar a partir de" para uma data qualquer cancelava cobrança já
+emitida que continuava cabendo no contrato novo, só por cair no meio dela —
+com a substituta certa sendo criada logo em seguida (a garantia de cobertura
+segurou), mas o operador via cobranças sumindo e reaparecendo sem entender
+por quê.
+
+**A pergunta certa**: por que `effective_from` deveria interferir numa
+mudança que é só de data? A resposta é que não deveria. `next.start_date` e
+`next.end_date` já respondem sozinhos QUAIS períodos continuam existindo — é
+geometria pura (`period_start >= next.start_date`, `period_end <=
+next.end_date`), sem precisar de fronteira nenhuma. `effective_from` só tem
+um motivo de existir: decidir a partir de QUANDO um REPREÇO (`cycle_amount`,
+`due_day`, `cycle`, `use_pro_rata`) passa a valer sobre período que já é
+documento. Misturar as duas coisas — deixar a vigência também decidir SE um
+período existe — foi o que abriu a ponta direita para qualquer ajuste de
+data, mesmo sem repreço nenhum envolvido.
+
+**Correção**: `PeriodAdjustmentPlan` ganhou `effective_from_applies` —
+`true` quando `changed_fields` inclui `cycle`, `due_day`, `cycle_amount` ou
+`use_pro_rata`; `false` quando só `start_date`/`end_date` mudam (ou nada
+muda). `survives` passou a ignorar a condição `period_end <= effective_from`
+inteira quando `effective_from_applies` é falso — sobrevivência vira só
+geometria. `EFFECTIVE_BEFORE_PAID` também só dispara quando a vigência
+importa; dinheiro pago continua protegido do mesmo jeito, mas via
+`PAID_CHARGE_IN_RANGE` no laço geométrico, não por comparar contra uma
+fronteira que nem está em jogo.
+
+A tela usa o mesmo campo para decidir a UI: `AdjustRentalPeriodForm` só
+mostra "Aplicar a partir de" quando `plan.effective_from_applies` é
+verdadeiro, e limpa o valor digitado assim que deixa de ser (para não
+reaparecer com lixo se o operador voltar a mexer em ciclo/vencimento/valor
+depois). Não é só estética — é a mesma regra rodando dos dois lados, porque
+é a MESMA função (`planPeriodAdjustment`) que decide os dois.
+
+**Efeito colateral em `NOTHING_LEFT`**: com `keep_lines` podendo agora cobrir
+a janela inteira sem cortar nada (mudança só de início, fim inalterado),
+`regenFrom` legitimamente bate em `next.end_date` sem nada de errado — e o
+bloqueio antigo (`next.end_date <= regenFrom`) passou a disparar à toa nesse
+caso. Corrigido restringindo o bloqueio a quando o FIM realmente encurtou em
+relação ao contrato atual (`next.end_date < current.end_date`) e não há
+ponta esquerda alguma nascendo — só aí "nada sobra" significa de fato
+"isso é encerramento, não ajuste".
+
 ### Retroativo avisa, não impede
 
 Uma parcela nova cujo período já começou vira cobrança na rodada seguinte de

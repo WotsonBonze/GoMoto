@@ -14,7 +14,7 @@
 
 'use client'
 
-import { useMemo, useState, useTransition } from 'react'
+import { useEffect, useMemo, useState, useTransition } from 'react'
 import { useRouter } from 'next/navigation'
 import Link from 'next/link'
 import { AlertCircle, AlertTriangle, Info } from 'lucide-react'
@@ -102,6 +102,17 @@ export function AdjustRentalPeriodForm({
   // A fronteira sugerida depende dos parâmetros novos (o fallback é a data de
   // início), então só é possível preencher o campo depois do primeiro cálculo.
   const effectiveValue = effectiveFrom || plan.default_effective_from
+
+  // A vigência só existe pra decidir "a partir de quando" um REPREÇO ou
+  // REDESENHO de ciclo passa a valer (ADR 0035) — mudar só início/fim já é
+  // respondido pelo encaixe geométrico das datas, sem precisar de fronteira
+  // nenhuma. Mostrar o campo fora desse caso convidava a puxá-lo por curiosidade
+  // e cancelar cobrança emitida que continuava cabendo no contrato novo — bug
+  // achado ao vivo em 2026-09-16. Limpa o valor digitado ao sumir, pra não
+  // reaparecer com lixo se o operador voltar a mudar ciclo/vencimento/valor.
+  useEffect(() => {
+    if (!plan.effective_from_applies && effectiveFrom !== '') setEffectiveFrom('')
+  }, [plan.effective_from_applies, effectiveFrom])
 
   // Sem nenhuma condição alterada, o plano ainda "substituiria" as linhas
   // futuras por linhas idênticas — verdade matemática, ruído na tela. As
@@ -260,19 +271,21 @@ export function AdjustRentalPeriodForm({
           </div>
 
           <div className={`${cardCls} space-y-4`}>
-            <Field label="Aplicar a partir de">
-              <input
-                type="date" className={inputCls}
-                min={plan.min_effective_from}
-                value={effectiveValue}
-                onChange={(e) => setEffectiveFrom(e.target.value)}
-              />
-              <p className="mt-1 text-[12px] text-fg-mute">
-                Períodos que terminam até esta data não mudam. Antecipe para alcançar
-                cobranças já emitidas — elas aparecem ao lado antes de qualquer coisa
-                acontecer.
-              </p>
-            </Field>
+            {plan.effective_from_applies && (
+              <Field label="Aplicar a partir de">
+                <input
+                  type="date" className={inputCls}
+                  min={plan.min_effective_from}
+                  value={effectiveValue}
+                  onChange={(e) => setEffectiveFrom(e.target.value)}
+                />
+                <p className="mt-1 text-[12px] text-fg-mute">
+                  Períodos que terminam até esta data não mudam. Antecipe para alcançar
+                  cobranças já emitidas — elas aparecem ao lado antes de qualquer coisa
+                  acontecer.
+                </p>
+              </Field>
+            )}
 
             <Field label="Justificativa *">
               <textarea
@@ -308,7 +321,8 @@ export function AdjustRentalPeriodForm({
           {hasChanges && plan.keep_lines.length > 0 && (
             <div className={`${cardCls} text-[13px] text-fg-mute`}>
               <span className="tabular-nums text-fg">{plan.keep_lines.length}</span>{' '}
-              parcela{plan.keep_lines.length !== 1 ? 's' : ''} até {formatDate(effectiveValue)}{' '}
+              parcela{plan.keep_lines.length !== 1 ? 's' : ''}{' '}
+              {plan.effective_from_applies ? `até ${formatDate(effectiveValue)} ` : ''}
               não muda{plan.keep_lines.length !== 1 ? 'm' : ''}.
             </div>
           )}

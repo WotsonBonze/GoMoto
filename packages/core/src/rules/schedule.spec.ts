@@ -368,12 +368,22 @@ describe('planPeriodAdjustment — com período já emitido', () => {
     // Pagamento parcial conta como dinheiro que entrou: `minEffectiveFrom` puxa
     // a fronteira para o fim desse período, e o impedimento vem de lá — não do
     // laço, que nunca chega a olhar a linha.
+    //
+    // A vigência só entra em jogo quando ciclo/vencimento/valor/pro-rata muda
+    // — por isso `next` também alterna `use_pro_rata` aqui (sem mexer em
+    // nenhum valor real: com `due_day` alinhado ao início, cada período já é
+    // ciclo cheio, então o toggle não muda um centavo, só faz a vigência
+    // valer).
     const lines = cronograma(3)
     const charges = [
       cobranca(lines[0]!), cobranca(lines[1]!),
       cobranca(lines[2]!, { paid_amount: 500 }),
     ]
-    const plano = planejar({ lines, charges, effective_from: lines[1]!.period_end })
+    const plano = planejar({
+      lines, charges,
+      effective_from: lines[1]!.period_end,
+      next: { ...PARAMS, use_pro_rata: false },
+    })
 
     expect(plano.min_effective_from).toBe(lines[2]!.period_end)
     expect(plano.blockers.map((b) => b.code)).toContain('EFFECTIVE_BEFORE_PAID')
@@ -405,7 +415,11 @@ describe('planPeriodAdjustment — com período já emitido', () => {
       cobranca(lines[0]!), cobranca(lines[1]!, { paid_amount: 1000, status: 'paid' }),
       cobranca(lines[2]!),
     ]
-    const plano = planejar({ lines, charges, effective_from: '2026-06-01' })
+    const plano = planejar({
+      lines, charges,
+      effective_from: '2026-06-01',
+      next: { ...PARAMS, use_pro_rata: false },
+    })
 
     expect(plano.min_effective_from).toBe(lines[1]!.period_end)
     expect(plano.blockers.map((b) => b.code)).toContain('EFFECTIVE_BEFORE_PAID')
@@ -414,7 +428,11 @@ describe('planPeriodAdjustment — com período já emitido', () => {
   it('cobrança já cancelada não entra na lista de cancelamentos', () => {
     const lines = cronograma(3)
     const charges = lines.slice(0, 3).map((l) => cobranca(l, { status: 'cancelled' }))
-    const plano = planejar({ lines, charges, effective_from: lines[1]!.period_end })
+    const plano = planejar({
+      lines, charges,
+      effective_from: lines[1]!.period_end,
+      next: { ...PARAMS, use_pro_rata: false },
+    })
 
     expect(plano.cancel_charges).toHaveLength(0)
     // lines[2] é `issued` (mesmo com a cobrança cancelada) e por isso NUNCA é
@@ -668,7 +686,11 @@ describe('planPeriodAdjustment — reaproveitamento de linha idêntica', () => {
     // seria cobrado automaticamente.
     const lines = cronograma(1)
     const charges = [cobranca(lines[0]!, { status: 'cancelled' })]
-    const plano = planejar({ lines, charges, effective_from: PARAMS.start_date })
+    const plano = planejar({
+      lines, charges,
+      effective_from: PARAMS.start_date,
+      next: { ...PARAMS, use_pro_rata: false },
+    })
 
     expect(plano.keep_lines.some((l) => l.id === lines[0]!.id)).toBe(false)
     expect(plano.supersede_lines.map((l) => l.id)).toContain(lines[0]!.id)
@@ -760,11 +782,16 @@ describe('planPeriodAdjustment — nenhum período fica sem cobrança', () => {
     // é o ato explícito de puxar a vigência para trás), mas o pedaço que
     // continua dentro do contrato (início do período até a vigência… até o
     // próximo vencimento) não pode ficar sem linha.
+    //
+    // Isso só é alcançável quando `effective_from_applies` (algum de
+    // ciclo/vencimento/valor/pro-rata mudou) — daí o toggle de `use_pro_rata`
+    // em `next`, que não altera nenhum valor real neste cronograma alinhado.
     const lines = cronograma(3)
     const charges = lines.slice(0, 3).map((l) => cobranca(l))
     const plano = planejar({
       lines, charges,
       effective_from: '2026-08-15', // meio do 3º período (01/08–01/09)
+      next: { ...PARAMS, use_pro_rata: false },
     })
 
     expect(plano.blockers).toEqual([])
@@ -779,5 +806,79 @@ describe('planPeriodAdjustment — nenhum período fica sem cobrança', () => {
     expect(substituta!.period_end).toBe(lines[2]!.period_end)
     expect(substituta!.due_date).toBe(lines[2]!.due_date)
     expect(substituta!.amount).toBe(lines[2]!.amount)
+  })
+})
+
+describe('planPeriodAdjustment — vigência só vale para ciclo/vencimento/valor/pro-rata', () => {
+  // Achado ao vivo (2026-09-16): mudar só início/fim e puxar "Aplicar a
+  // partir de" pra qualquer data cancelava cobrança já emitida que continuava
+  // cabendo no contrato novo — período nenhum deveria ter sido tocado, porque
+  // a mudança foi só de data. `effective_from_applies` resolve isso na
+  // origem: a vigência deixa de existir (não só de aparecer na tela) quando
+  // nenhum dos quatro parâmetros de preço/ciclo muda.
+
+  it('effective_from_applies reflete exatamente quais campos mudaram', () => {
+    expect(planejar({ next: { ...PARAMS, start_date: '2026-06-15' } }).effective_from_applies).toBe(false)
+    expect(planejar({ next: { ...PARAMS, end_date: '2027-01-01' } }).effective_from_applies).toBe(false)
+    expect(planejar({ next: { ...PARAMS, start_date: '2026-06-15', end_date: '2027-01-01' } }).effective_from_applies).toBe(false)
+    expect(planejar({ next: { ...PARAMS, cycle_amount: 1200 } }).effective_from_applies).toBe(true)
+    expect(planejar({ next: { ...PARAMS, due_day: 15 } }).effective_from_applies).toBe(true)
+    expect(planejar({ next: { ...PARAMS, cycle: 'weekly', due_day: 1 } }).effective_from_applies).toBe(true)
+    expect(planejar({ next: { ...PARAMS, use_pro_rata: false } }).effective_from_applies).toBe(true)
+    expect(planejar({ next: { ...PARAMS, start_date: '2026-06-15', cycle_amount: 1200 } }).effective_from_applies).toBe(true)
+  })
+
+  it('mudar só o início: uma vigência digitada no meio de outro período já emitido é ignorada', () => {
+    // Cronograma alinhado (due_day bate com o início): 3 períodos emitidos,
+    // 3 no plano. Mover só o início para dentro do 1º invalida ELE — e mais
+    // nada. Uma vigência agressiva (dentro do 3º período, já emitido) não
+    // pode cancelar cobrança nenhuma além dessa: sem mudança de preço/ciclo,
+    // ela nem é olhada.
+    const lines = cronograma(3)
+    const charges = lines.slice(0, 3).map((l) => cobranca(l))
+    const plano = planejar({
+      lines, charges,
+      effective_from: '2026-08-15', // meio do 3º período — seria agressiva se valesse
+      next: { ...PARAMS, start_date: '2026-06-15' },
+    })
+
+    expect(plano.blockers).toEqual([])
+    expect(plano.effective_from_applies).toBe(false)
+    // Só a cobrança do 1º período (invalidado pela geometria) é cancelada —
+    // a 2ª e a 3ª continuam `issued`, intocadas.
+    expect(plano.cancel_charges.map((c) => c.charge_id)).toEqual(['cob-linha-1'])
+    expect(plano.keep_lines.some((l) => l.id === lines[1]!.id)).toBe(true)
+    expect(plano.keep_lines.some((l) => l.id === lines[2]!.id)).toBe(true)
+  })
+
+  it('mudar só o início: puxar a vigência pra antes de tudo não cancela cobrança nenhuma a mais', () => {
+    const lines = cronograma(3)
+    const charges = lines.slice(0, 3).map((l) => cobranca(l))
+    const plano = planejar({
+      lines, charges,
+      effective_from: '2026-01-01', // bem antes de qualquer período — seria devastador se valesse
+      next: { ...PARAMS, start_date: '2026-06-15' },
+    })
+
+    expect(plano.blockers).toEqual([])
+    expect(plano.cancel_charges.map((c) => c.charge_id)).toEqual(['cob-linha-1'])
+  })
+
+  it('mudar só a data: EFFECTIVE_BEFORE_PAID não dispara mesmo com vigência explícita anterior ao pago', () => {
+    // Sem mudança de preço/ciclo, a vigência não é usada — logo não há como
+    // ela "chegar antes" de um período pago. Quem continua protegendo
+    // dinheiro pago é PAID_CHARGE_IN_RANGE, no laço geométrico normal.
+    const lines = cronograma(2)
+    const charges = [
+      cobranca(lines[0]!),
+      cobranca(lines[1]!, { paid_amount: 1000, status: 'paid' }),
+    ]
+    const plano = planejar({
+      lines, charges,
+      effective_from: '2026-01-01', // anterior a tudo, inclusive ao pago
+      next: { ...PARAMS, start_date: '2026-06-15' },
+    })
+
+    expect(plano.blockers.map((b) => b.code)).not.toContain('EFFECTIVE_BEFORE_PAID')
   })
 })
