@@ -523,16 +523,6 @@ describe('planPeriodAdjustment — avisos', () => {
     expect(plano.warnings.map((w) => w.code)).toContain('BORN_OVERDUE')
   })
 
-  it('antecipar o início deixa um trecho sem parcela e avisa', () => {
-    const lines = cronograma(3)
-    const plano = planejar({
-      lines,
-      charges: lines.slice(0, 3).map((l) => cobranca(l)),
-      next: { ...PARAMS, start_date: '2026-05-01' },
-    })
-    expect(plano.warnings.map((w) => w.code)).toContain('START_BEFORE_ISSUED')
-  })
-
   it('mudar de mensal para semanal avisa que o valor passa a ser de outro período', () => {
     const plano = planejar({
       lines: cronograma(0),
@@ -699,5 +689,95 @@ describe('planPeriodAdjustment — reaproveitamento de linha idêntica', () => {
     expect(plano.totals.superseded).toBe(0)
     expect(plano.totals.created).toBe(plano.new_lines.reduce((s, l) => s + l.amount, 0))
     expect(plano.totals.delta).toBeCloseTo(plano.totals.created, 2)
+  })
+})
+
+describe('planPeriodAdjustment — nenhum período fica sem cobrança', () => {
+  // Bug achado ao vivo (teste em navegador, 2026-09-15): antecipar o início
+  // em 2 dias sobre uma locação com 3 períodos já emitidos cancelava a
+  // cobrança do primeiro corretamente, mas não deixava NENHUMA linha nem
+  // cobrança cobrindo o trecho [novo início, vencimento original) — o
+  // cliente ficava com 7 dias de uso sem cobrança nenhuma, em silêncio.
+  // `regenFrom` pulava direto para `effective_from` (fim do último período
+  // emitido) e nunca olhava para o que sobrava entre o novo início e o
+  // primeiro período que ainda sobrevivia.
+
+  it('início avança para dentro de período já emitido: a cobrança cancelada ganha substituta, não silêncio', () => {
+    const semProRata = { ...PARAMS, use_pro_rata: false }
+    const lines = cronograma(3, semProRata)
+    const charges = lines.slice(0, 3).map((l) => cobranca(l))
+    const plano = planejar({
+      lines, charges,
+      current: semProRata,
+      next: { ...semProRata, start_date: '2026-06-03' }, // 2 dias à frente
+    })
+
+    expect(plano.blockers).toEqual([])
+    // O primeiro período (01/06–01/07) é cancelado — corretamente, ele cobria
+    // um trecho que o contrato novo diz que não existiu.
+    expect(plano.cancel_charges.map((c) => c.charge_id)).toEqual(['cob-linha-1'])
+
+    // Mas o trecho que CONTINUA dentro do contrato (03/06 até o vencimento
+    // original de 01/07) precisa de uma linha nova — sem pro rata, cobrada
+    // no valor CHEIO do ciclo (RN-011: a ponta nunca é descartada quando é a
+    // continuação de um período que já existia, só quando é o resto de fora
+    // do contrato).
+    const substituta = plano.new_lines.find((l) => l.period_start === '2026-06-03')
+    expect(substituta).toBeDefined()
+    expect(substituta!.period_end).toBe(lines[0]!.period_end)
+    expect(substituta!.due_date).toBe(lines[0]!.due_date)
+    expect(substituta!.amount).toBe(1000)
+
+    // Os períodos 2 e 3 (já emitidos, intocados) e os 3 seguintes
+    // (reaproveitados) continuam cobrindo o resto sem buraco nem overlap.
+    expect(plano.keep_lines).toHaveLength(5)
+  })
+
+  it('início recua para antes de qualquer período existente: a extensão nova é cobrada, não só avisada', () => {
+    const lines = cronograma(3)
+    const plano = planejar({
+      lines,
+      charges: lines.slice(0, 3).map((l) => cobranca(l)),
+      next: { ...PARAMS, start_date: '2026-05-01' },
+    })
+
+    expect(plano.blockers).toEqual([])
+    expect(plano.cancel_charges).toHaveLength(0) // nada emitido é tocado, só se estende para trás
+
+    const extensao = plano.new_lines.find((l) => l.period_start === '2026-05-01')
+    expect(extensao).toBeDefined()
+    expect(extensao!.period_end).toBe(lines[0]!.period_start) // encaixa exato, sem buraco
+    expect(extensao!.amount).toBe(1000) // ciclo cheio: fronteiras batem com due_day nos dois lados
+
+    // O cronograma antigo inteiro (emitido + reaproveitado) permanece.
+    expect(plano.keep_lines).toHaveLength(lines.length)
+  })
+
+  it('vigência digitada no meio de um período (não numa borda) também ganha substituta', () => {
+    // O operador não é obrigado a escolher uma data alinhada a uma borda de
+    // período — o date picker aceita qualquer uma >= `min_effective_from`.
+    // Cortar no meio de um período emitido cancela a cobrança dele (correto:
+    // é o ato explícito de puxar a vigência para trás), mas o pedaço que
+    // continua dentro do contrato (início do período até a vigência… até o
+    // próximo vencimento) não pode ficar sem linha.
+    const lines = cronograma(3)
+    const charges = lines.slice(0, 3).map((l) => cobranca(l))
+    const plano = planejar({
+      lines, charges,
+      effective_from: '2026-08-15', // meio do 3º período (01/08–01/09)
+    })
+
+    expect(plano.blockers).toEqual([])
+    // Só os 2 primeiros sobrevivem por estarem antes da fronteira; os 3
+    // últimos (nunca emitidos) saem idênticos ao regenerar e são
+    // reaproveitados de volta para `keep_lines` — só o 3º fica de fora.
+    expect(plano.keep_lines).toHaveLength(5)
+    expect(plano.cancel_charges.map((c) => c.charge_id)).toEqual(['cob-linha-3'])
+
+    const substituta = plano.new_lines.find((l) => l.period_start === lines[2]!.period_start)
+    expect(substituta).toBeDefined()
+    expect(substituta!.period_end).toBe(lines[2]!.period_end)
+    expect(substituta!.due_date).toBe(lines[2]!.due_date)
+    expect(substituta!.amount).toBe(lines[2]!.amount)
   })
 })

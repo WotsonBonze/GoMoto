@@ -398,9 +398,26 @@ export function planPeriodAdjustment(input: PeriodAdjustmentInput): PeriodAdjust
     cancel_charges.push(charge)
   }
 
-  // A regeneração começa onde a sobrevivência termina — sem buraco e sem
-  // sobreposição, porque toda linha mantida tem `period_end <= effective_from`.
-  const regenFrom = next.start_date > effective_from ? next.start_date : effective_from
+  // `keep_lines` sempre forma UM ÚNICO trecho contínuo: as três condições de
+  // `survives` são monótonas na posição do período (data de início barra as
+  // mais antigas, `effective_from` barra as mais novas), então não há como um
+  // período do meio falhar enquanto os vizinhos sobrevivem. Um buraco só pode
+  // se abrir nas DUAS pontas desse trecho — e é aí que ele se abria em
+  // silêncio: mover o início para dentro de um período já emitido invalidava
+  // a linha inteira (linha esquerda), e uma `effective_from` digitada no meio
+  // de um período fazia o mesmo do outro lado (linha direita) — nos dois
+  // casos a cobrança cancelada nunca ganhava substituta para o trecho que
+  // continua dentro do contrato novo.
+  const keptStarts = keep_lines.map((l) => l.period_start)
+  const keptEnds    = keep_lines.map((l) => l.period_end)
+  const firstKeptStart = keptStarts.length ? keptStarts.reduce((a, b) => (a < b ? a : b)) : null
+  const lastKeptEnd    = keptEnds.length    ? keptEnds.reduce((a, b) => (a > b ? a : b))    : null
+
+  // A regeneração retoma exatamente onde o trecho mantido termina — não mais
+  // sempre em `effective_from`: quando a fronteira cai no meio de um período
+  // (em vez de bater numa borda), o pedaço entre o fim do último mantido e a
+  // fronteira é exatamente o buraco da ponta direita.
+  const regenFrom = lastKeptEnd ?? next.start_date
 
   if (next.end_date <= regenFrom) {
     blockers.push({
@@ -436,7 +453,26 @@ export function planPeriodAdjustment(input: PeriodAdjustmentInput): PeriodAdjust
   // efeito nenhum no dinheiro, porque nenhuma das duas nunca virou documento.
   const new_lines: PlannedScheduleLine[] = []
   if (blockers.length === 0) {
-    for (const l of generateSchedule({ ...next, start_date: regenFrom })) {
+    // Buraco da ponta ESQUERDA: `next.start_date` cai antes do primeiro
+    // período mantido — seja porque o início avançou para dentro dele
+    // (invalidando-o), seja porque recuou para antes de qualquer período
+    // existente. Gerar esse trecho como seu próprio cronograma
+    // ([next.start_date, firstKeptStart)) reaproveita a mesma lógica de ciclo
+    // cheio/pro rata de `generateCycleCharges` — nenhuma regra nova, só o
+    // alcance de onde ela já roda.
+    const toGenerate: ScheduleLine[] = []
+    if (firstKeptStart !== null && next.start_date < firstKeptStart) {
+      toGenerate.push(...generateSchedule({ ...next, start_date: next.start_date, end_date: firstKeptStart }))
+    }
+    toGenerate.push(...generateSchedule({ ...next, start_date: regenFrom }))
+
+    // Numeração é um contador único sobre a lista combinada — cada chamada a
+    // `generateSchedule` reinicia sua própria em 1, e usar o índice de cada
+    // uma isoladamente colidiria (a primeira linha do buraco e a primeira da
+    // regeneração principal cairiam no mesmo `sequence_number`).
+    let seq = maxSequence
+    for (const l of toGenerate) {
+      seq += 1
       const candidate = reusable.get(l.period_start)
       if (
         candidate &&
@@ -449,7 +485,7 @@ export function planPeriodAdjustment(input: PeriodAdjustmentInput): PeriodAdjust
       }
       new_lines.push({
         ...l,
-        sequence_number: maxSequence + l.sequence_number,
+        sequence_number: seq,
         emits_now:    l.period_start <= today,
         born_overdue: l.due_date     <  today,
       })
@@ -488,17 +524,6 @@ export function planPeriodAdjustment(input: PeriodAdjustmentInput): PeriodAdjust
         code: 'BORN_OVERDUE',
         message: `${bornOverdue} cobrança${bornOverdue > 1 ? 's nascerão vencidas' : ' nascerá vencida'}, com encargo por atraso correndo desde o vencimento.`,
       })
-    }
-    if (next.start_date < current.start_date && keep_lines.length + new_lines.length > 0) {
-      const firstCovered = [...keep_lines, ...new_lines]
-        .map((l) => l.period_start)
-        .sort()[0]
-      if (firstCovered && next.start_date < firstCovered) {
-        warnings.push({
-          code: 'START_BEFORE_ISSUED',
-          message: `O período de ${formatBrDate(next.start_date)} a ${formatBrDate(firstCovered)} fica sem parcela no cronograma. Se precisar cobrá-lo, use cobrança avulsa.`,
-        })
-      }
     }
     if (current.cycle !== next.cycle) {
       warnings.push({

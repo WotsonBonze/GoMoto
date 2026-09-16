@@ -343,6 +343,72 @@ test.describe('Ajuste de período da locação', () => {
     expect(a.cancelled_charges_count).toBe(1)
   })
 
+  test('início avança para dentro de período já emitido: a cobrança cancelada ganha substituta, sem buraco', async () => {
+    // Reprodução do bug achado em teste de navegador (2026-09-15): antecipar
+    // o início em 2 dias sobre uma locação com períodos já emitidos cancelava
+    // a cobrança certa, mas não deixava NENHUMA linha cobrindo o trecho
+    // [novo início, vencimento original) — o período ficava sem cobrança
+    // nenhuma, em silêncio. `regenFrom` pulava direto para o fim do último
+    // período emitido e nunca olhava para o que sobrava antes disso.
+    const rentalId = await criarLocacao()
+    await emitir()
+
+    const antes = await cronograma(rentalId)
+    const primeira = antes[0]!
+    expect(primeira.status).toBe('issued')
+
+    const d = new Date(`${primeira.period_start}T00:00:00`)
+    d.setDate(d.getDate() + 2)
+    const novoInicio = d.toISOString().slice(0, 10)
+
+    const next = { ...PARAMS, start_date: novoInicio }
+    const plan = await planejar(rentalId, next, '')
+    expect(plan.blockers).toEqual([])
+    expect(plan.cancel_charges.map((c) => c.charge_id).length).toBeGreaterThan(0)
+
+    // Fora do teste, `adjustRentalPeriod` cancela cada `plan.cancel_charges`
+    // (com estorno de ledger) antes de chamar a RPC. Aqui, sem a Server
+    // Action, o teste imita só a parte que a RPC exige: sem isso, a guarda
+    // `LINE_HAS_LIVE_CHARGE` recusa a substituição.
+    for (const c of plan.cancel_charges) {
+      await admin().from('charges')
+        .update({ status: 'cancelled', cancellation_reason: 'E2E' })
+        .eq('id', c.charge_id)
+    }
+
+    const { error } = await aplicar(rentalId, next, plan)
+    expect(error).toBeNull()
+
+    const depois = await cronograma(rentalId)
+    const cobrancas = await cobrancasDaLocacao(rentalId)
+
+    // A linha original é substituída, e a cobrança dela cancelada.
+    const original = depois.find((l) => l.id === primeira.id)!
+    expect(original.status).toBe('superseded')
+    const cobrancaOriginal = cobrancas.find((c) => c.source_id === primeira.id)!
+    expect(cobrancaOriginal.status).toBe('cancelled')
+
+    // O trecho [novo início, vencimento original) tem uma linha NOVA cobrindo
+    // — sem pro rata, no valor CHEIO do ciclo (RN-011).
+    const substituta = depois.find((l) => l.period_start === novoInicio)
+    expect(substituta, 'trecho ficou sem nenhuma linha de cronograma').toBeDefined()
+    expect(substituta!.period_end).toBe(primeira.period_end)
+    expect(substituta!.due_date).toBe(primeira.due_date)
+    expect(Number(substituta!.amount)).toBe(PARAMS.cycle_amount)
+    expect(substituta!.status).toBe('scheduled')
+
+    // Nenhum trecho entre o novo início e o fim do contrato fica sem linha:
+    // ordenado por período, cada `period_end` encaixa com o `period_start`
+    // seguinte, sem furo.
+    const vivas = depois
+      .filter((l) => l.status === 'scheduled' || l.status === 'issued')
+      .sort((a, b) => a.period_start.localeCompare(b.period_start))
+    for (let i = 1; i < vivas.length; i++) {
+      expect(vivas[i]!.period_start).toBe(vivas[i - 1]!.period_end)
+    }
+    expect(vivas[0]!.period_start).toBe(novoInicio)
+  })
+
   test('locação encerrada não aceita ajuste', async () => {
     const futuro = { ...PARAMS, start_date: isoOffset(30), end_date: isoOffset(210) }
     const rentalId = await criarLocacao(futuro)

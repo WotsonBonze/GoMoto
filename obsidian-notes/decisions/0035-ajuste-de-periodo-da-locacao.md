@@ -112,6 +112,54 @@ está `cancelled`. Duas razões:
    seria reemitida: `issue_due_charges` só consome `status='scheduled'`.
    Substituir por uma linha nova garante que o período volte a ser cobrável.
 
+### Nenhum período fica sem cobrança (2026-09-15)
+
+**Bug achado em teste de navegador**: antecipar o início em 2 dias sobre uma
+locação com período já emitido cancelava a cobrança certa (linha e razão
+corretos), mas não deixava NENHUMA linha cobrindo o trecho entre o início novo
+e o vencimento original daquele período — o cliente ficava com dias de uso sem
+cobrança nenhuma, em silêncio. `regenFrom` pulava direto para `effective_from`
+(fim do último período emitido) e nunca olhava para o que sobrava entre
+`next.start_date` e o primeiro período que ainda sobrevivia.
+
+O mesmo defeito existia espelhado dos dois lados:
+- **Ponta esquerda**: `next.start_date` cai antes do primeiro período mantido
+  — seja avançando para dentro dele (invalidando-o), seja recuando para antes
+  de qualquer período existente (este último já existia como aviso
+  `START_BEFORE_ISSUED`, que dizia "vai ficar sem parcela" em vez de resolver).
+- **Ponta direita**: o operador digita uma `effective_from` que cai no MEIO de
+  um período em vez de bater numa borda — o date picker aceita qualquer data
+  `>= min_effective_from`, sem exigir alinhamento. O período que ela corta é
+  invalidado por inteiro, e o pedaço entre o início dele e a fronteira digitada
+  ficava do mesmo jeito sem cobertura.
+
+**Por que só nessas duas pontas**: as três condições de `survives` são
+monótonas na posição do período (início barra os mais antigos, `effective_from`
+barra os mais novos), então `keep_lines` é sempre UM ÚNICO trecho contínuo —
+não há como abrir buraco no meio.
+
+**Correção**: `regenFrom` deixou de ser sempre `max(next.start_date,
+effective_from)` e passou a ser literalmente onde o trecho mantido termina
+(`lastKeptEnd`, ou `next.start_date` quando nada sobrevive) — o que já fecha a
+ponta direita, porque a regeneração passa a olhar o pedaço entre o fim do
+último período mantido e uma fronteira que corta no meio de outro. E antes
+dessa regeneração principal, quando o primeiro período mantido (`firstKeptStart`)
+começa depois de `next.start_date`, uma chamada extra a `generateSchedule`
+cobre exatamente `[next.start_date, firstKeptStart)` — fecha a ponta esquerda.
+
+As duas chamadas usam a MESMA `generateCycleCharges` de sempre: nenhuma regra
+de preço nova. É por isso que a cobrança da lacuna sai certa sozinha — cheia
+quando o trecho é um ciclo completo entre dois vencimentos (RN-010), pro rata
+quando `use_pro_rata` está ligado e o trecho é uma ponta (RN-008/012), cheia
+mesmo sendo ponta quando `use_pro_rata` está desligado (RN-011). O aviso
+`START_BEFORE_ISSUED` foi removido — o cenário que ele descrevia agora gera
+cobertura real em vez de só avisar que faltava.
+
+Cobrado em `packages/core/src/rules/schedule.spec.ts` (bug reproduzido +
+recuo/avanço de início + `effective_from` no meio de período) e em
+`apps/web/tests/ajuste-de-periodo.spec.ts` (mesmo cenário, contra o banco e a
+RPC reais).
+
 ### Retroativo avisa, não impede
 
 Uma parcela nova cujo período já começou vira cobrança na rodada seguinte de
