@@ -146,14 +146,37 @@ export function BillingActions({ billingId, customerId, status, amountDue, cobra
   // efeito — e a action nem recebia a escolha.
   const saldoDeCredito = creditBalance
 
-  /** Nunca mais que o saldo, nunca mais que a dívida. */
-  const tetoDoCredito = Math.round(Math.min(saldoDeCredito, amountDue) * 100) / 100
+  /**
+   * Dois tetos, porque abater só o que já é dívida (`open_amount`) e quitar
+   * TUDO (incluindo o juros até hoje, `amountDue`) são ações diferentes — a
+   * segunda lança encargo na hora, a primeira não (ver `applyCustomerCredits`).
+   *
+   * `tetoSemJuros` é o que o crédito abate sem tocar em juros: nunca mais que
+   * o saldo, nunca mais que a dívida já lançada. É o valor SEGURO, e o que o
+   * campo sugere por padrão — o operador só entra na zona de juros se digitar
+   * mais que isso, ou clicar em "quitar tudo" explicitamente.
+   *
+   * `tetoComJuros` é o limite real do banco: saldo e o total devido HOJE,
+   * incluindo o encargo ainda em projeção. Passar de `tetoSemJuros` até aqui é
+   * válido, mas realiza o encargo — por isso o campo mostra o aviso dinâmico
+   * abaixo assim que o valor digitado ultrapassa `tetoSemJuros`.
+   */
+  const tetoSemJuros = Math.round(Math.min(saldoDeCredito, cobranca.openAmount) * 100) / 100
+  const tetoComJuros = Math.round(Math.min(saldoDeCredito, amountDue) * 100) / 100
+  const tetoDoCredito = tetoComJuros
 
-  // Nasce preenchido com o teto: é o abatimento que o operador quer em quase
-  // todo caso, e um campo vazio com placeholder cinza já foi confundido com
-  // campo preenchido — clicava em Aplicar e recebia "Valor inválido".
+  // Nasce preenchido com o teto SEM juros: é o abatimento que o operador quer
+  // no caso comum, e não lança encargo nenhum por padrão. Um campo vazio com
+  // placeholder cinza já foi confundido com campo preenchido — clicava em
+  // Aplicar e recebia "Valor inválido". Quem quer quitar tudo, juros incluído,
+  // digita mais ou usa o atalho abaixo — decisão explícita, não default.
   const [creditAmount, setCreditAmount] = useState(() =>
-    tetoDoCredito > 0 ? tetoDoCredito.toFixed(2) : '')
+    tetoSemJuros > 0 ? tetoSemJuros.toFixed(2) : '')
+
+  /** Este valor avança sobre o que ainda é projeção — vai lançar encargo. */
+  const valorIncluiJuros = (parseFloat(creditAmount) || 0) > tetoSemJuros + 0.004
+  /** Dá para quitar a cobrança inteira, juros de hoje incluído, só com crédito. */
+  const podeQuitarTudo = tetoComJuros > tetoSemJuros && saldoDeCredito >= tetoComJuros - 0.004
 
   // Vencida é estado DERIVADO de uma cobrança aberta, não um status terminal:
   // a página envia 'overdue' no lugar de 'open' quando há atraso. Comparar com
@@ -168,7 +191,7 @@ export function BillingActions({ billingId, customerId, status, amountDue, cobra
     if (amount > tetoDoCredito) {
       setFlashError(
         `O máximo aqui é ${formatCurrency(tetoDoCredito)} — o menor entre o saldo `
-        + 'de crédito do cliente e o que esta cobrança ainda deve.',
+        + 'de crédito do cliente e o que esta cobrança deve hoje, juros incluído.',
       )
       return
     }
@@ -376,9 +399,23 @@ export function BillingActions({ billingId, customerId, status, amountDue, cobra
               <span className="tabular-nums text-fg">{formatCurrency(saldoDeCredito)}</span>
             </div>
             <div className="mt-1 flex justify-between">
-              <span className="text-fg-mute">Esta cobrança deve</span>
-              <span className="tabular-nums text-fg">{formatCurrency(amountDue)}</span>
+              <span className="text-fg-mute">Esta cobrança deve (sem juros)</span>
+              <span className="tabular-nums text-fg">{formatCurrency(cobranca.openAmount)}</span>
             </div>
+            {/* Só aparece quando há o que mostrar: cobrança em dia não tem
+                juros previstos, e a linha ficaria dizendo "+ R$ 0,00". */}
+            {amountDue > cobranca.openAmount && (
+              <>
+                <div className="mt-1 flex justify-between text-warning">
+                  <span>+ Juros previstos até hoje</span>
+                  <span className="tabular-nums">{formatCurrency(amountDue - cobranca.openAmount)}</span>
+                </div>
+                <div className="mt-1 flex justify-between border-t border-divider pt-1">
+                  <span className="text-fg-mute">Se quitar tudo agora</span>
+                  <span className="tabular-nums text-fg">{formatCurrency(amountDue)}</span>
+                </div>
+              </>
+            )}
             <div className="mt-1 flex justify-between border-t border-divider pt-1">
               <span className="text-fg-mute">Pode abater até</span>
               <span className="tabular-nums font-semibold text-fg">{formatCurrency(tetoDoCredito)}</span>
@@ -412,6 +449,29 @@ export function BillingActions({ billingId, customerId, status, amountDue, cobra
               setFlashError(null)
             }}
           />
+
+          {/* A ação muda de natureza acima de `tetoSemJuros`, e isso precisa
+              estar visível ANTES de confirmar — não só depois, no extrato. */}
+          {valorIncluiJuros ? (
+            <p className="rounded-lg border border-warning bg-warning-bg px-3 py-2 text-[12px] text-warning">
+              Este valor passa do que já é dívida lançada — inclui juros até hoje. Ao confirmar,
+              o encargo é calculado e lançado nesta cobrança agora.
+            </p>
+          ) : podeQuitarTudo ? (
+            <button
+              type="button"
+              onClick={() => { setCreditAmount(tetoComJuros.toFixed(2)); setFlashError(null) }}
+              className="text-[12px] text-primary hover:underline"
+            >
+              Quitar a cobrança inteira agora com o crédito ({formatCurrency(tetoComJuros)}, juros de hoje incluído)
+            </button>
+          ) : (
+            <p className="text-[12px] text-fg-mute">
+              Este valor abate só a dívida já lançada. Juros, se houver, só entram ao registrar o
+              pagamento do restante, pela data do recebimento.
+            </p>
+          )}
+
           {flashError && <p className="text-[13px] text-danger">{flashError}</p>}
           <div className="flex justify-end gap-2 pt-2">
             <button

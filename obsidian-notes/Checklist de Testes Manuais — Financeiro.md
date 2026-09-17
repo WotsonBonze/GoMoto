@@ -570,13 +570,49 @@ docker exec supabase_db_GoMoto psql -U postgres -d postgres \
 > "Pago em" exibia o VENCIMENTO com outro rótulo, e ainda um dia antes por causa
 > de fuso: cobrança recebida em 21/08 aparecia paga em 20/07, antes de vencer.
 
-### 6.4 Pagar com crédito não escapa do encargo
+### 6.4 Aplicar crédito só lança encargo quando avança sobre ele
 
-- [x] Em cobrança vencida, aplique crédito.
+**Parcial — dentro do que já é dívida lançada:**
+- [x] Em cobrança vencida, aplique crédito **parcial**, sem cobrir tudo (o
+      campo já nasce sugerindo esse valor: o teto sem juros).
+- [x] O total da cobrança **não muda** — aplicar crédito parcial não realiza
+      multa nem juros. "Esta cobrança deve (sem juros)" mostra o saldo já
+      lançado (`open_amount`), não o "a pagar" do topo da página quando os
+      dois diferem (a diferença é encargo em projeção, mostrada à parte como
+      "Juros previstos até hoje").
+- [x] Abaixo do campo, com o valor no teto sem juros, aparece a nota "abate só
+      a dívida já lançada" — não o aviso de juros.
+- [x] Registre o restante em **Registrar pagamento**, com a data em que o
+      cliente pagou de verdade — se essa data está dentro do prazo (antes do
+      vencimento + carência), a tela não sugere multa nem juros, e nada é
+      lançado.
 
-**Verificar:**
-- [x] O encargo é realizado antes do abatimento — quem paga com crédito paga o
-      mesmo que quem paga em dinheiro.
+**Quitação total — crédito cobre a cobrança inteira, juros incluído:**
+- [x] Em cobrança vencida com saldo de crédito suficiente para cobrir o "se
+      quitar tudo agora", aparece o atalho **"Quitar a cobrança inteira agora
+      com o crédito (…, juros de hoje incluído)"**.
+- [x] Clicar no atalho preenche o campo com o valor TOTAL (principal + multa +
+      juros de hoje) e troca a nota por um aviso: "inclui juros até hoje… o
+      encargo é calculado e lançado nesta cobrança agora" — **antes** de
+      confirmar, não só depois no extrato.
+- [x] Confirmar: o total da cobrança **sobe** pelo encargo, a cobrança fecha
+      em zero, e o encargo aparece como receita (`receita_encargos_atraso`).
+- [x] Digitar manualmente um valor entre o teto sem juros e o teto com juros
+      (sem usar o atalho) produz o mesmo aviso e o mesmo resultado — quem
+      decide é o valor pedido, não o botão.
+
+> Existiram duas decisões anteriores, cada uma simétrica demais: primeiro,
+> realizar o encargo em QUALQUER aplicação de crédito, com
+> `realizeAccruedBefore(..., new Date())` sempre HOJE — o que quebrava a
+> reconciliação de um pagamento retroativo (operador abre cobrança vencida que
+> o cliente já tinha pago fora do sistema, aplica o desconto do saldo dele, e
+> o juros de HOJE virava item permanente, mesmo registrando o restante depois
+> com a data retroativa correta). Depois, o oposto — crédito NUNCA realiza
+> encargo —, o que reabria a porta original: quitar 100% de uma cobrança
+> vencida só com crédito escapava do juros que já tinha corrido. A regra final
+> distingue as duas situações pelo valor pedido: até `open_amount`, desconto
+> puro; acima disso, o crédito está avançando sobre o encargo e ele é
+> realizado — com a diferença visível na tela antes de confirmar.
 
 ---
 

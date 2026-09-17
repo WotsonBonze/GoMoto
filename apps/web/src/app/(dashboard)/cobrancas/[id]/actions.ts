@@ -58,8 +58,22 @@ function toMessage(err: unknown): string {
  * cliente: ler-saldo, decidir e escrever solto aqui deixava dois operadores
  * gastarem o mesmo crédito ao mesmo tempo.
  *
- * O encargo do atraso é realizado ANTES — quitar com crédito é quitar, e quem
- * paga assim não pode escapar da multa que já correu.
+ * Só realiza encargo por atraso quando o crédito avança sobre ele.
+ *
+ * Abater até o que já é dívida real (`open_amount`) é desconto puro: o
+ * encargo, se houver, fica para o registro de pagamento do restante, na data
+ * do recebimento — é ele que tem campo de data, e é o que corrige o que o
+ * operador digitar. Mas se o valor pedido passa de `open_amount`, só pode ser
+ * porque o crédito está cobrindo também o encargo — e aí ele PRECISA ser
+ * realizado antes: aplicar R$ 350 numa dívida de R$ 300 sem lançar os R$ 50
+ * de juros embutidos apagaria o encargo de graça, exatamente a assimetria que
+ * a versão anterior deste comentário corrigiu (`realizeAccruedBefore` sempre
+ * com `new Date()`, sem olhar o valor pedido) e que quebrou a reconciliação
+ * de pagamento retroativo. Agora as duas coisas são verdade: quitar SÓ com o
+ * que já está lançado não toca o encargo; quitar avançando sobre ele, sim — e
+ * é o valor pedido, não a intenção, que decide.
+ *
+ * A tela precisa deixar isso claro ANTES de confirmar — ver `BillingActions`.
  */
 export async function applyCustomerCredits(
   input: { customer_id: string; charge_id: string; amount: number },
@@ -73,7 +87,18 @@ export async function applyCustomerCredits(
   }
 
   try {
-    await realizeAccruedBefore(ctx.supabase, ctx.tenantId, [input.charge_id], new Date())
+    const { data: balanceRow } = await ctx.supabase
+      .from('charge_balances')
+      .select('open_amount')
+      .eq('charge_id', input.charge_id)
+      .eq('tenant_id', ctx.tenantId)
+      .maybeSingle()
+
+    const openAmount = round2(Number((balanceRow as { open_amount: number } | null)?.open_amount ?? 0))
+
+    if (amount > openAmount) {
+      await realizeAccruedBefore(ctx.supabase, ctx.tenantId, [input.charge_id], new Date())
+    }
 
     const { error } = await ctx.supabase.rpc('fn_apply_customer_credit', {
       p_tenant_id:   ctx.tenantId,
