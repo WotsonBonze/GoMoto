@@ -1,6 +1,7 @@
 'use server'
 
 import { createClient } from '@/lib/supabase/server'
+import { createAdminClient } from '@/lib/supabase/admin'
 import { revalidatePath } from 'next/cache'
 import { z } from 'zod'
 import {
@@ -1686,6 +1687,27 @@ export async function adjustRentalPeriod(
 
   const summary = (result ?? { superseded: 0, created: 0, cancelled: 0 }) as {
     superseded: number; created: number; cancelled: number
+  }
+
+  // Parcela nova cujo período já começou (`emits_now`) só vira cobrança na
+  // próxima rodada do cron (06h em Brasília) — sem isto, um ajuste
+  // retroativo (comum: erro de data descoberto dias depois) deixava o
+  // operador esperando até o dia seguinte por uma cobrança que ele acabou de
+  // criar. `fn_issue_charges_for_tenant` tem EXECUTE revogado de
+  // `authenticated` de propósito (só quem passa por `service_role` — cron ou
+  // disparo manual com `CRON_SECRET` — deveria emitir), então esta chamada
+  // usa `createAdminClient()` (ADR 0034), o mesmo papel que a rota de disparo
+  // manual já usa. Best-effort: a emissão já reconfere sozinha o que ainda
+  // cabe emitir, então uma falha aqui não desfaz o ajuste (já commitado) —
+  // só significa que a linha espera o cron normal, como sempre esperou.
+  if (plan.new_lines.some((l) => l.emits_now)) {
+    const { error: issueError } = await createAdminClient().rpc('fn_issue_charges_for_tenant', {
+      p_tenant_id: tenantId,
+      p_lead_days: 0,
+    })
+    if (issueError) {
+      console.error('adjustRentalPeriod: emissão imediata falhou, aguardando o cron', issueError.message)
+    }
   }
 
   await logAction({

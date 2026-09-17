@@ -245,6 +245,40 @@ o que produziu a divergência atual de regras, e nenhuma das três conseguiria m
 o efeito completo: mudar o dia de vencimento e a data de fim ao mesmo tempo gera um
 cronograma que nenhuma das telas sozinha sabe calcular.
 
+### Parcela retroativa emite na hora, não espera o cron (2026-09-16)
+
+`fn_run_billing_emission` roda uma vez por dia (06h em Brasília, via
+`pg_cron`). Uma linha nova que já nasce com período iniciado (`emits_now`) —
+comum em ajuste retroativo, tipicamente um erro de data descoberto dias
+depois — ficava `status='scheduled'` até a rodada seguinte: o operador
+confirmava o ajuste e só via a cobrança de verdade (com o lançamento no
+razão) no dia seguinte.
+
+`adjustRentalPeriod` passou a chamar `fn_issue_charges_for_tenant` (a mesma
+função do cron, documento + lançamento na mesma transação) logo depois que a
+RPC do ajuste commita, sempre que `plan.new_lines` tem alguma `emits_now`.
+`fn_issue_charges_for_tenant` tem `EXECUTE` revogado de `authenticated` de
+propósito (migration `lock_down_emission_rpcs`: "ninguém legítimo precisa
+desses grants" — só cron ou disparo manual com `CRON_SECRET`), então essa
+chamada usa `createAdminClient()` (`@/lib/supabase/admin`, o cliente
+`service_role` da [[decisions/0034-auditabilidade-do-caminho-do-dinheiro|ADR
+0034]]), o mesmo papel que a rota `/api/cron/issue-charges` já usa para o
+disparo manual. Não é burlar o
+lockdown: é o servidor (nunca o navegador) invocando o mesmo caminho
+confiável que já existia, só que síncrono em vez de por HTTP+segredo.
+
+Best-effort de propósito: o ajuste já está commitado quando essa chamada
+acontece (RPC própria, transação própria), então uma falha na emissão não
+desfaz nada — só significa que a linha espera o cron normal, exatamente como
+sempre esperou. Só loga o erro; não aparece como falha do ajuste pro
+operador.
+
+Escopo é o TENANT inteiro, não só a locação ajustada — é a mesma
+`fn_issue_charges_for_tenant(tenant_id, lead_days)` do cron, sem parâmetro de
+locação. Efeito colateral desejado: qualquer outra parcela do tenant que já
+devia ter sido emitida (atraso de cron, reativação de tenant) sai emitida
+junto, de graça.
+
 ## Não resolvido aqui → resolvido pela ADR 0036
 
 Esta ADR apontava que não havia guarda contra duas locações no mesmo veículo e que
