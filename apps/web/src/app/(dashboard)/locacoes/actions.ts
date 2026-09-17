@@ -1685,25 +1685,39 @@ export async function adjustRentalPeriod(
     return { ok: false, error: { code: 'INTERNAL_ERROR', message: error.message } }
   }
 
-  const summary = (result ?? { superseded: 0, created: 0, cancelled: 0 }) as {
+  const summary = (result ?? { superseded: 0, created: 0, cancelled: 0, new_lines: [] }) as {
     superseded: number; created: number; cancelled: number
+    new_lines: Array<{ id: string; sequence_number: number }>
   }
 
   // Parcela nova cujo período já começou (`emits_now`) só vira cobrança na
   // próxima rodada do cron (06h em Brasília) — sem isto, um ajuste
   // retroativo (comum: erro de data descoberto dias depois) deixava o
   // operador esperando até o dia seguinte por uma cobrança que ele acabou de
-  // criar. `fn_issue_charges_for_tenant` tem EXECUTE revogado de
-  // `authenticated` de propósito (só quem passa por `service_role` — cron ou
-  // disparo manual com `CRON_SECRET` — deveria emitir), então esta chamada
-  // usa `createAdminClient()` (ADR 0034), o mesmo papel que a rota de disparo
+  // criar. Escopado às linhas que ESTE ajuste criou (por `sequence_number`,
+  // única por locação — não por posição no array, que `jsonb_array_elements`
+  // não garante preservar em `RETURNING`): emitir o tenant inteiro aqui
+  // acoplaria esta ação à fila inteira e, pior, uma cobrança de OUTRA locação
+  // falhando no meio do laço de `issue_due_charges` desfaria a transação
+  // inteira — inclusive a cobrança que este ajuste acabou de criar.
+  //
+  // `fn_issue_charges_for_tenant` tem EXECUTE revogado de `authenticated` de
+  // propósito (só quem passa por `service_role` — cron ou disparo manual com
+  // `CRON_SECRET` — deveria emitir), então esta chamada usa
+  // `createAdminClient()` (ADR 0034), o mesmo papel que a rota de disparo
   // manual já usa. Best-effort: a emissão já reconfere sozinha o que ainda
   // cabe emitir, então uma falha aqui não desfaz o ajuste (já commitado) —
   // só significa que a linha espera o cron normal, como sempre esperou.
-  if (plan.new_lines.some((l) => l.emits_now)) {
+  const idsParaEmitirAgora = plan.new_lines
+    .filter((l) => l.emits_now)
+    .map((l) => summary.new_lines.find((n) => n.sequence_number === l.sequence_number)?.id)
+    .filter((id): id is string => !!id)
+
+  if (idsParaEmitirAgora.length > 0) {
     const { error: issueError } = await createAdminClient().rpc('fn_issue_charges_for_tenant', {
       p_tenant_id: tenantId,
       p_lead_days: 0,
+      p_schedule_line_ids: idsParaEmitirAgora,
     })
     if (issueError) {
       console.error('adjustRentalPeriod: emissão imediata falhou, aguardando o cron', issueError.message)

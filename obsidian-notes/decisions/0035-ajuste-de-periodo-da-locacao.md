@@ -273,11 +273,50 @@ desfaz nada — só significa que a linha espera o cron normal, exatamente como
 sempre esperou. Só loga o erro; não aparece como falha do ajuste pro
 operador.
 
-Escopo é o TENANT inteiro, não só a locação ajustada — é a mesma
-`fn_issue_charges_for_tenant(tenant_id, lead_days)` do cron, sem parâmetro de
-locação. Efeito colateral desejado: qualquer outra parcela do tenant que já
-devia ter sido emitida (atraso de cron, reativação de tenant) sai emitida
-junto, de graça.
+**Correção (2026-09-17): escopo é a LINHA, não o tenant inteiro.** A versão
+original chamava `fn_issue_charges_for_tenant(tenant_id, lead_days)` sem
+filtro — a mesma função do cron, processando toda a fila do tenant numa
+transação só. Revisão achou o problema antes de ir pra produção:
+`issue_due_charges` não isola falha por cobrança — se qualquer OUTRA linha do
+tenant (de outra locação, sem relação com o ajuste) falhasse ao virar
+documento, a exceção subia e desfazia a transação inteira, **inclusive a
+cobrança que o ajuste acabou de criar**. Como a chamada é best-effort (só
+loga), o operador veria "ajuste aplicado" sem nunca saber que a própria
+cobrança dele foi derrubada por algo de uma locação completamente diferente.
+Também acoplava a latência de "toda a fila do tenant" a uma ação que devia
+ser rápida.
+
+Corrigido em duas pontas:
+1. `fn_adjust_rental_period` passou a devolver `new_lines` (`{id,
+   sequence_number}[]`) no `RETURN jsonb_build_object(...)` — antes só
+   contava (`GET DIAGNOSTICS ... ROW_COUNT`). Sem o id de volta não havia
+   como dizer à emissão QUAL linha processar.
+2. `issue_due_charges`/`fn_issue_charges_for_tenant` ganharam
+   `p_schedule_line_ids UUID[] DEFAULT NULL` — `NULL` continua sendo o
+   tenant inteiro (o cron, inalterado); a action passa só os ids das linhas
+   que ELA criou, casando `plan.new_lines` (`emits_now`) com o retorno da
+   RPC por `sequence_number` (único por locação — não por posição no array,
+   que `jsonb_array_elements` não garante preservar em `RETURNING`).
+
+Isso mudou a ASSINATURA das duas funções (parâmetro a mais), diferente de
+toda migration anterior sobre elas, que só trocava o corpo via
+`CREATE OR REPLACE` sobre a mesma assinatura `(uuid, integer)` — e por isso
+nunca precisou reafirmar grant (a garantia documentada em
+`20260912220840_periodo_do_ciclo_na_descricao_da_cobranca`, "CREATE OR
+REPLACE preserva grant", só vale quando a assinatura não muda). Migration
+`20260917005041_emissao_escopada_por_linha` faz `DROP FUNCTION` explícito
+das duas antes de recriar, e reaplica `REVOKE ... FROM PUBLIC, anon,
+authenticated` + `GRANT ... TO service_role` na íntegra — sem isso, o novo
+overload nasceria com `EXECUTE` liberado pra `PUBLIC` por padrão, reabrindo
+o buraco que `lock_down_emission_rpcs` fechou. `fn_run_billing_emission`
+chama a função posicionalmente com 2 argumentos; resolve pro único overload
+existente, 3º cai no default `NULL` — comportamento do cron inalterado.
+
+Coberto em `apps/web/tests/ajuste-de-periodo.spec.ts` ("emissão da parcela
+retroativa do ajuste é escopada"): duas locações independentes, a 2ª com
+parcela igualmente vencida e nunca emitida fora do escopo passado —
+confirma que só a linha do ajuste vira `issued`, a outra permanece
+`scheduled`.
 
 ## Não resolvido aqui → resolvido pela ADR 0036
 

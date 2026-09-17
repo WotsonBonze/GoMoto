@@ -457,6 +457,69 @@ test.describe('Ajuste de período da locação', () => {
     }
   })
 
+  test('emissão da parcela retroativa do ajuste é escopada — não alcança cobrança de outra locação', async () => {
+    // `fn_adjust_rental_period` devolve `new_lines` ({id, sequence_number}[])
+    // — é isso que permite à action emitir na hora só o que ELA criou, em vez
+    // de chamar `fn_issue_charges_for_tenant` sem filtro (que processaria a
+    // fila do tenant inteiro numa transação só: uma cobrança de OUTRA locação
+    // falhando ali dentro desfaria até a cobrança que este ajuste criou).
+    const rentalId = await criarLocacao()
+    await emitir()
+
+    const antes = await cronograma(rentalId)
+    const primeira = antes[0]!
+    expect(primeira.status).toBe('issued')
+
+    const d = new Date(`${primeira.period_start}T00:00:00`)
+    d.setDate(d.getDate() + 2)
+    const novoInicio = d.toISOString().slice(0, 10)
+
+    const next = { ...PARAMS, start_date: novoInicio }
+    const plan = await planejar(rentalId, next, '')
+    expect(plan.blockers).toEqual([])
+    const emiteAgora = plan.new_lines.filter((l) => l.emits_now)
+    expect(emiteAgora.length).toBeGreaterThan(0)
+
+    for (const c of plan.cancel_charges) {
+      await admin().from('charges')
+        .update({ status: 'cancelled', cancellation_reason: 'E2E' })
+        .eq('id', c.charge_id)
+    }
+    const { data, error } = await aplicar(rentalId, next, plan)
+    expect(error).toBeNull()
+
+    const novasLinhas = (data as { new_lines: Array<{ id: string; sequence_number: number }> }).new_lines
+    const idsParaEmitir = emiteAgora
+      .map((l) => novasLinhas.find((n) => n.sequence_number === l.sequence_number)?.id)
+      .filter((id): id is string => !!id)
+    expect(idsParaEmitir.length).toBe(emiteAgora.length)
+
+    // Outra locação, independente, com uma parcela igualmente vencida e
+    // NUNCA emitida — fica de fora do escopo do array acima de propósito.
+    const outraLocacaoId = await criarLocacao()
+    const outroCronograma = await cronograma(outraLocacaoId)
+    const outraVencida = outroCronograma.find((l) => l.status === 'scheduled' && l.period_start <= isoOffset(0))!
+    expect(outraVencida, 'setup precisa de uma parcela vencida e nunca emitida na 2ª locação').toBeDefined()
+
+    const { error: emitirError } = await admin().rpc('fn_issue_charges_for_tenant', {
+      p_tenant_id: await getTestTenantId(),
+      p_lead_days: 0,
+      p_schedule_line_ids: idsParaEmitir,
+    })
+    expect(emitirError).toBeNull()
+
+    // A linha que o ajuste criou virou cobrança na hora — sem esperar o cron.
+    const linhaNova = await admin()
+      .from('rental_billing_schedules').select('status').eq('id', idsParaEmitir[0]!).single()
+    expect((linhaNova.data as { status: string }).status).toBe('issued')
+
+    // A parcela vencida da OUTRA locação continua intocada — o escopo
+    // funcionou. Sem ele, esta mesma chamada teria emitido as duas.
+    const outraDepois = await admin()
+      .from('rental_billing_schedules').select('status').eq('id', outraVencida.id).single()
+    expect((outraDepois.data as { status: string }).status).toBe('scheduled')
+  })
+
   test('locação encerrada não aceita ajuste', async () => {
     const futuro = { ...PARAMS, start_date: isoOffset(30), end_date: isoOffset(210) }
     const rentalId = await criarLocacao(futuro)
