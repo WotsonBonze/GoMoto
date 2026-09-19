@@ -44,6 +44,7 @@ import { logAction } from '@/lib/audit'
 import { createCharge, cancelCharge, receivePayment, postTransaction, dimensionsOf } from '@/lib/financial'
 import { getCurrentTenantId } from '@/lib/auth/tenant'
 import { loadPeriodAdjustmentContext } from './_lib/period-adjustment'
+import { loadTerminationPlan } from './_lib/termination-plan'
 
 function revalidateRentalPaths() {
   revalidatePath('/locacoes')
@@ -697,6 +698,82 @@ export async function terminateRental(
     newStatus = 'transferred'
   }
 
+  // Spec 0016 (revisão): plano recarregado no SERVIDOR — nunca no que o
+  // client mandou — classificando toda linha viva do cronograma. Fora do
+  // período (`cancel_auto`) é SEMPRE cancelada, sem escolha do operador;
+  // dentro do período, só o que veio marcado nos dois campos "extra_*" abaixo
+  // (RF-002 revisado: decisão do operador é OPCIONAL só para o que
+  // sobreviveria por padrão — nunca silenciosa quando ele decide agir).
+  const plan = await loadTerminationPlan(
+    supabase, tenantId, parsed.data.lease_id, parsed.data.termination_date,
+  )
+
+  const extraChargeIds       = new Set(parsed.data.extra_charge_ids_to_cancel)
+  const extraScheduleLineIds = new Set(parsed.data.extra_schedule_line_ids_to_cancel)
+
+  // Cada id "extra" (dentro do período, opcional) precisa ser exatamente uma
+  // linha `keep_optional` do plano — nunca uma já bloqueada, já mantida sem
+  // opção, ou uma que nem é candidata (RN-002 como autorização de dado, não
+  // só filtro de UI).
+  for (const id of [...extraChargeIds, ...extraScheduleLineIds]) {
+    const linha = plan.find((l) => l.charge_id === id || l.schedule_line_id === id)
+    if (!linha || linha.action !== 'keep_optional') {
+      return {
+        ok: false,
+        error: {
+          code: 'TERMINATION_ITEM_NOT_CANDIDATE',
+          message: 'Uma das cobranças ou parcelas marcadas não está mais disponível para cancelamento opcional. Recarregue a tela e confira a lista de novo.',
+        },
+      }
+    }
+  }
+
+  // Cobrança já emitida a cancelar = toda `cancel_auto` (fora do período,
+  // sempre) + o que foi marcado opcionalmente (dentro do período). Cancelada
+  // ANTES da RPC, não depois: `cancelCharge` reverte a emissão no razão e
+  // recusa cobrança com pagamento ou crédito alocado (RN-001), e só depois de
+  // canceladas elas saem de `charge_balances.status='open'`, que é o que a
+  // RPC lê para apurar o valor em aberto (RF-004) e para decidir
+  // `RENTAL_HAS_OPEN_CHARGES`. Mesma ordem que `adjustRentalPeriod` já usa
+  // (ADR 0035): falha aqui aborta sem chamar a RPC — nada foi alterado no
+  // contrato.
+  const chargeIdsToCancel = plan
+    .filter((l) => l.charge_id && (l.action === 'cancel_auto' || extraChargeIds.has(l.charge_id)))
+    .map((l) => l.charge_id!)
+
+  for (const chargeId of chargeIdsToCancel) {
+    const linha = plan.find((l) => l.charge_id === chargeId)!
+    try {
+      await cancelCharge(
+        supabase, tenantId, chargeId,
+        'Encerramento retroativo do contrato',
+        user.id,
+      )
+      await logAction({
+        action: 'update',
+        table: 'charges',
+        recordId: chargeId,
+        newData: { status: 'cancelled', reason: 'rental_retroactive_termination' },
+      })
+    } catch (err) {
+      return {
+        ok: false,
+        error: {
+          code: 'INTERNAL_ERROR',
+          message: `Falha ao cancelar a cobrança #${linha.charge_number}: ${String(err)}. O encerramento não foi confirmado.`,
+        },
+      }
+    }
+  }
+
+  // Linhas ainda não emitidas, dentro do período, que o operador marcou por
+  // opção (RF-002 revisado). As de FORA do período já são cobertas pela
+  // própria RPC (comportamento inalterado: `status='scheduled' AND
+  // period_start > p_termination_date`).
+  const extraScheduleLineIdsValidadas = plan
+    .filter((l) => !l.is_issued && l.action === 'keep_optional' && extraScheduleLineIds.has(l.schedule_line_id))
+    .map((l) => l.schedule_line_id)
+
   // Spec 0014: a RPC agora APURA antes de encerrar e recusa débito em aberto
   // sem p_force. Antes, cancelava pendentes e liberava o veículo sem olhar
   // dívida nem caução (F-08).
@@ -716,6 +793,7 @@ export async function terminateRental(
     p_charge_fine:          parsed.data.charge_fine,
     p_fine_deposit_amount:  parsed.data.fine_deposit_amount,
     p_fine_credit_amount:   parsed.data.fine_credit_amount,
+    p_extra_schedule_line_ids_to_cancel: extraScheduleLineIdsValidadas,
   })
 
   if (error) {

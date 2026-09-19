@@ -5,7 +5,12 @@ import { useRouter } from 'next/navigation'
 import Link from 'next/link'
 import { AlertTriangle, ChevronRight, Bike, CalendarX2, ReceiptText } from 'lucide-react'
 
-import { useRentalOpenCharges, useDepositBalance, useRentalSchedule, useCustomerCreditBalance } from '@gomoto/data'
+import {
+  useRentalOpenCharges,
+  useDepositBalance,
+  useCustomerCreditBalance,
+  useRentalTerminationPlan,
+} from '@gomoto/data'
 import {
   getEarlyTerminationImpact,
   isRentalTerminationWithinMinimum,
@@ -61,6 +66,19 @@ export function TerminateForm({ rental }: TerminateFormProps) {
   )
   const [error, setError] = useState('')
 
+  // Spec 0016 (revisão): cancelamento OPCIONAL de linha que, por estar dentro
+  // do período, sobreviveria por padrão — chave é `schedule_line_id` (serve
+  // tanto para cobrança já emitida quanto para linha ainda não emitida).
+  // Zera sempre que a data muda — mudar a data muda quem é "dentro" e "fora"
+  // (RN-002), então uma marcação feita para a data anterior não deve
+  // sobreviver em silêncio.
+  const [extraSelected, setExtraSelected] = useState<Set<string>>(new Set())
+
+  function handleTerminationDateChange(value: string) {
+    setTerminationDate(value)
+    setExtraSelected(new Set())
+  }
+
   // Km final (Spec 0014, RN-002 + RN-003 + RN-004) — obrigatório em todo
   // encerramento, mesmo de locação anterior a esta feature (km_initial nulo
   // entra como 0 no piso). Atualiza vehicles.km_current na mesma transação.
@@ -72,14 +90,46 @@ export function TerminateForm({ rental }: TerminateFormProps) {
   // Spec 0014: a apuração passa a olhar três coisas distintas — o que foi
   // emitido e não pago, o saldo de caução, e o cronograma ainda não emitido.
   // Antes, `useBillings` misturava documento e plano numa lista só.
-  const chargesQuery  = useRentalOpenCharges(rental.id)
-  const depositQuery  = useDepositBalance(rental.id)
-  const scheduleQuery = useRentalSchedule(rental.id)
+  const chargesQuery = useRentalOpenCharges(rental.id)
+  const depositQuery = useDepositBalance(rental.id)
+
+  // Spec 0016 (revisão): TODA linha viva do cronograma — vencida, emitida ou
+  // planejada —, classificada como fora do período (sempre cancelada, ou
+  // bloqueada por já ter valor reduzido) ou dentro dele (mantida, com opção
+  // de cancelar mesmo assim).
+  const terminationPlanQuery = useRentalTerminationPlan(rental.id, terminationDate)
+  const terminationPlan = useMemo(() => terminationPlanQuery.data ?? [], [terminationPlanQuery.data])
+
+  const outsidePeriod = useMemo(() => terminationPlan.filter((l) => l.is_outside_period), [terminationPlan])
+  // `keep_locked` (já paga ou com crédito aplicado) nunca tem nada a decidir
+  // aqui — mostrar só polui a lista com o que já está resolvido e continua
+  // exatamente igual, dentro ou fora desta tela.
+  const insidePeriod = useMemo(
+    () => terminationPlan.filter((l) => !l.is_outside_period && l.action !== 'keep_locked'),
+    [terminationPlan],
+  )
+
+  // Ids (schedule_line_id) que serão cancelados de fato: toda `cancel_auto`
+  // (fora do período, sem escolha) + o que o operador marcou por opção dentro
+  // dele. `chargeIdsSendoCancelados` é o recorte financeiro (só o que já é
+  // documento) usado para excluir do valor em aberto abaixo (RF-004).
+  const chargeIdsSendoCancelados = useMemo(() => new Set(
+    terminationPlan
+      .filter((l) => l.charge_id && (l.action === 'cancel_auto' || (l.action === 'keep_optional' && extraSelected.has(l.schedule_line_id))))
+      .map((l) => l.charge_id!),
+  ), [terminationPlan, extraSelected])
 
   // Consulta por LOCAÇÃO, não por cliente: antes o valor em aberto dependia de
   // `rental.customer_id` estar presente, e sem ele a apuração mostrava zero e o
   // encerramento falhava sem explicação.
-  const openCharges = useMemo(() => chargesQuery.data ?? [], [chargesQuery.data])
+  //
+  // RF-004: cobrança que será cancelada sai daqui ANTES de qualquer conta
+  // abaixo (caução, crédito, multa, botão de confirmar) ser calculada — um
+  // único filtro na origem em vez de repetir a exclusão em cada `useMemo`.
+  const openCharges = useMemo(
+    () => (chargesQuery.data ?? []).filter((c) => !chargeIdsSendoCancelados.has(c.charge_id)),
+    [chargesQuery.data, chargeIdsSendoCancelados],
+  )
 
   const openAmount     = openCharges.reduce((s, c) => s + c.open_amount, 0)
   const depositBalance = depositQuery.data ?? 0
@@ -119,23 +169,23 @@ export function TerminateForm({ rental }: TerminateFormProps) {
   const creditBalance = useCustomerCreditBalance(rental.customer_id).data ?? 0
 
   /**
-   * O que o encerramento REALMENTE cancela, com o mesmo critério da RPC:
-   * `status = 'scheduled' AND period_start > p_termination_date`.
-   *
-   * Duas coisas estavam erradas aqui. O alerta contava cobranças já EMITIDAS e
-   * anunciava que seriam canceladas — o oposto do que acontece, e o oposto do
-   * que o checkbox ao lado afirma. E o valor vinha de `contracted_backlog`,
-   * que é todo o cronograma não emitido, sem olhar a data escolhida.
-   *
-   * Encerrando na data de fim do contrato, todos os períodos já começaram e
-   * NADA é cancelado — a tela prometia três parcelas e cancelava zero. Como a
-   * data é editável, os dois números precisam responder a ela.
+   * O que será cancelado de fato, separado por já ter virado documento ou não
+   * — a Apuração financeira e o bloco "Ao confirmar" falam desses dois números
+   * separadamente (RF-001..RF-005). Fora do período entra inteiro (sem
+   * escolha); dentro, só o que foi marcado por opção.
    */
-  const cancelable = useMemo(() => {
-    const lines = (scheduleQuery.data?.lines ?? [])
-      .filter(l => l.status === 'scheduled' && l.period_start > terminationDate)
-    return { count: lines.length, total: lines.reduce((s, l) => s + l.amount, 0) }
-  }, [scheduleQuery.data, terminationDate])
+  const willCancel = useMemo(() => {
+    const linhas = terminationPlan.filter((l) =>
+      l.action === 'cancel_auto' || (l.action === 'keep_optional' && extraSelected.has(l.schedule_line_id)),
+    )
+    const planejadas = linhas.filter((l) => !l.is_issued)
+    const emitidas    = linhas.filter((l) => l.is_issued)
+    const soma = (ls: typeof linhas) => ls.reduce((s, l) => s + l.total_amount, 0)
+    return {
+      planejadas: { count: planejadas.length, total: soma(planejadas) },
+      emitidas:    { count: emitidas.length,   total: soma(emitidas)   },
+    }
+  }, [terminationPlan, extraSelected])
 
   // Spec 0015: multa e prazo mínimo agora são configuráveis por locação —
   // `getEarlyTerminationImpact` lê a config da própria locação, não mais uma
@@ -203,6 +253,29 @@ export function TerminateForm({ rental }: TerminateFormProps) {
   const [multaDecisao, setMultaDecisao] = useState<'charge' | 'skip' | null>(null)
   const [multaCaucaoAmount, setMultaCaucaoAmount] = useState('')
   const [multaCreditoAmount, setMultaCreditoAmount] = useState('')
+
+  // Spec 0016 (revisão): dentro do período, decisão explícita por linha —
+  // manter (padrão) ou cancelar mesmo assim —, ou todas as elegíveis de uma
+  // vez. A bloqueada (`keep_locked`) nunca entra no atalho.
+  function setLineDecision(scheduleLineId: string, decision: 'keep' | 'cancel') {
+    setExtraSelected((prev) => {
+      const next = new Set(prev)
+      if (decision === 'cancel') next.add(scheduleLineId)
+      else next.delete(scheduleLineId)
+      return next
+    })
+  }
+
+  const optionalLineIds = useMemo(
+    () => insidePeriod.filter((l) => l.action === 'keep_optional').map((l) => l.schedule_line_id),
+    [insidePeriod],
+  )
+  const allOptionalMarked = optionalLineIds.length > 0
+    && optionalLineIds.every((id) => extraSelected.has(id))
+
+  function toggleMarkAllOptional() {
+    setExtraSelected(allOptionalMarked ? new Set() : new Set(optionalLineIds))
+  }
 
   /**
    * Reter só existe contra dívida (ADR 0026, fase 3): sem dívida a caução é
@@ -341,6 +414,12 @@ export function TerminateForm({ rental }: TerminateFormProps) {
         charge_fine:          multaAplicavel && multaDecisao === 'charge',
         fine_deposit_amount:  multaCaucaoParaAbater,
         fine_credit_amount:   multaCreditoParaAbater,
+        extra_charge_ids_to_cancel: terminationPlan
+          .filter((l) => l.charge_id && l.action === 'keep_optional' && extraSelected.has(l.schedule_line_id))
+          .map((l) => l.charge_id!),
+        extra_schedule_line_ids_to_cancel: terminationPlan
+          .filter((l) => !l.charge_id && l.action === 'keep_optional' && extraSelected.has(l.schedule_line_id))
+          .map((l) => l.schedule_line_id),
       })
       if (!result.ok) { setError(result.error.message); return }
 
@@ -456,7 +535,7 @@ export function TerminateForm({ rental }: TerminateFormProps) {
                   type="date"
                   value={terminationDate}
                   max={hoje}
-                  onChange={e => setTerminationDate(e.target.value)}
+                  onChange={e => handleTerminationDateChange(e.target.value)}
                   className="h-9 w-full rounded-lg border border-border bg-surface-2 px-3 text-[13px] text-fg outline-none transition-all focus:border-primary"
                 />
                 <p className="mt-2 text-[12px] leading-relaxed text-fg-mute">
@@ -490,6 +569,114 @@ export function TerminateForm({ rental }: TerminateFormProps) {
                 )}
               </div>
             </section>
+
+            {/* Spec 0016 (revisão): TODA linha viva do cronograma — vencida,
+                emitida ou planejada —, dividida entre o que fica fora do
+                período (sempre cancelada, sem escolha) e o que fica dentro
+                dele (mantida por padrão, com opção de cancelar mesmo assim). */}
+            {outsidePeriod.length > 0 && (
+              <section>
+                <h2 className="mb-3 text-[14px] font-bold text-primary">Fora do período — serão canceladas</h2>
+                <div className="overflow-hidden rounded-xl border border-divider bg-surface">
+                  {outsidePeriod.map((l) => (
+                    <div
+                      key={l.schedule_line_id}
+                      className="flex items-center justify-between gap-3 border-b border-divider px-4 py-3 text-[13px] last:border-b-0"
+                    >
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-baseline justify-between gap-3">
+                          <span className="font-medium text-fg">
+                            {l.is_issued ? `Cobrança #${l.charge_number}` : 'Parcela ainda não emitida'}
+                            {l.is_overdue && (
+                              <span className="ml-2 rounded-full bg-danger-bg px-2 py-0.5 text-[11px] font-medium text-danger">
+                                atrasada
+                              </span>
+                            )}
+                          </span>
+                          <span className="tabular-nums text-fg">{formatCurrency(l.total_amount)}</span>
+                        </div>
+                        <p className="mt-0.5 text-[12px] text-fg-mute">
+                          Período {formatDate(l.period_start)} a {formatDate(l.period_end)}
+                        </p>
+                        {l.action === 'blocked' ? (
+                          <p className="mt-1 text-[12px] text-warning">
+                            Já paga ou com crédito aplicado ({formatCurrency(l.paid_amount)}) — não pode ser
+                            cancelada por aqui.
+                          </p>
+                        ) : (
+                          <p className="mt-1 text-[12px] text-danger">Será cancelada.</p>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </section>
+            )}
+
+            {insidePeriod.length > 0 && (
+              <section>
+                <div className="mb-3 flex items-center justify-between gap-3">
+                  <h2 className="text-[14px] font-bold text-primary">Dentro do período</h2>
+                  {optionalLineIds.length > 0 && (
+                    <button
+                      type="button"
+                      onClick={toggleMarkAllOptional}
+                      className="text-[12px] font-medium text-primary underline underline-offset-2 hover:opacity-80"
+                    >
+                      {allOptionalMarked ? 'Manter todas' : 'Cancelar todas mesmo assim'}
+                    </button>
+                  )}
+                </div>
+                <div className="overflow-hidden rounded-xl border border-divider bg-surface">
+                  {insidePeriod.map((l) => {
+                    const marcada = extraSelected.has(l.schedule_line_id)
+                    return (
+                      <div
+                        key={l.schedule_line_id}
+                        className="flex items-center justify-between gap-3 border-b border-divider px-4 py-3 text-[13px] last:border-b-0"
+                      >
+                        <div className="min-w-0 flex-1">
+                          <div className="flex items-baseline justify-between gap-3">
+                            <span className="font-medium text-fg">
+                              {l.is_issued ? `Cobrança #${l.charge_number}` : 'Parcela ainda não emitida'}
+                              {l.is_overdue && (
+                                <span className="ml-2 rounded-full bg-danger-bg px-2 py-0.5 text-[11px] font-medium text-danger">
+                                  atrasada
+                                </span>
+                              )}
+                            </span>
+                            <span className="tabular-nums text-fg">{formatCurrency(l.total_amount)}</span>
+                          </div>
+                          <p className="mt-0.5 text-[12px] text-fg-mute">
+                            Período {formatDate(l.period_start)} a {formatDate(l.period_end)}
+                          </p>
+                        </div>
+                        <div className="flex shrink-0 overflow-hidden rounded-lg border border-border">
+                          <button
+                            type="button"
+                            onClick={() => setLineDecision(l.schedule_line_id, 'keep')}
+                            className={`h-8 px-3 text-[12px] font-medium transition-colors ${
+                              !marcada ? 'bg-surface-2 text-fg' : 'text-fg-mute hover:bg-surface-2'
+                            }`}
+                          >
+                            Manter
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setLineDecision(l.schedule_line_id, 'cancel')}
+                            className={`h-8 px-3 text-[12px] font-medium transition-colors ${
+                              marcada ? 'bg-danger-bg text-danger' : 'text-fg-mute hover:bg-surface-2'
+                            }`}
+                          >
+                            Cancelar
+                          </button>
+                        </div>
+                      </div>
+                    )
+                  })}
+                </div>
+              </section>
+            )}
 
             {multaAplicavel && (
               <section>
@@ -827,15 +1014,29 @@ export function TerminateForm({ rental }: TerminateFormProps) {
 
                 <div className="px-4 py-3">
                   <div className="flex items-baseline justify-between gap-3">
-                    <span className="text-[13px] text-fg-mute">Cronograma a cancelar</span>
-                    <span className={`text-[13px] font-semibold tabular-nums ${cancelable.total > 0 ? 'text-fg' : 'text-fg-mute'}`}>
-                      {formatCurrency(cancelable.total)}
+                    <span className="text-[13px] text-fg-mute">Parcelas ainda não emitidas a cancelar</span>
+                    <span className={`text-[13px] font-semibold tabular-nums ${willCancel.planejadas.total > 0 ? 'text-fg' : 'text-fg-mute'}`}>
+                      {formatCurrency(willCancel.planejadas.total)}
                     </span>
                   </div>
                   <p className="mt-1 text-[12px] text-fg-mute">
-                    {cancelable.count > 0
-                      ? `${cancelable.count} parcela${cancelable.count !== 1 ? 's' : ''} ainda não emitida${cancelable.count !== 1 ? 's' : ''}`
-                      : 'nenhuma parcela agendada depois desta data'}
+                    {willCancel.planejadas.count > 0
+                      ? `${willCancel.planejadas.count} parcela${willCancel.planejadas.count !== 1 ? 's' : ''}`
+                      : 'nenhuma'}
+                  </p>
+                </div>
+
+                <div className="px-4 py-3">
+                  <div className="flex items-baseline justify-between gap-3">
+                    <span className="text-[13px] text-fg-mute">Cobranças já emitidas a cancelar</span>
+                    <span className={`text-[13px] font-semibold tabular-nums ${willCancel.emitidas.total > 0 ? 'text-fg' : 'text-fg-mute'}`}>
+                      {formatCurrency(willCancel.emitidas.total)}
+                    </span>
+                  </div>
+                  <p className="mt-1 text-[12px] text-fg-mute">
+                    {willCancel.emitidas.count > 0
+                      ? `${willCancel.emitidas.count} cobrança${willCancel.emitidas.count !== 1 ? 's' : ''}`
+                      : 'nenhuma'}
                   </p>
                 </div>
               </div>
@@ -926,13 +1127,24 @@ export function TerminateForm({ rental }: TerminateFormProps) {
                   </span>
                 </li>
 
-                {cancelable.count > 0 && (
+                {willCancel.planejadas.count > 0 && (
                   <li className="flex items-start gap-3 px-4 py-3 text-[13px] text-fg-soft">
                     <CalendarX2 className="mt-0.5 h-4 w-4 shrink-0 text-fg-mute" />
                     <span>
-                      {cancelable.count} parcela{cancelable.count !== 1 ? 's' : ''} ainda não emitida
-                      {cancelable.count !== 1 ? 's' : ''} ser{cancelable.count !== 1 ? 'ão' : 'á'} cancelada
-                      {cancelable.count !== 1 ? 's' : ''}.
+                      {willCancel.planejadas.count} parcela{willCancel.planejadas.count !== 1 ? 's' : ''} ainda não emitida
+                      {willCancel.planejadas.count !== 1 ? 's' : ''} ser{willCancel.planejadas.count !== 1 ? 'ão' : 'á'} cancelada
+                      {willCancel.planejadas.count !== 1 ? 's' : ''}.
+                    </span>
+                  </li>
+                )}
+
+                {willCancel.emitidas.count > 0 && (
+                  <li className="flex items-start gap-3 px-4 py-3 text-[13px] text-danger">
+                    <ReceiptText className="mt-0.5 h-4 w-4 shrink-0" />
+                    <span>
+                      {willCancel.emitidas.count} cobrança{willCancel.emitidas.count !== 1 ? 's' : ''} já emitida
+                      {willCancel.emitidas.count !== 1 ? 's' : ''} ser{willCancel.emitidas.count !== 1 ? 'ão' : 'á'} cancelada
+                      {willCancel.emitidas.count !== 1 ? 's' : ''} — o cliente deixa de dever esse período.
                     </span>
                   </li>
                 )}
@@ -943,8 +1155,7 @@ export function TerminateForm({ rental }: TerminateFormProps) {
                     <span>
                       {openCharges.length} cobrança{openCharges.length !== 1 ? 's' : ''} já emitida
                       {openCharges.length !== 1 ? 's' : ''} continua{openCharges.length !== 1 ? 'm' : ''}{' '}
-                      {openCharges.length !== 1 ? 'cobráveis' : 'cobrável'} — o encerramento não cancela
-                      documento emitido.
+                      {openCharges.length !== 1 ? 'cobráveis' : 'cobrável'}.
                     </span>
                   </li>
                 )}
