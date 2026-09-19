@@ -5,9 +5,11 @@ import {
   selectAdjustableLines,
   contractedBacklog,
   planPeriodAdjustment,
+  planRetroactiveTermination,
   type ScheduleStatus,
   type ScheduleLineRow,
   type ScheduleLineChargeRow,
+  type TerminationChargeInfo,
   type PeriodAdjustmentInput,
   type PeriodAdjustmentPlan,
 } from './schedule'
@@ -249,8 +251,8 @@ function cronograma(issuedCount = 0, params = PARAMS): ScheduleLineRow[] {
 
 function cobranca(
   linha: ScheduleLineRow,
-  over: Partial<ScheduleLineChargeRow> = {},
-): ScheduleLineChargeRow {
+  over: Partial<TerminationChargeInfo> = {},
+): TerminationChargeInfo {
   return {
     schedule_line_id: linha.id,
     charge_id: `cob-${linha.id}`,
@@ -259,6 +261,7 @@ function cobranca(
     total_amount: linha.amount,
     paid_amount: 0,
     status: 'open',
+    is_overdue: false,
     ...over,
   }
 }
@@ -880,5 +883,116 @@ describe('planPeriodAdjustment — vigência só vale para ciclo/vencimento/valo
     })
 
     expect(plano.blockers.map((b) => b.code)).not.toContain('EFFECTIVE_BEFORE_PAID')
+  })
+})
+
+describe('planRetroactiveTermination — encerramento retroativo (Spec 0016, revisão)', () => {
+  it('fora do período e elegível: cancel_auto, emitida ou não (RN-002)', () => {
+    const lines = cronograma(1) // linha-1 issued, linha-2+ scheduled
+    const charges = lines.slice(0, 1).map((l) => cobranca(l))
+    const terminationDate = lines[0]!.period_start // encerra exatamente no início do 1º período
+
+    const plano = planRetroactiveTermination(lines, charges, terminationDate)
+
+    // A 1ª linha COMEÇA na data — não é "fora". As demais (emitida nenhuma,
+    // só planejadas) começam depois: sempre canceladas, sem escolha.
+    const linha2 = plano.find((l) => l.schedule_line_id === 'linha-2')!
+    expect(linha2).toMatchObject({ is_outside_period: true, is_issued: false, action: 'cancel_auto' })
+  })
+
+  it('cobrança emitida fora do período, sem redução: cancel_auto (não é mais opcional)', () => {
+    const lines = cronograma(2)
+    const charges = lines.slice(0, 2).map((l) => cobranca(l))
+    const terminationDate = lines[0]!.period_start
+
+    const plano = planRetroactiveTermination(lines, charges, terminationDate)
+
+    const linha2 = plano.find((l) => l.schedule_line_id === 'linha-2')!
+    expect(linha2).toMatchObject({ is_outside_period: true, is_issued: true, is_eligible: true, action: 'cancel_auto' })
+  })
+
+  it('cobrança emitida fora do período, com pagamento: blocked (RN-001, RF-003/CA-003)', () => {
+    const lines = cronograma(2)
+    const charges = [
+      cobranca(lines[0]!),
+      cobranca(lines[1]!, { paid_amount: 500 }),
+    ]
+    const terminationDate = lines[0]!.period_start
+
+    const plano = planRetroactiveTermination(lines, charges, terminationDate)
+
+    expect(plano.find((l) => l.schedule_line_id === 'linha-2')).toMatchObject({ is_eligible: false, action: 'blocked' })
+  })
+
+  it('cobrança emitida fora do período, com crédito aplicado sem pagamento em dinheiro: blocked (RN-001, RF-003/CA-006)', () => {
+    // fn_apply_customer_credit grava o abatimento como paid_amount — mesma
+    // conta do pagamento em dinheiro/gateway (ver charge_balances).
+    const lines = cronograma(2)
+    const charges = [
+      cobranca(lines[0]!),
+      cobranca(lines[1]!, { paid_amount: 250 }),
+    ]
+    const terminationDate = lines[0]!.period_start
+
+    const plano = planRetroactiveTermination(lines, charges, terminationDate)
+
+    expect(plano.find((l) => l.schedule_line_id === 'linha-2')).toMatchObject({ is_eligible: false, action: 'blocked' })
+  })
+
+  it('dentro do período e elegível: keep_optional, emitida ou não', () => {
+    const lines = cronograma(2)
+    const charges = lines.slice(0, 2).map((l) => cobranca(l))
+    const terminationDate = lines[1]!.period_start // encerra depois da 1ª e 2ª linhas começarem
+
+    const plano = planRetroactiveTermination(lines, charges, terminationDate)
+
+    const linha1 = plano.find((l) => l.schedule_line_id === 'linha-1')!
+    expect(linha1).toMatchObject({ is_outside_period: false, is_issued: true, is_eligible: true, action: 'keep_optional' })
+
+    const linhaFutura = plano.find((l) => l.is_issued === false && l.period_start <= terminationDate)
+    if (linhaFutura) expect(linhaFutura.action).toBe('keep_optional')
+  })
+
+  it('dentro do período, com valor já reduzido: keep_locked, sem opção', () => {
+    const lines = cronograma(2)
+    const charges = [
+      cobranca(lines[0]!, { paid_amount: 250 }),
+      cobranca(lines[1]!),
+    ]
+    const terminationDate = lines[1]!.period_start
+
+    const plano = planRetroactiveTermination(lines, charges, terminationDate)
+
+    expect(plano.find((l) => l.schedule_line_id === 'linha-1')).toMatchObject({ is_eligible: false, action: 'keep_locked' })
+  })
+
+  it('is_overdue passa direto da cobrança para a linha classificada', () => {
+    const lines = cronograma(1)
+    const charges = [cobranca(lines[0]!, { is_overdue: true })]
+    const terminationDate = lines[0]!.period_start
+
+    const plano = planRetroactiveTermination(lines, charges, terminationDate)
+
+    expect(plano.find((l) => l.schedule_line_id === 'linha-1')).toMatchObject({ is_overdue: true })
+  })
+
+  it('linha emitida sem cobrança correspondente não quebra — trata como sem valor reduzido', () => {
+    const lines = cronograma(2)
+    const charges = [cobranca(lines[0]!)] // linha-2 não tem cobrança associada
+    const terminationDate = lines[0]!.period_start
+
+    const plano = planRetroactiveTermination(lines, charges, terminationDate)
+
+    expect(plano.find((l) => l.schedule_line_id === 'linha-2')).toMatchObject({ charge_id: null, is_eligible: true })
+  })
+
+  it('linha cancelada ou substituída não aparece no plano — já resolvida', () => {
+    const lines = cronograma(1)
+    lines[1]!.status = 'cancelled'
+    const terminationDate = lines[0]!.period_start
+
+    const plano = planRetroactiveTermination(lines, [cobranca(lines[0]!)], terminationDate)
+
+    expect(plano.find((l) => l.schedule_line_id === 'linha-2')).toBeUndefined()
   })
 })

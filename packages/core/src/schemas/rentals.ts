@@ -142,6 +142,15 @@ export const TerminateRentalSchema = z.object({
   charge_fine:          z.boolean().optional().default(false),
   fine_deposit_amount:  z.number().min(0).optional().default(0),
   fine_credit_amount:   z.number().min(0).optional().default(0),
+  // Spec 0016 (revisão): cobrança fora do período (depois da data de
+  // encerramento) é cancelada automaticamente pela Action/RPC — não entra
+  // aqui. Estes dois campos são só o cancelamento OPCIONAL de algo que
+  // sobreviveria por padrão (dentro do período): cobrança já emitida, ou
+  // linha do cronograma ainda não emitida. A Action reconfere cada id contra
+  // o plano recarregado no servidor antes de cancelar — este schema só
+  // garante o formato (uuid), nunca a elegibilidade.
+  extra_charge_ids_to_cancel:        z.array(z.string().uuid()).optional().default([]),
+  extra_schedule_line_ids_to_cancel: z.array(z.string().uuid()).optional().default([]),
 }).refine(
   (d) => d.charge_fine || (d.fine_deposit_amount === 0 && d.fine_credit_amount === 0),
   { message: 'Só é possível abater caução/crédito quando a multa é cobrada', path: ['charge_fine'] },

@@ -595,6 +595,102 @@ export function planPeriodAdjustment(input: PeriodAdjustmentInput): PeriodAdjust
   }
 }
 
+// ---------------------------------------------------------------------------
+// Encerramento retroativo — o que acontece com cada linha do cronograma
+// (Spec 0016, revisão de 2026-09-17)
+// ---------------------------------------------------------------------------
+
+/** Charge com o dado extra que só a view `charge_balances` sabe. */
+export type TerminationChargeInfo = ScheduleLineChargeRow & { is_overdue: boolean }
+
+/**
+ * O que este encerramento faz com uma linha do cronograma (emitida ou não):
+ *
+ * - `cancel_auto`   — fora do período (RN-002) e elegível: sempre cancelada,
+ *   sem escolha do operador. É o mesmo tratamento que `rental_billing_schedules`
+ *   já dava a linha `scheduled` fora do período; agora vale também para
+ *   `issued`.
+ * - `blocked`       — fora do período, mas com valor já reduzido (RN-001):
+ *   não pode ser cancelada por este fluxo. Só existe para linha emitida —
+ *   linha ainda não emitida nunca tem pagamento.
+ * - `keep_optional` — dentro do período e elegível: mantida por padrão, com
+ *   opção de o operador marcar para cancelar mesmo assim.
+ * - `keep_locked`   — dentro do período, mas com valor já reduzido: mantida,
+ *   sem opção (nada a decidir).
+ */
+export type TerminationAction = 'cancel_auto' | 'blocked' | 'keep_optional' | 'keep_locked'
+
+export type TerminationLine = {
+  schedule_line_id: string
+  /** `null` quando a linha ainda não virou documento (planejada). */
+  charge_id: string | null
+  charge_number: number | null
+  period_start: string
+  period_end: string
+  total_amount: number
+  paid_amount: number
+  is_issued: boolean
+  is_overdue: boolean
+  is_outside_period: boolean
+  /** `false` quando há pagamento OU crédito já aplicado (RN-001). */
+  is_eligible: boolean
+  action: TerminationAction
+}
+
+/**
+ * Classifica TODA linha viva do cronograma (`scheduled` ou `issued`) em
+ * relação a uma data de encerramento retroativa — emitida ou não, vencida ou
+ * não, dentro ou fora do período que sobrevive ao encerramento (PRD 0016).
+ *
+ * `is_eligible` replica a regra de `cancelCharge` (RN-001): qualquer valor já
+ * reduzido — pagamento ou crédito do cliente aplicado — torna a cobrança
+ * imune. Os dois caem na mesma conta porque `fn_apply_customer_credit` grava
+ * o abatimento como um pagamento de método `credit`, então `paid_amount` já
+ * soma os dois. Linha ainda não emitida nunca tem cobrança, logo é sempre
+ * elegível.
+ *
+ * A MESMA função alimenta a prévia da tela e a revalidação server-side da
+ * Action — prévia e persistência não podem divergir, mesmo motivo de
+ * `planPeriodAdjustment`.
+ */
+export function planRetroactiveTermination(
+  lines: ReadonlyArray<ScheduleLineRow>,
+  charges: ReadonlyArray<TerminationChargeInfo>,
+  terminationDate: string,
+): TerminationLine[] {
+  const chargeByLine = new Map(charges.map((c) => [c.schedule_line_id, c]))
+
+  const rows: TerminationLine[] = []
+  for (const line of lines) {
+    if (line.status !== 'scheduled' && line.status !== 'issued') continue
+
+    const charge = chargeByLine.get(line.id) ?? null
+    const isOutside  = line.period_start > terminationDate
+    const paidAmount = charge?.paid_amount ?? 0
+    const isEligible = paidAmount === 0
+
+    let action: TerminationAction
+    if (isOutside) action = isEligible ? 'cancel_auto' : 'blocked'
+    else           action = isEligible ? 'keep_optional' : 'keep_locked'
+
+    rows.push({
+      schedule_line_id: line.id,
+      charge_id:         charge?.charge_id ?? null,
+      charge_number:     charge?.charge_number ?? null,
+      period_start:      line.period_start,
+      period_end:        line.period_end,
+      total_amount:      charge?.total_amount ?? line.amount,
+      paid_amount:       paidAmount,
+      is_issued:         line.status === 'issued',
+      is_overdue:        charge?.is_overdue ?? false,
+      is_outside_period: isOutside,
+      is_eligible:       isEligible,
+      action,
+    })
+  }
+  return rows.sort((a, b) => a.period_start.localeCompare(b.period_start))
+}
+
 /** Formatação mínima para as mensagens desta camada, que não importa UI. */
 function formatBrl(n: number): string {
   return `R$ ${n.toFixed(2).replace('.', ',')}`

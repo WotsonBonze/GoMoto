@@ -158,3 +158,36 @@ describe('TerminateRentalSchema — decisão da multa (RF-004/RF-006/RN-005)', (
     expect(result.success).toBe(true)
   })
 })
+
+describe('TerminateRentalSchema — cancelamento opcional dentro do período (Spec 0016)', () => {
+  const baseTermination = {
+    lease_id: randomUUID(),
+    termination_date: '2026-06-01',
+    km_final: 15000,
+  }
+
+  it('extra_charge_ids_to_cancel e extra_schedule_line_ids_to_cancel default é lista vazia', () => {
+    const result = TerminateRentalSchema.safeParse(baseTermination)
+    expect(result.success).toBe(true)
+    if (result.success) {
+      expect(result.data.extra_charge_ids_to_cancel).toEqual([])
+      expect(result.data.extra_schedule_line_ids_to_cancel).toEqual([])
+    }
+  })
+
+  it('aceita listas de uuids nos dois campos', () => {
+    const result = TerminateRentalSchema.safeParse({
+      ...baseTermination,
+      extra_charge_ids_to_cancel: [randomUUID()],
+      extra_schedule_line_ids_to_cancel: [randomUUID(), randomUUID()],
+    })
+    expect(result.success).toBe(true)
+  })
+
+  it('rejeita id que não é uuid em qualquer um dos campos', () => {
+    const result = TerminateRentalSchema.safeParse({
+      ...baseTermination, extra_charge_ids_to_cancel: ['nao-e-um-uuid'],
+    })
+    expect(result.success).toBe(false)
+  })
+})
