@@ -13,6 +13,7 @@ import {
   calculateAmountDue,
   classifyCustomerDelinquency,
   contractedBacklog,
+  planRetroactiveTermination,
   DEFAULT_DELINQUENCY_POLICY,
   type DelinquencyStatus,
   type LateChargePolicy,
@@ -38,6 +39,7 @@ import {
   getRentalResult,
   listIncomeStatement,
   listRentalSchedule,
+  listRentalIssuedChargeInfo,
   getActiveDelinquencyPolicy,
   type ChargeBalanceRow,
 } from '../repositories/ledger'
@@ -54,6 +56,7 @@ const KEY = {
   rental: 'rental-result',
   dre: 'income-statement',
   schedule: 'rental-schedule',
+  terminationCandidates: 'rental-termination-candidates',
   policy: 'financial-policy',
   monthlySummary: 'monthly-summary',
   paymentIntent: 'payment-intent',
@@ -422,6 +425,32 @@ export function useRentalSchedule(rentalId: string | undefined) {
     queryFn: async () => {
       const lines = await listRentalSchedule(supabase, rentalId!)
       return { lines, contracted_backlog: contractedBacklog(lines) }
+    },
+  })
+}
+
+/**
+ * O que o encerramento retroativo faz com CADA linha do cronograma — vencida,
+ * emitida ou planejada, dentro ou fora do período que sobrevive (Spec 0016).
+ * A MESMA `planRetroactiveTermination` que alimenta esta prévia é reconferida
+ * no servidor pela Server Action antes de cancelar qualquer uma — prévia e
+ * persistência não podem divergir.
+ */
+export function useRentalTerminationPlan(
+  rentalId: string | undefined,
+  terminationDate: string | undefined,
+) {
+  const supabase = useSupabaseContext()
+
+  return useQuery({
+    queryKey: [KEY.terminationCandidates, rentalId, terminationDate],
+    enabled: !!rentalId && !!terminationDate,
+    queryFn: async () => {
+      const [lines, charges] = await Promise.all([
+        listRentalSchedule(supabase, rentalId!),
+        listRentalIssuedChargeInfo(supabase, rentalId!),
+      ])
+      return planRetroactiveTermination(lines, charges, terminationDate!)
     },
   })
 }

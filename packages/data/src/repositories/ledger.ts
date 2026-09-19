@@ -7,7 +7,7 @@
  */
 
 import type { SupabaseClient } from '@supabase/supabase-js'
-import { ACCOUNTS } from '@gomoto/core'
+import { ACCOUNTS, type ScheduleLineChargeRow, type TerminationChargeInfo } from '@gomoto/core'
 
 // ============================================================
 // Tipos das views
@@ -454,6 +454,73 @@ export async function listRentalSchedule(
 
   if (error) throw error
   return (data ?? []) as ScheduleRow[]
+}
+
+/**
+ * Cobranças de ciclo emitidas de uma locação, com o saldo (`charge_balances`)
+ * de cada uma — inclusive `is_overdue`, que só a view sabe calcular
+ * (`fn_business_today`, não o relógio do browser).
+ *
+ * Mesmo vínculo que `loadPeriodAdjustmentContext` usa (apps/web): a origem da
+ * cobrança de ciclo é a LINHA do cronograma, não a locação —
+ * `charges.source_module='rental'` + `charges.source_id = <id da linha>`
+ * (migration `charge_single_origin`; `rental_billing_schedules.charge_id` foi
+ * derrubada na mesma migration).
+ *
+ * Usado junto com `useRentalSchedule` (que já traz TODAS as linhas, qualquer
+ * status) pela tela de Encerramento — `planRetroactiveTermination`
+ * (@gomoto/core) decide o que fazer com cada uma, não este repositório.
+ */
+export async function listRentalIssuedChargeInfo(
+  client: SupabaseClient,
+  rentalId: string,
+): Promise<TerminationChargeInfo[]> {
+  const [
+    { data: chargeRows, error: chargeError },
+    { data: balanceRows, error: balanceError },
+  ] = await Promise.all([
+    client
+      .from('charges')
+      .select('id, source_id, charge_number, due_date, status')
+      .eq('rental_id', rentalId)
+      .eq('source_module', 'rental'),
+    client
+      .from('charge_balances')
+      .select('charge_id, total_amount, paid_amount, is_overdue')
+      .eq('rental_id', rentalId),
+  ])
+
+  if (chargeError) throw chargeError
+  if (balanceError) throw balanceError
+
+  const balanceById = new Map(
+    ((balanceRows ?? []) as Array<{ charge_id: string; total_amount: number; paid_amount: number; is_overdue: boolean }>)
+      .map((b) => [b.charge_id, b]),
+  )
+
+  return (
+    (chargeRows ?? []) as Array<{
+      id: string
+      source_id: string | null
+      charge_number: number
+      due_date: string
+      status: ScheduleLineChargeRow['status']
+    }>
+  )
+    .filter((c) => c.source_id !== null)
+    .map((c) => {
+      const balance = balanceById.get(c.id)
+      return {
+        schedule_line_id: c.source_id!,
+        charge_id:        c.id,
+        charge_number:    Number(c.charge_number),
+        due_date:         c.due_date,
+        total_amount:     Number(balance?.total_amount ?? 0),
+        paid_amount:      Number(balance?.paid_amount ?? 0),
+        status:           c.status,
+        is_overdue:       Boolean(balance?.is_overdue ?? false),
+      }
+    })
 }
 
 // ============================================================
