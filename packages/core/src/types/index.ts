@@ -453,6 +453,10 @@ export type ErrorCode =
   | 'EXTRACTION_FAILED'
   | 'INTERNAL'
   | 'INTERNAL_ERROR'
+  /** Spec 0016: id de cancelamento opcional fora do plano recarregado no servidor. */
+  | 'TERMINATION_ITEM_NOT_CANDIDATE'
+  /** Spec 0016: cobrança com pagamento ou crédito já aplicado (RN-001). */
+  | 'CHARGE_NOT_ELIGIBLE_FOR_TERMINATION'
 
 export type ActionResult<T> =
   | { ok: true; data: T }
