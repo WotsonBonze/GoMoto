@@ -76,7 +76,7 @@ O núcleo é imutável e balanceado. **Saldo nunca é coluna**: todo saldo é ag
 
 | View | Entrega |
 |---|---|
-| `charge_balances` | total, pago, em aberto, `is_overdue`, `days_overdue` |
+| `charge_balances` | total, pago, em aberto, `is_overdue`, `days_overdue`, `source_module` (origem da cobrança — Spec 0017). **`open_amount` é `itens − alocações` e ignora o `status`**: cobrança cancelada continua com `open_amount > 0`; quem decide quem recebe dinheiro precisa filtrar `status = 'open'` |
 | `customer_delinquency` | fatos de inadimplência por cliente |
 | `deposit_balances`, `customer_credit_balances` | saldos agregados do ledger |
 | `vehicle_financial_position` | receita, custo bruto, repassado, `net_result` por veículo |
@@ -87,7 +87,7 @@ Todas usam `LEFT JOIN LATERAL` com subconsulta agregada — nunca `JOIN` irmão 
 
 ### RPCs
 
-`post_financial_transaction` (escrita atômica no ledger), `create_rental_with_schedule`, `issue_due_charges` (job diário), `adjust_rental_schedule`, `terminate_rental` (com apuração).
+`post_financial_transaction` (escrita atômica no ledger), `create_rental_with_schedule`, `issue_due_charges` (job diário), `adjust_rental_schedule`, `terminate_rental` (com apuração; desde a Spec 0017 também aplica a distribuição dirigida de caução e crédito na mesma transação que fecha a locação).
 
 ## Operações
 

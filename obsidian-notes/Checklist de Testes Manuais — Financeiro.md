@@ -758,15 +758,41 @@ Só faz sentido com **duas ou mais versões** de política na base (crie uma em 
 - [x] O saldo de caução do contrato foi a zero.
 - [x] A moto voltou para **disponível** e pode ser locada de novo.
 
-### 7.5 Destino da caução — reter
+### 7.5 Distribuição de caução e crédito, dívida a dívida
 
-- [x] Em outro contrato, encerre escolhendo **Reter tudo**.
+> Substituiu *Reter tudo* / *Abater parte da dívida* (Spec 0017). O operador não
+> escolhe mais um valor agregado que o sistema espalha da cobrança mais antiga
+> para a mais nova: informa, **dívida a dívida**, quanto de caução e quanto de
+> crédito quita cada uma. Caixas desmarcadas de propósito — o fluxo mudou e a
+> verificação manual anterior (*Reter tudo*) já não vale.
+
+- [ ] Em um contrato com **caução, crédito do cliente e 2 ou mais cobranças em
+      aberto**, abra **Encerrar**.
 
 **Verificar:**
-- [x] O **caixa não mudou** (atalho acima) — reter só converte passivo em
-      abatimento; o dinheiro já estava com a empresa.
-- [x] A dívida do cliente foi abatida pelo valor retido.
-- [x] O saldo de caução foi a zero.
+- [ ] A seção **Distribuição de caução e crédito** lista cada cobrança em aberto
+      numa linha, com a **origem** (Entrada, Despesa, Ciclo…) e o valor devido.
+- [ ] Digitando valores, o **alocado** e o **resta** de caução e de crédito
+      mudam na hora, sem esperar o servidor.
+- [ ] Passar do valor de uma dívida — ou do saldo de caução/crédito — mostra o
+      aviso em vermelho e trava **Confirmar Encerramento**.
+- [ ] Caução numa dívida e crédito em outra, confirmando: cada uma é baixada
+      **exatamente** pelo valor alocado, e nenhuma outra dívida é tocada.
+- [ ] O **caixa não mudou** com o que foi alocado (é abatimento, o dinheiro já
+      estava com a empresa) — só a devolução da sobra tira dinheiro.
+- [ ] Com cobrança ainda em aberto, a **sobra de caução** exige escolha
+      (*Devolver* ou *Deixar em custódia*): nada é devolvido por padrão.
+- [ ] Em locação com multa por rescisão, escolher **Cobrar a multa** faz a
+      multa aparecer como **mais uma linha** da lista — sem seção de abatimento
+      própria.
+- [ ] Nada é gravado até **Confirmar Encerramento**: dá para mexer nos valores
+      à vontade antes disso.
+- [ ] No **crédito**, digitar (ou colar) mais do que cabe **corta o valor** no teto
+      da linha — o menor entre o saldo que sobrou e o que a dívida ainda deve —,
+      sem mostrar aviso.
+- [ ] O botão **Máx.** de cada linha aplica esse teto na dívida; fica desligado
+      quando a linha já está no teto ou o saldo acabou, e volta a ligar quando
+      outra linha libera saldo.
 
 ### 7.6 Cronograma futuro é cancelado
 

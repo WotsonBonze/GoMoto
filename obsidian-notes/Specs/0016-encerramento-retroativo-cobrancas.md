@@ -23,6 +23,8 @@ tags:
 
 > **Ajuste de UI (2026-09-18):** a lista "Dentro do período" só exibe linha `keep_optional` — `keep_locked` (já paga ou com crédito aplicado) some da tela: nada a decidir ali, e mostrar só poluía a lista com o que já está resolvido. A classificação (`planRetroactiveTermination`) e o contrato de banco não mudam — é filtro só no `insidePeriod` de `TerminateForm.tsx`.
 
+> **Ajuste de UI (2026-09-21):** a lista "Fora do período" mostra só as **5 primeiras** linhas e, abaixo, o botão **"Exibir mais X cobranças"** (que vira "Exibir menos" depois de aberto). Um contrato longo encerrado cedo cancela dezenas de parcelas, e todas na tela empurravam a distribuição de caução e crédito ([[Specs/0017-abatimento-caucao-credito]]) para muito longe. Só resume quando esconde **ao menos duas** linhas — 6 aparecem todas, 7 escondem 2 —, porque um botão para revelar uma única linha é pior que mostrá-la. É só apresentação: a classificação, o que é cancelado e os totais da Apuração financeira seguem inteiros. Coberto por `apps/web/tests/encerramento-lista-fora-do-periodo.spec.ts`.
+
 > **Por que lite?** Toca uma única tela (Encerrar contrato), reaproveita uma capacidade já existente (`cancelCharge`, ADR 0035), sem entidade nova.
 
 ---
