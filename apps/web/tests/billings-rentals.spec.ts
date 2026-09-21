@@ -144,13 +144,14 @@ test.describe('Encerramento antecipado preserva garantias emitidas (RN-003)', ()
     // do cliente vai — a seção só aparece quando há saldo de caução, e o
     // fixture antigo a escondia por não lançar no razão.
     //
-    // A devolução integral passou a ser ESCOLHA explícita: desde a ADR 0026 o
-    // padrão da tela é abater, porque devolver dinheiro a quem deve é a ordem
-    // errada. Este teste é sobre garantias emitidas sobreviverem ao
-    // encerramento, e para isso as cobranças precisam continuar em aberto —
-    // então aqui se devolve, de propósito.
-    await expect(page.getByText('Destino da caução')).toBeVisible({ timeout: 10_000 })
-    await page.getByRole('radio', { name: /Devolver tudo/ }).check()
+    // Spec 0017: a caução se distribui dívida a dívida, e o que sobra é decisão
+    // EXPLÍCITA quando o cliente ainda deve — a tela nunca devolve dinheiro por
+    // inércia (ADR 0026: abater vem antes de devolver). Este teste é sobre
+    // garantias emitidas sobreviverem ao encerramento, e para isso as cobranças
+    // precisam continuar em aberto — então aqui não se distribui nada e se
+    // devolve a caução inteira, de propósito.
+    await expect(page.getByText('Distribuição de caução e crédito')).toBeVisible({ timeout: 10_000 })
+    await page.getByRole('radio', { name: /Devolver R\$ 300,00 ao cliente/ }).check()
 
     await page.getByRole('button', { name: 'Confirmar Encerramento' }).click()
 
@@ -379,12 +380,14 @@ test.describe('Encerramento liquida a caução', () => {
     // Spec 0014: km final é obrigatório em todo encerramento.
     await page.locator('input[type=number]').first().fill('0')
 
-    await expect(page.getByText('Destino da caução')).toBeVisible({ timeout: 10_000 })
-    // O rótulo mudou de "Reter parte" para "Abater parte da dívida" (ADR 0026):
-    // reter É abater, e o nome antigo sugeria que a empresa ficava com o dinheiro.
-    await page.getByRole('radio', { name: /Abater parte da dívida/ }).check()
-    await page.locator('#retido').fill('300')
+    await expect(page.getByText('Distribuição de caução e crédito')).toBeVisible({ timeout: 10_000 })
+    // Spec 0017: reter É abater uma dívida específica, e o operador escolhe qual.
+    // Aqui a dívida é a própria cobrança da caução (R$ 800, emitida e não paga no
+    // fixture): 300 vão para ela, e os 500 que sobram são devolvidos.
+    await page.locator(`#caucao-${chargeId}`).fill('300')
     await page.locator('#motivo').fill('Avaria no para-choque')
+    // Com a cobrança ainda devendo R$ 500, a sobra exige escolha explícita.
+    await page.getByRole('radio', { name: /Devolver R\$ 500,00 ao cliente/ }).check()
 
     // A própria cobrança da caução está em aberto, e com débito pendente o
     // encerramento exige confirmação explícita (F-08).

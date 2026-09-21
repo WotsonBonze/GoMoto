@@ -8,6 +8,12 @@ import { z } from 'zod'
 
 const dateString = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Formato de data inválido (YYYY-MM-DD)')
 
+/** Uma alocação de caução ou crédito numa dívida (cobrança) específica — Spec 0017. */
+const DebtAllocationSchema = z.object({
+  charge_id: z.string().uuid(),
+  amount:    z.number().positive({ error: 'Valor alocado deve ser maior que zero' }),
+})
+
 // ---------------------------------------------------------------------------
 // Locação — criação
 // ---------------------------------------------------------------------------
@@ -151,12 +157,48 @@ export const TerminateRentalSchema = z.object({
   // garante o formato (uuid), nunca a elegibilidade.
   extra_charge_ids_to_cancel:        z.array(z.string().uuid()).optional().default([]),
   extra_schedule_line_ids_to_cancel: z.array(z.string().uuid()).optional().default([]),
+  // Spec 0017: distribuição dirigida de caução e crédito, dívida a dívida. Só
+  // as dívidas REAIS entram aqui — a multa segue nos dois campos escalares
+  // acima, porque o `charge_id` dela só existe depois que a RPC a cria. Este
+  // schema garante o FORMATO; saldo, teto por dívida e pertencimento à locação
+  // são conferidos pela RPC, sob trava, na mesma transação do encerramento.
+  deposit_allocations: z.array(DebtAllocationSchema).optional().default([]).refine(
+    (rows) => new Set(rows.map((r) => r.charge_id)).size === rows.length,
+    { message: 'Cada dívida só pode aparecer uma vez na distribuição de caução' },
+  ),
+  credit_allocations: z.array(DebtAllocationSchema).optional().default([]).refine(
+    (rows) => new Set(rows.map((r) => r.charge_id)).size === rows.length,
+    { message: 'Cada dívida só pode aparecer uma vez na distribuição de crédito' },
+  ),
+  // Motivo ÚNICO para toda a distribuição de caução (ADR 0026), não por linha.
+  // Obrigatório só quando há caução alocada em alguma dívida REAL.
+  deposit_reason: z.string().optional(),
 }).refine(
   (d) => d.charge_fine || (d.fine_deposit_amount === 0 && d.fine_credit_amount === 0),
   { message: 'Só é possível abater caução/crédito quando a multa é cobrada', path: ['charge_fine'] },
+).refine(
+  (d) => d.deposit_allocations.length === 0 || (d.deposit_reason?.trim().length ?? 0) >= 5,
+  {
+    message: 'Informe o motivo do abatimento da caução — ele explica ao cliente por que o dinheiro dele virou pagamento',
+    path: ['deposit_reason'],
+  },
 )
 
 export type TerminateRental = z.infer<typeof TerminateRentalSchema>
+
+// ---------------------------------------------------------------------------
+// Devolução da sobra de caução (Spec 0017) — o que restou depois da
+// distribuição dirigida. Só devolução: abater já aconteceu, dívida a dívida,
+// dentro de `terminate_rental`.
+// ---------------------------------------------------------------------------
+
+export const ReturnRemainingDepositSchema = z.object({
+  rental_id:   z.string().uuid(),
+  amount:      z.number().positive({ error: 'Valor a devolver deve ser maior que zero' }),
+  return_date: dateString,
+})
+
+export type ReturnRemainingDeposit = z.infer<typeof ReturnRemainingDepositSchema>
 
 // ---------------------------------------------------------------------------
 // Cobrança — baixa manual

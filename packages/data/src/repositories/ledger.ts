@@ -34,6 +34,8 @@ export type ChargeBalanceRow = {
   /** Política congelada na emissão. Sem ela a tela não tem como saber qual
    *  regra esta cobrança carrega, e acaba aplicando a vigente hoje a todas. */
   late_charge_policy_id: string | null
+  /** Origem da cobrança (`rental`, `down_payment`, `expense`, `early_termination_fine`…). */
+  source_module: string
 }
 
 export type ChargeItemRow = {

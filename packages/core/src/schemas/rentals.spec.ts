@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import { randomUUID } from 'crypto'
-import { RentalSchema, TerminateRentalSchema } from './rentals'
+import { RentalSchema, TerminateRentalSchema, ReturnRemainingDepositSchema } from './rentals'
 
 const base = {
   vehicle_id: randomUUID(),
@@ -189,5 +189,145 @@ describe('TerminateRentalSchema — cancelamento opcional dentro do período (Sp
       ...baseTermination, extra_charge_ids_to_cancel: ['nao-e-um-uuid'],
     })
     expect(result.success).toBe(false)
+  })
+})
+
+describe('TerminateRentalSchema — distribuição dirigida (Spec 0017)', () => {
+  const baseTermination = {
+    lease_id: randomUUID(),
+    termination_date: '2026-06-01',
+    km_final: 15000,
+  }
+  const chargeA = randomUUID()
+  const chargeB = randomUUID()
+
+  it('operador não distribui nada: os dois arrays default são vazios (A3)', () => {
+    const result = TerminateRentalSchema.safeParse(baseTermination)
+    expect(result.success).toBe(true)
+    if (result.success) {
+      expect(result.data.deposit_allocations).toEqual([])
+      expect(result.data.credit_allocations).toEqual([])
+    }
+  })
+
+  it('aceita crédito sem motivo — o motivo só é exigido para caução', () => {
+    const result = TerminateRentalSchema.safeParse({
+      ...baseTermination,
+      credit_allocations: [{ charge_id: chargeA, amount: 100 }],
+    })
+    expect(result.success).toBe(true)
+  })
+
+  it('aceita caução em várias dívidas com motivo único', () => {
+    const result = TerminateRentalSchema.safeParse({
+      ...baseTermination,
+      deposit_allocations: [
+        { charge_id: chargeA, amount: 300 },
+        { charge_id: chargeB, amount: 200 },
+      ],
+      deposit_reason: 'Avaria no para-choque',
+    })
+    expect(result.success).toBe(true)
+  })
+
+  it('rejeita caução alocada sem motivo', () => {
+    const result = TerminateRentalSchema.safeParse({
+      ...baseTermination,
+      deposit_allocations: [{ charge_id: chargeA, amount: 300 }],
+    })
+    expect(result.success).toBe(false)
+    if (!result.success) {
+      expect(result.error.issues.some((i) => i.path.includes('deposit_reason'))).toBe(true)
+    }
+  })
+
+  it('rejeita caução alocada com motivo curto demais (< 5 caracteres)', () => {
+    const result = TerminateRentalSchema.safeParse({
+      ...baseTermination,
+      deposit_allocations: [{ charge_id: chargeA, amount: 300 }],
+      deposit_reason: '  ok ',
+    })
+    expect(result.success).toBe(false)
+  })
+
+  it('rejeita a mesma dívida duas vezes na caução', () => {
+    const result = TerminateRentalSchema.safeParse({
+      ...baseTermination,
+      deposit_allocations: [
+        { charge_id: chargeA, amount: 100 },
+        { charge_id: chargeA, amount: 50 },
+      ],
+      deposit_reason: 'Avaria no para-choque',
+    })
+    expect(result.success).toBe(false)
+  })
+
+  it('rejeita a mesma dívida duas vezes no crédito', () => {
+    const result = TerminateRentalSchema.safeParse({
+      ...baseTermination,
+      credit_allocations: [
+        { charge_id: chargeA, amount: 100 },
+        { charge_id: chargeA, amount: 50 },
+      ],
+    })
+    expect(result.success).toBe(false)
+  })
+
+  it('a mesma dívida pode receber caução E crédito (arrays independentes, RN-004)', () => {
+    const result = TerminateRentalSchema.safeParse({
+      ...baseTermination,
+      deposit_allocations: [{ charge_id: chargeA, amount: 100 }],
+      credit_allocations: [{ charge_id: chargeA, amount: 50 }],
+      deposit_reason: 'Diária em aberto',
+    })
+    expect(result.success).toBe(true)
+  })
+
+  it('rejeita valor zero, negativo e charge_id que não é uuid', () => {
+    for (const bad of [
+      { charge_id: chargeA, amount: 0 },
+      { charge_id: chargeA, amount: -10 },
+      { charge_id: 'fine', amount: 10 },
+    ]) {
+      const result = TerminateRentalSchema.safeParse({
+        ...baseTermination,
+        credit_allocations: [bad],
+      })
+      expect(result.success).toBe(false)
+    }
+  })
+
+  it('a multa continua nos campos escalares, sem motivo exigido (Spec 0015)', () => {
+    const result = TerminateRentalSchema.safeParse({
+      ...baseTermination, charge_fine: true, fine_deposit_amount: 400,
+    })
+    expect(result.success).toBe(true)
+  })
+})
+
+describe('ReturnRemainingDepositSchema (Spec 0017)', () => {
+  it('aceita o payload mínimo', () => {
+    const result = ReturnRemainingDepositSchema.safeParse({
+      rental_id: randomUUID(), amount: 100, return_date: '2026-06-01',
+    })
+    expect(result.success).toBe(true)
+  })
+
+  it('rejeita valor zero ou negativo', () => {
+    for (const amount of [0, -5]) {
+      const result = ReturnRemainingDepositSchema.safeParse({
+        rental_id: randomUUID(), amount, return_date: '2026-06-01',
+      })
+      expect(result.success).toBe(false)
+    }
+  })
+
+  it('rejeita data fora do formato e rental_id que não é uuid', () => {
+    expect(ReturnRemainingDepositSchema.safeParse({
+      rental_id: randomUUID(), amount: 10, return_date: '01/06/2026',
+    }).success).toBe(false)
+    expect(ReturnRemainingDepositSchema.safeParse({
+      rental_id: 'x', amount: 10, return_date: '2026-06-01',
+    }).success).toBe(false)
   })
 })

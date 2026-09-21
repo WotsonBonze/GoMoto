@@ -20,3 +20,5 @@ export * from './responsibility'
 export * from './schedule'
 export * from './delinquency-v2'
 export * from './late-charge-policy'
+// Spec 0017 — distribuição dirigida de caução e crédito
+export * from './settlement'
