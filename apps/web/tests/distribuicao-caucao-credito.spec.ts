@@ -544,7 +544,7 @@ test.describe('Tela de encerramento — distribuição dirigida', () => {
     expect(registro.deposit_reason).toBe('Avaria no para-choque')
   })
 
-  test('CA-005/CA-006: a tela recusa a caução que passa do limite, mostra onde, e trava o botão', async ({ page }) => {
+  test('CA-005/CA-006: a caução digitada nunca passa do limite — a tela corta o valor, tanto por linha quanto pelo saldo', async ({ page }) => {
     const c = await montar({
       caucao: 300, credito: 100,
       dividas: [{ nome: 'A', valor: 200 }, { nome: 'B', valor: 200 }],
@@ -552,28 +552,94 @@ test.describe('Tela de encerramento — distribuição dirigida', () => {
     await abrirEncerramento(page, c)
     await page.locator('input[type=checkbox]').check()
     const confirmar = page.getByRole('button', { name: 'Confirmar Encerramento' })
-    await expect(confirmar).toBeEnabled()
 
-    // CA-005 / RN-001: caução + crédito somam mais do que A deve. O crédito vai
-    // PRIMEIRO porque ele é limitado ao digitar (teste abaixo) — o que estoura a
-    // linha é a caução, que continua mostrando o aviso em vez de cortar.
+    // CA-005 / RN-001: A deve 200 e já tem 100 de crédito — a caução só cabe até 100.
     await page.locator(`#credito-${c.dividas.A}`).fill('100')
     await page.locator(`#caucao-${c.dividas.A}`).fill('150')
-    await expect(page.locator('ul[role=alert]')).toContainText('a mais do que ela deve')
-    await expect(confirmar).toBeDisabled()
-
-    await page.locator(`#caucao-${c.dividas.A}`).fill('100')
+    await expect(page.locator(`#caucao-${c.dividas.A}`)).toHaveValue('100.00')
     await expect(page.locator('ul[role=alert]')).toHaveCount(0)
     await expect(confirmar).toBeEnabled()
 
-    // CA-006 / RN-002: cada linha cabe, a soma passa do saldo de caução (300).
+    // CA-006 / RN-002: cada linha cabe sozinha (200 cada), a SOMA passa do saldo de
+    // caução (300) — o que sobra depois de A (200) é só 100 para B.
     await page.locator(`#credito-${c.dividas.A}`).fill('')
     await page.locator(`#caucao-${c.dividas.A}`).fill('200')
     await page.locator(`#caucao-${c.dividas.B}`).fill('200')
-    await expect(page.locator('ul[role=alert]')).toContainText('A caução alocada passa do saldo em R$ 100,00')
-    await expect(confirmar).toBeDisabled()
+    await expect(page.locator(`#caucao-${c.dividas.B}`)).toHaveValue('100.00')
+    await expect(page.locator('ul[role=alert]')).toHaveCount(0)
+    await expect(confirmar).toBeEnabled()
 
     expect(await statusDaLocacao(c.rentalId)).toBe('active')
+  })
+
+  test('caução: "Máx." aplica na linha o que cabe agora, e o campo não passa desse teto', async ({ page }) => {
+    const c = await montar({
+      caucao: 350, credito: 100,
+      dividas: [{ nome: 'A', valor: 200 }, { nome: 'B', valor: 300 }, { nome: 'C', valor: 100 }],
+    })
+    await abrirEncerramento(page, c)
+
+    const campo = (n: 'A' | 'B' | 'C') => page.locator(`#caucao-${c.dividas[n]}`)
+    const maximo = (n: 'A' | 'B' | 'C') => page.locator(`#caucao-max-${c.dividas[n]}`)
+
+    // O crédito cobre 50 da A: sobram 150 para a caução nela, mesmo com 350 de saldo.
+    await page.locator(`#credito-${c.dividas.A}`).fill('50')
+    await maximo('A').click()
+    await expect(campo('A')).toHaveValue('150.00')
+    await expect(maximo('A')).toBeDisabled()
+
+    // A B comporta 300, mas o saldo só deixou 200 (350 − 150).
+    await expect(maximo('B')).toBeEnabled()
+    await maximo('B').click()
+    await expect(campo('B')).toHaveValue('200.00')
+    await expect(maximo('B')).toBeDisabled()
+    await expect(page.getByText('R$ 350,00 de R$ 350,00 alocados')).toBeVisible()
+
+    // Saldo esgotado: o atalho da C fica desligado.
+    await expect(maximo('C')).toBeDisabled()
+    await campo('C').fill('50')
+    await expect(campo('C')).toHaveValue('')
+    await expect(page.locator('ul[role=alert]')).toHaveCount(0)
+  })
+
+  test('bug relatado: crédito maxado numa dívida não torna a caução inútil nas OUTRAS — só naquela linha', async ({ page }) => {
+    // Reproduz o caso relatado: uma dívida pequena e crédito de sobra — usar o
+    // "Máx." do crédito nela cobre a dívida inteira, e a caução ali some (não há
+    // mais nada a pagar). Mas a caução segue livre e usável em qualquer OUTRA
+    // dívida — "usar o crédito primeiro, depois a caução" é o fluxo normal, linha
+    // a linha, não uma trava geral.
+    const c = await montar({
+      caucao: 800, credito: 1000,
+      dividas: [{ nome: 'A', valor: 300 }, { nome: 'B', valor: 400 }],
+    })
+    await abrirEncerramento(page, c)
+
+    await page.locator(`#credito-max-${c.dividas.A}`).click()
+    await expect(page.locator(`#credito-${c.dividas.A}`)).toHaveValue('300.00')
+
+    // Na MESMA linha (A), a caução não tem mais o que abater — dívida já paga.
+    await expect(page.locator(`#caucao-max-${c.dividas.A}`)).toBeDisabled()
+    await page.locator(`#caucao-${c.dividas.A}`).fill('100')
+    await expect(page.locator(`#caucao-${c.dividas.A}`)).toHaveValue('')
+    await expect(page.locator('ul[role=alert]')).toHaveCount(0)
+
+    // Em B, intocada, a caução segue com o saldo inteiro disponível.
+    await expect(page.locator(`#caucao-max-${c.dividas.B}`)).toBeEnabled()
+    await page.locator(`#caucao-max-${c.dividas.B}`).click()
+    await expect(page.locator(`#caucao-${c.dividas.B}`)).toHaveValue('400.00')
+    await expect(page.locator('ul[role=alert]')).toHaveCount(0)
+
+    await page.locator('#motivo').fill('Avaria no para-choque')
+    await page.locator('input[type=checkbox]').check()   // dívida original (700) exige confirmação, mesmo já coberta pela distribuição
+    await page.getByRole('radio', { name: /Deixar em custódia/ }).check()
+    await page.getByRole('radio', { name: /Deixar como crédito do cliente/ }).check()
+    await page.getByRole('button', { name: 'Confirmar Encerramento' }).click()
+
+    await expect.poll(() => statusDaLocacao(c.rentalId), { timeout: 20_000 }).not.toBe('active')
+    expect(await saldoDaCobranca(c.dividas.A)).toMatchObject({ status: 'paid', paid_amount: 300 })
+    expect(await saldoDaCobranca(c.dividas.B)).toMatchObject({ status: 'paid', paid_amount: 400 })
+    expect(await saldoDaCaucao(c.rentalId)).toBe(400)     // 800 − 400 usados em B
+    expect(await saldoDeCredito(c.customerId)).toBe(700)  // 1000 − 300 usados em A
   })
 
   test('CA-007: o crédito digitado nunca passa do saldo — a tela corta o valor, não deixa montar a violação', async ({ page }) => {

@@ -403,18 +403,20 @@ export function TerminateForm({ rental }: TerminateFormProps) {
     return `O crédito alocado passa do saldo em ${formatCurrency(v.excess)}.`
   })
 
+  /**
+   * Nem caução nem crédito passam do que cabe: nem do saldo que as OUTRAS
+   * linhas ainda deixam, nem do que a dívida ainda deve depois da OUTRA fonte
+   * já aplicada na mesma linha (`max_deposit`/`max_credit`, @gomoto/core).
+   * Digitar, colar ou usar a setinha dá no mesmo — e é o que faz "usar o
+   * crédito primeiro, depois a caução" funcionar sem conta de cabeça: maxar o
+   * crédito de uma linha (bloco de baixo) faz a caução da MESMA linha mostrar
+   * na hora quanto sobrou, em vez de aceitar um valor que só falha ao confirmar.
+   */
   function setAllocation(kind: 'deposit' | 'credit', debtId: string, value: string) {
-    if (kind === 'credit') {
-      // O crédito não passa do que cabe: nem do saldo que as OUTRAS linhas ainda
-      // deixam, nem do que a dívida ainda deve depois da caução. É o mesmo teto
-      // (`max_credit`) que o `max` do input e o botão "Máx." usam — digitar,
-      // colar ou usar a setinha dá no mesmo. O servidor recusa de qualquer jeito;
-      // aqui o operador simplesmente não consegue montar o valor inválido.
-      const teto = distribution.lines.find((l) => l.id === debtId)?.max_credit ?? 0
-      setCreditInputs((prev) => ({ ...prev, [debtId]: clampAllocationInput(value, teto) }))
-      return
-    }
-    setDepositInputs((prev) => ({ ...prev, [debtId]: value }))
+    const line = distribution.lines.find((l) => l.id === debtId)
+    const teto = kind === 'deposit' ? (line?.max_deposit ?? 0) : (line?.max_credit ?? 0)
+    const set = kind === 'deposit' ? setDepositInputs : setCreditInputs
+    set((prev) => ({ ...prev, [debtId]: clampAllocationInput(value, teto) }))
   }
 
   function handleConfirm() {
@@ -839,29 +841,47 @@ export function TerminateForm({ rental }: TerminateFormProps) {
                               </td>
                               <td className="px-2 text-right tabular-nums text-fg">{formatCurrency(line.amount_due)}</td>
                               {depositBalance > 0 && (
-                                <td className="px-2 text-right">
-                                  <input
-                                    id={`caucao-${line.id}`}
-                                    type="number"
-                                    inputMode="decimal"
-                                    step="0.01"
-                                    min="0"
-                                    max={line.max_deposit}
-                                    aria-label={`Caução em ${label}`}
-                                    value={depositInputs[line.id] ?? ''}
-                                    onChange={(e) => setAllocation('deposit', line.id, e.target.value)}
-                                    placeholder="0,00"
-                                    className="h-7 w-24 rounded-lg border border-border bg-bg px-2 text-right text-[13px] tabular-nums text-fg outline-none focus:border-primary"
-                                  />
+                                <td className="px-2">
+                                  <div className="flex items-center justify-end gap-1">
+                                    {/* Mesmo atalho do crédito: aplica nesta dívida o máximo de
+                                        caução que cabe agora — o menor entre o que ela ainda
+                                        deve depois do crédito e o saldo que as outras linhas
+                                        deixaram. */}
+                                    <button
+                                      type="button"
+                                      id={`caucao-max-${line.id}`}
+                                      onClick={() => setAllocation('deposit', line.id, formatAllocationInput(line.max_deposit))}
+                                      disabled={line.max_deposit <= 0 || line.deposit >= line.max_deposit}
+                                      title={line.max_deposit > 0
+                                        ? `Aplicar ${formatCurrency(line.max_deposit)} de caução em ${label}`
+                                        : 'Não há caução ou dívida disponível nesta linha'}
+                                      aria-label={`Aplicar o máximo de caução em ${label}`}
+                                      className="h-7 shrink-0 rounded-lg border border-border px-2 text-[12px] font-medium text-primary transition-colors hover:bg-surface-2 disabled:cursor-not-allowed disabled:text-fg-mute disabled:opacity-50 disabled:hover:bg-transparent"
+                                    >
+                                      Máx.
+                                    </button>
+                                    <input
+                                      id={`caucao-${line.id}`}
+                                      type="number"
+                                      inputMode="decimal"
+                                      step="0.01"
+                                      min="0"
+                                      max={line.max_deposit}
+                                      aria-label={`Caução em ${label}`}
+                                      value={depositInputs[line.id] ?? ''}
+                                      onChange={(e) => setAllocation('deposit', line.id, e.target.value)}
+                                      placeholder="0,00"
+                                      className="h-7 w-24 rounded-lg border border-border bg-bg px-2 text-right text-[13px] tabular-nums text-fg outline-none focus:border-primary"
+                                    />
+                                  </div>
                                 </td>
                               )}
                               {creditBalance > 0 && (
                                 <td className="px-2">
                                   <div className="flex items-center justify-end gap-1">
-                                    {/* Atalho: aplica nesta dívida o máximo de crédito que cabe
-                                        nela agora — o menor entre o que ela ainda deve depois
-                                        da caução e o saldo que as outras linhas deixaram. É
-                                        ação do operador numa linha, não sugestão automática. */}
+                                    {/* Mesmo atalho da caução, do outro lado da mesma conta —
+                                        ação do operador numa linha, não sugestão automática:
+                                        nada é preenchido sozinho em nenhuma linha. */}
                                     <button
                                       type="button"
                                       id={`credito-max-${line.id}`}

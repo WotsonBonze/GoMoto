@@ -787,12 +787,16 @@ Só faz sentido com **duas ou mais versões** de política na base (crie uma em 
       própria.
 - [ ] Nada é gravado até **Confirmar Encerramento**: dá para mexer nos valores
       à vontade antes disso.
-- [ ] No **crédito**, digitar (ou colar) mais do que cabe **corta o valor** no teto
-      da linha — o menor entre o saldo que sobrou e o que a dívida ainda deve —,
-      sem mostrar aviso.
-- [ ] O botão **Máx.** de cada linha aplica esse teto na dívida; fica desligado
-      quando a linha já está no teto ou o saldo acabou, e volta a ligar quando
-      outra linha libera saldo.
+- [ ] Em **ambas** as colunas (caução e crédito), digitar (ou colar) mais do que
+      cabe **corta o valor** no teto da linha — o menor entre o saldo que sobrou
+      e o que a dívida ainda deve depois da outra fonte já aplicada ali — sem
+      mostrar aviso.
+- [ ] O botão **Máx.** de cada linha, nas DUAS colunas, aplica esse teto na
+      dívida; fica desligado quando a linha já está no teto ou o saldo acabou, e
+      volta a ligar quando outra linha libera saldo.
+- [ ] Numa dívida já 100% coberta pelo crédito (ex.: "Máx." do crédito nela), o
+      "Máx." da caução naquela MESMA linha fica desligado — mas segue disponível
+      em qualquer OUTRA dívida da lista.
 
 ### 7.6 Cronograma futuro é cancelado
 
