@@ -22,3 +22,7 @@ export * from './delinquency-v2'
 export * from './late-charge-policy'
 // Spec 0017 — distribuição dirigida de caução e crédito
 export * from './settlement'
+// Tela financeira do veículo — recebíveis e rateio de despesa
+export * from './vehicle-receivables'
+export * from './vehicle-payback'
+export * from './vehicle-income'
