@@ -1,6 +1,8 @@
 # 📉 Tela: Despesas — [[GoMoto]]
 
-Rota: `/despesas` | Tipo: Client Component
+Rotas: `/despesas` (listagem) · `/despesas/[id]` (detalhe)
+Tipo: listagem é Client Component; detalhe é Server Component (padrão ADR 0002,
+igual `/cobrancas/[id]`).
 
 > ⚠️ Nota reescrita em 2026-09-29 — a versão anterior descrevia a tabela legada
 > `expenses` (categoria livre, `DELETE`, accordion por categoria, upload de NF).
@@ -46,7 +48,7 @@ canônico (ADR 0002).
 | Empresa | `company_amount` (= `amount − customer_amount`, derivado no hook, não gravado) |
 | Cliente | `customer_amount`, ou "—" se zero |
 | Situação | `StatusBadge` (open/paid/cancelled) |
-| Ações | Registrar pagamento (✓) + Cancelar (✗) — só em `open` |
+| Ações | Ver detalhes (olho, sempre) + Registrar pagamento (✓, só `open`) + Cancelar (✗, `open` **e** `paid`) |
 
 ## Modal "Nova despesa"
 
@@ -77,6 +79,24 @@ Escondido quando a despesa **já nasce paga sozinha** — cliente 100%
 responsável, ou rateio devolvido por crédito (`bornAlreadyPaid` na page): nesses
 casos a empresa nunca deve ao fornecedor (ver `fn_create_payable`, `paid_by`),
 então "Já paga" não faz sentido perguntar de novo.
+
+## Página de Detalhe (`/despesas/[id]`, Server Component)
+
+Status + valor no topo (empresa/cliente separados quando há rateio), seção
+"Despesa" (categoria, fornecedor, competência, vencimento, pago em), "Vínculo"
+(cliente/veículo/locação, com link para cada), "Responsabilidade e repasse"
+(só quando `customer_amount > 0`: responsabilidade, como devolve, e link para a
+cobrança de repasse ou o crédito gerado), e "Ações" (`PayableActions.tsx`,
+Client Component — reaproveita `payExpenseAction`/`cancelExpenseAction` de
+`actions.ts`, sem action nova).
+
+A cobrança de repasse é localizada por `charges.source_module = payable.
+source_module AND charges.source_id = COALESCE(payable.source_id, payable.id)`
+— a mesma regra que `fn_create_payable` usa para criá-la, então funciona tanto
+para despesa lançada direto em `/despesas` (sem origem externa, `source_id`
+nasce nulo) quanto para uma que veio de outro módulo (manutenção, multa) com
+`source_id` próprio. O crédito é mais simples: `customer_credits.payable_id`
+aponta direto para o payable.
 
 ## Modal "Registrar pagamento"
 

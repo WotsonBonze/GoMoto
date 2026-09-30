@@ -167,6 +167,7 @@ export async function payExpenseAction(
     })
 
     revalidatePath('/despesas')
+    revalidatePath(`/despesas/${payableId}`)
     revalidatePath('/financeiro')
     return { ok: true, data: undefined }
   } catch (err) {
@@ -223,5 +224,6 @@ export async function cancelExpenseAction(
   })
 
   revalidatePath('/despesas')
+  revalidatePath(`/despesas/${payableId}`)
   return { ok: true, data: undefined }
 }

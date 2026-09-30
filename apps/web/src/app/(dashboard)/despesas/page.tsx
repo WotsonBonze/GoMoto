@@ -19,9 +19,10 @@
 'use client'
 
 import { useState, useMemo } from 'react'
+import Link from 'next/link'
 import { useQueryClient } from '@tanstack/react-query'
 import {
-  Plus, Search, Wallet, TrendingDown, Users, CheckCircle2, XCircle, AlertTriangle,
+  Plus, Search, Wallet, TrendingDown, Users, CheckCircle2, XCircle, AlertTriangle, Eye,
 } from 'lucide-react'
 import { PageTitle } from '@/components/layout/PageTitle'
 import { Button } from '@/components/ui/Button'
@@ -402,25 +403,34 @@ export default function ExpensesPage() {
                   <td className="px-4"><StatusBadge status={p.status} /></td>
                   <td className="px-4">
                     <div className="flex items-center justify-end gap-1">
+                      <Link
+                        href={`/despesas/${p.id}`}
+                        title="Ver detalhes"
+                        className="p-1 text-[var(--fg-soft)] hover:text-[var(--primary)]"
+                      >
+                        <Eye className="h-4 w-4" />
+                      </Link>
                       {p.status === 'open' && (
-                        <>
-                          <button
-                            title="Registrar pagamento"
-                            onClick={() => abrirPagamento(p)}
-                            disabled={saving}
-                            className="p-1 text-[var(--fg-soft)] hover:text-[var(--success)]"
-                          >
-                            <CheckCircle2 className="h-4 w-4" />
-                          </button>
-                          <button
-                            title="Cancelar"
-                            onClick={() => handleCancel(p)}
-                            disabled={saving}
-                            className="p-1 text-[var(--fg-soft)] hover:text-[var(--danger)]"
-                          >
-                            <XCircle className="h-4 w-4" />
-                          </button>
-                        </>
+                        <button
+                          title="Registrar pagamento"
+                          onClick={() => abrirPagamento(p)}
+                          disabled={saving}
+                          className="p-1 text-[var(--fg-soft)] hover:text-[var(--success)]"
+                        >
+                          <CheckCircle2 className="h-4 w-4" />
+                        </button>
+                      )}
+                      {/* Despesa PAGA cancela normalmente desde a ADR 0029 — o
+                          estorno da baixa acontece junto. O botão só faltava aqui. */}
+                      {(p.status === 'open' || p.status === 'paid') && (
+                        <button
+                          title="Cancelar"
+                          onClick={() => handleCancel(p)}
+                          disabled={saving}
+                          className="p-1 text-[var(--fg-soft)] hover:text-[var(--danger)]"
+                        >
+                          <XCircle className="h-4 w-4" />
+                        </button>
                       )}
                     </div>
                   </td>
