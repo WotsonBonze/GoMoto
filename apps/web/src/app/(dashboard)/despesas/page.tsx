@@ -287,6 +287,15 @@ export default function ExpensesPage() {
   const vehicles = vehiclesQuery.data ?? []
   const rentals = rentalsQuery.data ?? []
 
+  const vehiclePlateById = useMemo(
+    () => new Map(vehicles.map((v) => [v.id, v.license_plate])),
+    [vehicles],
+  )
+  const categoryLabelByCode = useMemo(
+    () => new Map<string, string>(EXPENSE_CATEGORIES.map((c) => [c.value, c.label])),
+    [],
+  )
+
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between">
@@ -343,8 +352,11 @@ export default function ExpensesPage() {
             <thead>
               <tr className="border-b border-[var(--divider)] text-left text-[11px] uppercase tracking-wide text-[var(--fg-mute)]">
                 <th className="px-4 py-2 font-medium">Descrição</th>
+                <th className="px-4 py-2 font-medium">Tipo</th>
+                <th className="px-4 py-2 font-medium">Veículo</th>
                 <th className="px-4 py-2 font-medium">Competência</th>
                 <th className="px-4 py-2 font-medium">Vencimento</th>
+                <th className="px-4 py-2 font-medium">Pago em</th>
                 <th className="px-4 py-2 font-medium text-right">Total</th>
                 <th className="px-4 py-2 font-medium text-right">Empresa</th>
                 <th className="px-4 py-2 font-medium text-right">Cliente</th>
@@ -354,11 +366,11 @@ export default function ExpensesPage() {
             </thead>
             <tbody>
               {payablesQuery.isLoading && (
-                <tr><td colSpan={8} className="px-4 py-8 text-center text-[13px] text-[var(--fg-mute)]">Carregando…</td></tr>
+                <tr><td colSpan={11} className="px-4 py-8 text-center text-[13px] text-[var(--fg-mute)]">Carregando…</td></tr>
               )}
 
               {!payablesQuery.isLoading && visible.length === 0 && (
-                <tr><td colSpan={8} className="px-4 py-8 text-center text-[13px] text-[var(--fg-mute)]">Nenhuma despesa encontrada.</td></tr>
+                <tr><td colSpan={11} className="px-4 py-8 text-center text-[13px] text-[var(--fg-mute)]">Nenhuma despesa encontrada.</td></tr>
               )}
 
               {visible.map((p) => (
@@ -369,8 +381,17 @@ export default function ExpensesPage() {
                       <span className="ml-2 text-[var(--fg-mute)]">{p.vendor_name}</span>
                     )}
                   </td>
+                  <td className="px-4 text-[var(--fg-soft)]">
+                    {categoryLabelByCode.get(p.expense_account_code) ?? p.expense_account_code}
+                  </td>
+                  <td className="px-4 text-[var(--fg-soft)]">
+                    {p.vehicle_id ? vehiclePlateById.get(p.vehicle_id) ?? '—' : '—'}
+                  </td>
                   <td className="px-4 tabular-nums">{formatDate(p.competence_date)}</td>
                   <td className="px-4 tabular-nums">{formatDate(p.due_date)}</td>
+                  <td className="px-4 tabular-nums">
+                    {p.status === 'paid' && p.paid_at ? formatDate(p.paid_at) : '—'}
+                  </td>
                   <td className="px-4 text-right tabular-nums">{formatCurrency(p.amount)}</td>
                   <td className="px-4 text-right tabular-nums font-medium">
                     {formatCurrency(p.company_amount)}
