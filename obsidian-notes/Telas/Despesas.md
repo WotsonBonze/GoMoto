@@ -75,10 +75,14 @@ transação só**: se a baixa falhar depois do create, a despesa fica criada e e
 aberto, que é um estado normal (resolvido com um clique a mais), não um dado
 quebrado.
 
-Escondido quando a despesa **já nasce paga sozinha** — cliente 100%
-responsável, ou rateio devolvido por crédito (`bornAlreadyPaid` na page): nesses
-casos a empresa nunca deve ao fornecedor (ver `fn_create_payable`, `paid_by`),
-então "Já paga" não faz sentido perguntar de novo.
+Escondido quando a despesa **já nasce paga sozinha** — só quando o cliente
+devolve por **crédito** (`customerAmount > 0 && reimbursement === 'credit'`,
+`bornAlreadyPaid` na page): é o único caso em que a empresa nunca chega a
+dever ao fornecedor (`fn_create_payable`). Responsabilidade "Cliente" com
+"Cobrar do cliente" **não** nasce paga — a empresa ainda deve ao fornecedor até
+cobrar de volta, só muda quem banca no fim. Checar só
+`responsibility === 'customer'` (versão anterior, corrigida em 2026-09-29)
+escondia o checkbox também nesse caso, que é aberto de verdade.
 
 ## Página de Detalhe (`/despesas/[id]`, Server Component)
 

@@ -184,11 +184,14 @@ export default function ExpensesPage() {
     return splitPreview?.customer_amount ?? 0
   }, [form.responsibility, form.amount, splitPreview])
 
-  // Cliente 100% responsável, ou rateio devolvido por crédito: a despesa já
-  // nasce paga sozinha (a empresa nunca deve ao fornecedor nesses casos — ver
-  // `fn_create_payable`). "Já paga" não faz sentido perguntar de novo ali.
-  const bornAlreadyPaid =
-    form.responsibility === 'customer' || (customerAmount > 0 && form.reimbursement === 'credit')
+  // Só nasce PAGA sozinha quando o cliente devolve por CRÉDITO — é aí que
+  // `fn_create_payable` nunca chega a fazer a empresa dever ao fornecedor.
+  // Responsabilidade "Cliente" com "Cobrar do cliente" (reimbursement='charge')
+  // NÃO nasce paga: a empresa ainda deve ao fornecedor até cobrar de volta —
+  // só muda quem banca no fim, não quem paga primeiro. Checar só
+  // `responsibility === 'customer'` escondia "Já paga" também nesse caso, que
+  // é um estado aberto de verdade.
+  const bornAlreadyPaid = customerAmount > 0 && form.reimbursement === 'credit'
 
   async function handleCreate() {
     setSaving(true)
