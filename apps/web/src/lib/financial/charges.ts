@@ -13,6 +13,8 @@
 import type { SupabaseClient } from '@supabase/supabase-js'
 import {
   ACCOUNTS,
+  distributeProportionally,
+  formatCurrency as formatBRL,
   type AccountCode,
   type ChargeItemInput,
 } from '@gomoto/core'
@@ -266,6 +268,105 @@ export async function realizeLateCharge(
   })
 }
 
+export type ApplyDiscountParams = {
+  chargeId: string
+  discountAmount: number
+  reason: string
+  createdBy?: string | null
+}
+
+/**
+ * Concede desconto a uma cobrança em aberto.
+ *
+ * Nunca edita item existente — o documento emitido é imutável (ADR 0024,
+ * Princípio 5). O desconto vira um item NEGATIVO por conta de origem, e cada
+ * conta é estornada na sua proporção: uma cobrança pode misturar aluguel,
+ * repasse de multa e encargo por atraso, e debitar tudo contra uma conta fixa
+ * classificaria a receita errada no DRE de quem não é aluguel.
+ */
+export async function applyDiscount(
+  supabase: SupabaseClient,
+  tenantId: string,
+  params: ApplyDiscountParams,
+): Promise<void> {
+  const balance = await requireBalance(supabase, params.chargeId)
+
+  if (balance.status !== 'open') {
+    throw new Error('Só cobrança em aberto admite desconto.')
+  }
+  if (params.discountAmount > balance.open_amount) {
+    throw new Error(
+      `Desconto maior que o saldo em aberto. O máximo aqui é ${formatBRL(balance.open_amount)}.`,
+    )
+  }
+
+  const { data: items, error: itemsError } = await supabase
+    .from('charge_items')
+    .select('credit_account_code, amount, vehicle_id')
+    .eq('charge_id', params.chargeId)
+    .neq('source_module', 'discount')
+
+  if (itemsError) throw new Error(`Falha ao ler itens: ${itemsError.message}`)
+
+  const linhas = (items ?? []) as { credit_account_code: string; amount: number; vehicle_id: string | null }[]
+  const vehicleId = linhas.find((i) => i.vehicle_id)?.vehicle_id ?? null
+
+  const porConta = new Map<string, number>()
+  for (const item of linhas) {
+    if (item.amount <= 0) continue
+    porConta.set(item.credit_account_code, round2((porConta.get(item.credit_account_code) ?? 0) + item.amount))
+  }
+
+  const partes = distributeProportionally(
+    params.discountAmount,
+    [...porConta.entries()].map(([key, weight]) => ({ key, weight })),
+  )
+
+  if (partes.length === 0) {
+    throw new Error('Cobrança sem item de receita para descontar.')
+  }
+
+  const descricao = `Desconto — ${params.reason}`
+
+  for (const { key: account, amount } of partes) {
+    if (amount <= 0) continue
+
+    const { error } = await supabase.from('charge_items').insert({
+      tenant_id: tenantId,
+      charge_id: params.chargeId,
+      description: descricao,
+      credit_account_code: account,
+      quantity: 1,
+      unit_amount: -amount,
+      amount: -amount,
+      vehicle_id: vehicleId,
+      source_module: 'discount',
+    })
+
+    if (error) throw new Error(`Falha ao lançar desconto: ${error.message}`)
+
+    // Inverso PARCIAL de charge_issued: debita a mesma conta creditada na
+    // emissão, na proporção do desconto, e credita o recebível.
+    await postTransaction(supabase, tenantId, {
+      event: {
+        type: 'charge_issuance_reversed',
+        amount,
+        debit_account: account as AccountCode,
+        dimensions: dimensionsOf({
+          customerId: balance.customer_id,
+          rentalId: balance.rental_id,
+          vehicleId,
+          chargeId: params.chargeId,
+        }),
+      },
+      description: descricao,
+      sourceModule: 'discount',
+      sourceId: params.chargeId,
+      createdBy: params.createdBy,
+    })
+  }
+}
+
 // ============================================================
 // Internos
 // ============================================================
@@ -275,6 +376,7 @@ type BalanceRow = {
   customer_id: string
   rental_id: string | null
   charge_number: number
+  status: string
   total_amount: number
   paid_amount: number
   open_amount: number
@@ -287,7 +389,7 @@ async function requireBalance(
 ): Promise<BalanceRow> {
   const { data, error } = await supabase
     .from('charge_balances')
-    .select('charge_id, customer_id, rental_id, charge_number, total_amount, paid_amount, open_amount, days_overdue')
+    .select('charge_id, customer_id, rental_id, charge_number, status, total_amount, paid_amount, open_amount, days_overdue')
     .eq('charge_id', chargeId)
     .maybeSingle()
 

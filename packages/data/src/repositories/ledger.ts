@@ -237,12 +237,17 @@ export async function listChargesForCockpit(
   const customerIds = [...new Set(rows.map((r) => r.customer_id))]
   const rentalIds = [...new Set(rows.map((r) => r.rental_id).filter(Boolean))] as string[]
 
-  type ItemRow = { charge_id: string; description: string; amount: number; credit_account_code: string }
+  type ItemRow = {
+    charge_id: string; description: string; amount: number
+    credit_account_code: string; source_module: string
+  }
   type CustomerRow = { id: string; name: string; phone: string | null }
 
   const [items, customers, rentals] = await Promise.all([
     fetchByIdsInChunks<ItemRow>(chargeIds, 'charge_id', (chunk) =>
-      client.from('charge_items').select('charge_id, description, amount, credit_account_code').in('charge_id', chunk)),
+      client.from('charge_items')
+        .select('charge_id, description, amount, credit_account_code, source_module')
+        .in('charge_id', chunk)),
     fetchByIdsInChunks<CustomerRow>(customerIds, 'customer_id', (chunk) =>
       client.from('customers').select('id, name, phone').in('id', chunk)),
     fetchByIdsInChunks<unknown>(rentalIds, 'rental_id', (chunk) =>
@@ -272,11 +277,16 @@ export async function listChargesForCockpit(
 
   return rows.map((r) => {
     const items = itemsByCharge.get(r.charge_id) ?? []
-    // Item de maior valor representa a cobrança na listagem.
     // Uma cobrança cobra uma coisa só (ADR 0024): a descrição é a do item, sem
-    // eleição por maior valor. O que pode haver a mais é o encargo por atraso,
-    // acessório da mesma dívida — e ele já aparece na coluna de valor devido.
-    const principal = items.find((i) => !i.description.startsWith('Encargo')) ?? items[0]
+    // eleição por maior valor. O que pode haver a mais são ACESSÓRIOS da mesma
+    // dívida — encargo por atraso e desconto —, que a trigger
+    // `fn_assert_charge_item_origin` já trata como a mesma categoria (nunca é
+    // "outra coisa sendo cobrada"). Filtrar por `source_module` em vez de
+    // prefixo de texto na descrição: um desconto cuja descrição comece
+    // diferente de "Encargo" passava no filtro antigo e, sem `ORDER BY`,
+    // podia virar a "descrição" exibida da cobrança.
+    const principal = items.find((i) => i.source_module !== 'late_charge' && i.source_module !== 'discount')
+      ?? items[0]
     const customer = customerById.get(r.customer_id)
 
     return {

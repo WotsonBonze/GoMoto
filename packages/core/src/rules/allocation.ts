@@ -331,6 +331,46 @@ export function applyCredits(
 }
 
 // ============================================================
+// Desconto
+// ============================================================
+
+export type WeightedBucket = { key: string; weight: number }
+
+/**
+ * Distribui um valor entre buckets, proporcional ao peso de cada um.
+ *
+ * Usada para ratear um desconto entre as contas de origem dos itens da
+ * cobrança (aluguel, repasse de multa, encargo por atraso…): a cobrança pode
+ * misturar naturezas econômicas diferentes, e o estorno no razão precisa
+ * debitar cada uma na sua proporção — nunca uma conta fixa, que classificaria
+ * errado a receita de quem não é aluguel.
+ *
+ * O último bucket (por peso decrescente) absorve o resíduo de arredondamento:
+ * sem isso, um desconto rateado entre três contas podia sobrar ou faltar um
+ * centavo, e a transação não fecha em zero (Princípio 1).
+ */
+export function distributeProportionally(
+  amount: number,
+  buckets: WeightedBucket[],
+): { key: string; amount: number }[] {
+  const positivos = buckets.filter((b) => b.weight > 0)
+  const totalPeso = round2(positivos.reduce((s, b) => s + b.weight, 0))
+  if (totalPeso <= 0 || amount <= 0) return []
+
+  const ordenados = [...positivos].sort((a, b) => b.weight - a.weight)
+
+  let alocado = 0
+  return ordenados.map((b, i) => {
+    if (i === ordenados.length - 1) {
+      return { key: b.key, amount: round2(amount - alocado) }
+    }
+    const parte = round2(amount * b.weight / totalPeso)
+    alocado = round2(alocado + parte)
+    return { key: b.key, amount: parte }
+  })
+}
+
+// ============================================================
 // Helpers
 // ============================================================
 

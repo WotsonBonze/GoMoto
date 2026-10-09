@@ -4,6 +4,7 @@ import {
   calculateAmountDue,
   allocatePayment,
   applyCredits,
+  distributeProportionally,
   type LateChargePolicy,
   type ChargeBalance,
   type AvailableCredit,
@@ -362,5 +363,52 @@ describe('applyCredits — corrige F-06', () => {
     const credits: AvailableCredit[] = [{ id: 'c', amount: 100, available: 40 }]
     const { applications } = applyCredits(credits, [charge('x', '2026-08-01', 500)], HOJE)
     expect(applications.reduce((s, a) => s + a.amount, 0)).toBe(40)
+  })
+})
+
+describe('distributeProportionally', () => {
+  it('bucket único recebe o valor inteiro', () => {
+    const partes = distributeProportionally(100, [{ key: 'a', weight: 350 }])
+    expect(partes).toEqual([{ key: 'a', amount: 100 }])
+  })
+
+  it('rateia proporcionalmente ao peso de cada bucket', () => {
+    const partes = distributeProportionally(100, [
+      { key: 'a', weight: 300 },
+      { key: 'b', weight: 100 },
+    ])
+    expect(partes.find((p) => p.key === 'a')!.amount).toBe(75)
+    expect(partes.find((p) => p.key === 'b')!.amount).toBe(25)
+  })
+
+  it('a soma das partes sempre fecha no valor total, mesmo com resto de arredondamento', () => {
+    // 10 rateado em 3 pesos iguais dá 3,33/3,33/3,33 — sobra 0,01 que precisa
+    // ir para algum lugar, senão a transação não fecha em zero (Princípio 1).
+    const partes = distributeProportionally(10, [
+      { key: 'a', weight: 1 },
+      { key: 'b', weight: 1 },
+      { key: 'c', weight: 1 },
+    ])
+    const soma = Math.round(partes.reduce((s, p) => s + p.amount, 0) * 100) / 100
+    expect(soma).toBe(10)
+  })
+
+  it('ignora bucket com peso zero ou negativo', () => {
+    const partes = distributeProportionally(50, [
+      { key: 'a', weight: 100 },
+      { key: 'b', weight: 0 },
+      { key: 'c', weight: -20 },
+    ])
+    expect(partes).toEqual([{ key: 'a', amount: 50 }])
+  })
+
+  it('sem buckets com peso positivo, não distribui nada', () => {
+    expect(distributeProportionally(50, [])).toEqual([])
+    expect(distributeProportionally(50, [{ key: 'a', weight: 0 }])).toEqual([])
+  })
+
+  it('valor zero ou negativo não distribui nada', () => {
+    expect(distributeProportionally(0, [{ key: 'a', weight: 100 }])).toEqual([])
+    expect(distributeProportionally(-10, [{ key: 'a', weight: 100 }])).toEqual([])
   })
 })

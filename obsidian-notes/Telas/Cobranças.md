@@ -86,6 +86,72 @@ Nenhum chamador nomeia meio de pagamento. `getOrCreateIntent` resolve a conta
 eleita primeiro e usa `descriptor.methods[0]` — antes era `'pix'` fixo, o que
 quebraria a cobrança assim que um gateway de checkout fosse eleito.
 
+### App do cliente (mobile — `apps/mobile/src/screens/BillingsScreen.tsx`)
+
+O detalhe da cobrança tem um único botão **Pagar R$ X**, que chama
+`POST /api/charges/[id]/payment-intent` **sem `method`** — o meio é o do
+gateway eleito, como no cockpit. O antigo seletor *Pix / Boleto (em breve) /
+Cartão (em breve)* foi removido: o app nunca escolheu meio nenhum.
+
+A resposta é `PaymentIntentResult`; o que varia por provedor mora em `payload`,
+e o modal de pagamento se orienta por `method`:
+
+| `method` | Gateway | Modal |
+|---|---|---|
+| `pix` | Mercado Pago, Cora | QR (`payload.qr_code_base64`) + copia-e-cola (`payload.emv`, fallback `qr_code`) |
+| `payment_link` | InfinitePay | Abre `payload.checkout_url` no navegador **dentro do app** (`expo-web-browser`: Custom Tabs / SFSafariViewController) assim que o link é gerado; o modal fica por trás com *Abrir página de pagamento* |
+| outro | — | Aviso "forma de pagamento não suportada nesta versão do app" em vez de QR vazio |
+
+`expo-web-browser` e não `Linking.openURL`: o checkout abre sobre o app e o
+cliente volta fechando a página, sem trocar de aplicativo.
+
+A confirmação usa o **mesmo mecanismo do cockpit**: `usePaymentIntentStatus`
+lê `payment_intents.status` a cada 5s (política `customer_read_own_payment_intents`)
+até virar `paid`. Aí o modal mostra *Pagamento confirmado!* (reabrindo-se se o
+cliente o tinha fechado), fecha o checkout hospedado no iOS
+(`WebBrowser.dismissBrowser`) e, após 2,5s, fecha o detalhe e recarrega as listas
+"em aberto" e histórico. Fechar o modal de pagamento não encerra o polling:
+ele segue enquanto o detalhe da cobrança estiver aberto.
+
+Até 2026-09-25 o app esperava a cobrança aparecer como `paid` em
+`useMyCharges(true)` — que só devolve cobranças **em aberto**. Paga, ela sumia
+da lista e o feedback nunca aparecia.
+
+Até 2026-09-25 o app lia `emv`/`qr_code_base64` no **primeiro nível** da
+resposta, onde nunca estiveram desde que o payload virou agnóstico de gateway
+— o QR saía `base64,undefined` e o copia-e-cola vazio para os três provedores.
+
+**Cliente de mais de uma locadora.** Um login tem um cadastro em `customers`
+**por tenant** (PRD 0001). A rota resolvia o cliente com
+`.eq('user_id', …).maybeSingle()`: com dois cadastros o PostgREST devolve erro e
+o cliente ouvia *"Cliente não encontrado"* (produção, 2026-09-25). Agora a rota
+lê todos os cadastros do login e aceita a cobrança se ela pertencer a um deles,
+na locadora dele. A rota de envio de vistoria periódica
+(`/api/inspections/schedules/[id]/submit`) tinha o mesmo defeito e recebeu a
+mesma correção. Teste de regressão: `api-payment-intent.spec.ts`, *"cliente de
+DUAS locadoras alcança a própria cobrança"*.
+
+**Conceder desconto** (só na tela de detalhe, cobrança aberta com saldo em
+aberto — `components/financial/BillingActions.tsx`):
+
+Reduz o que a cobrança ainda deve sem editar item nenhum: o documento emitido é
+imutável (ADR 0024, Princípio 5). Ao confirmar, `applyDiscountAction` insere um
+item **negativo** (`source_module = 'discount'`) por conta de origem dos itens
+já lançados, e estorna a receita no razão na mesma proporção — uma cobrança que
+mistura aluguel e repasse de multa, por exemplo, tem o desconto rateado entre
+as duas contas, não debitado só contra uma (`distributeProportionally`,
+`@gomoto/core`).
+
+O teto é o **saldo já lançado** (`open_amount`), nunca o valor com juros ainda
+em projeção — descontar sobre juros que ainda não viraram item cobraria de
+menos algo que a cobrança ainda não cobra (R-06). Motivo é obrigatório (mínimo
+3 caracteres) e vai para a descrição do item e para `logAction`.
+
+Diferente de registrar um pagamento parcial: pagamento parcial deixa a
+diferença **em aberto** (dívida que continua existindo); desconto **extingue**
+a diferença. As duas ações não se confundem porque vivem em modais separados,
+com títulos e campos próprios.
+
 **Contabilizar como Prejuízo** (aparece se `pending` ou `overdue`):
 - Modal de confirmação com aviso em vermelho
 - Salva: `status='loss'`

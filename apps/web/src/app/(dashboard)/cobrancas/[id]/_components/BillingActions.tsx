@@ -7,8 +7,9 @@ import { Modal } from '@/components/ui/Modal'
 import { Input } from '@/components/ui/Input'
 import { formatCurrency } from '@/lib/utils'
 import { type LateChargePolicy } from '@gomoto/core'
+import { Textarea } from '@/components/ui/Input'
 import { RegistrarPagamentoModal, type CobrancaParaPagamento } from '@/components/financial/RegistrarPagamentoModal'
-import { cancelChargeAction } from '../../actions'
+import { cancelChargeAction, applyDiscountAction } from '../../actions'
 import { applyCustomerCredits, generateChargePixAction } from '../actions'
 import type { PaymentIntentResult } from '@/lib/payment/intents'
 
@@ -112,6 +113,9 @@ export function BillingActions({ billingId, customerId, status, amountDue, cobra
   const [payOpen, setPayOpen]     = useState(false)
   const [creditOpen, setCreditOpen] = useState(false)
   const [cancelOpen, setCancelOpen] = useState(false)
+  const [discountOpen, setDiscountOpen] = useState(false)
+  const [discountAmount, setDiscountAmount] = useState('')
+  const [discountReason, setDiscountReason] = useState('')
 
   // Pix do gateway ativo. `intent` só existe depois que a action volta — não há
   // estado "gerando" separado porque `isPending` já cobre, e o botão some
@@ -211,6 +215,38 @@ export function BillingActions({ billingId, customerId, status, amountDue, cobra
     })
   }
 
+  /**
+   * Teto do desconto: o que já é dívida LANÇADA (`open_amount`), nunca
+   * `amountDue`. Juros ainda em projeção não são item — descontar sobre eles
+   * seria descontar algo que a cobrança ainda não cobra (R-06).
+   */
+  const tetoDoDesconto = Math.round(cobranca.openAmount * 100) / 100
+
+  function handleDiscount() {
+    const amount = Math.round((parseFloat(discountAmount) || 0) * 100) / 100
+    if (amount <= 0) { setFlashError('Informe um valor maior que zero.'); return }
+    if (amount > tetoDoDesconto) {
+      setFlashError(`O máximo aqui é ${formatCurrency(tetoDoDesconto)} — o saldo já lançado desta cobrança.`)
+      return
+    }
+    if (discountReason.trim().length < 3) {
+      setFlashError('Informe o motivo do desconto.')
+      return
+    }
+    setFlashError(null)
+    startTransition(async () => {
+      const result = await applyDiscountAction({
+        charge_id: billingId,
+        discount_amount: amount,
+        discount_reason: discountReason.trim(),
+      })
+      if (!result.ok) { setFlashError(result.error.message); return }
+      setDiscountOpen(false)
+      setDiscountAmount('')
+      setDiscountReason('')
+    })
+  }
+
   /** Rótulos do gateway eleito antes de gerar; do intent depois que ele existe. */
   const rotulo = rotuloDoMeio(intent?.method ?? gatewayMethod)
   const ehLink = !!checkoutUrlDe(intent)
@@ -285,6 +321,15 @@ export function BillingActions({ billingId, customerId, status, amountDue, cobra
             className="inline-flex h-9 items-center gap-1.5 rounded-full border border-border px-4 text-[13px] text-fg-mute transition-colors hover:border-fg-mute hover:text-fg disabled:opacity-50"
           >
             {isPending && !intent ? rotulo.gerando : rotulo.acao}
+          </button>
+        )}
+        {isActionable && tetoDoDesconto > 0 && (
+          <button
+            onClick={() => { setFlashError(null); setDiscountOpen(true) }}
+            disabled={isPending}
+            className="inline-flex h-9 items-center gap-1.5 rounded-full border border-border px-4 text-[13px] text-fg-mute transition-colors hover:border-fg-mute hover:text-fg disabled:opacity-50"
+          >
+            Conceder desconto
           </button>
         )}
         {isActionable && (
@@ -486,6 +531,67 @@ export function BillingActions({ billingId, customerId, status, amountDue, cobra
               className="inline-flex h-9 items-center px-4 rounded-full bg-primary text-[13px] font-semibold text-bg hover:bg-primary-hover disabled:opacity-50"
             >
               {isPending ? 'Salvando…' : 'Aplicar crédito'}
+            </button>
+          </div>
+        </div>
+      </Modal>
+
+      {/* ── Conceder desconto ─────────────────────────────────────────────── */}
+      <Modal open={discountOpen} onClose={() => setDiscountOpen(false)} title="Conceder desconto">
+        <div className="space-y-4">
+          {/* O desconto vira item negativo, não edição do valor emitido — o
+              documento já lançado é imutável (ADR 0024). Por isso o teto é o
+              saldo JÁ LANÇADO, não o que a cobrança projeta cobrar com juros
+              de hoje: descontar sobre projeção descontaria algo que ainda não
+              é item nenhum. */}
+          <div className="rounded-lg border border-divider bg-surface-2 px-3 py-2 text-[13px]">
+            <div className="flex justify-between">
+              <span className="text-fg-mute">Saldo em aberto</span>
+              <span className="tabular-nums text-fg">{formatCurrency(tetoDoDesconto)}</span>
+            </div>
+          </div>
+
+          <Input
+            label="Desconto (R$)"
+            type="number"
+            step="0.01"
+            min="0.01"
+            max={tetoDoDesconto.toFixed(2)}
+            value={discountAmount}
+            onChange={(e) => {
+              const v = e.target.value.replace(/^(\d*[.,]?\d{0,2}).*$/, '$1')
+              const n = parseFloat(v)
+              if (!isNaN(n) && n > tetoDoDesconto) {
+                setDiscountAmount(tetoDoDesconto.toFixed(2))
+                setFlashError(`O máximo aqui é ${formatCurrency(tetoDoDesconto)} — o saldo já lançado desta cobrança.`)
+                return
+              }
+              setDiscountAmount(v)
+              setFlashError(null)
+            }}
+          />
+
+          <Textarea
+            label="Motivo do desconto"
+            value={discountReason}
+            onChange={(e) => setDiscountReason(e.target.value)}
+            rows={2}
+          />
+
+          {flashError && <p className="text-[13px] text-danger">{flashError}</p>}
+          <div className="flex justify-end gap-2 pt-2">
+            <button
+              onClick={() => setDiscountOpen(false)}
+              className="inline-flex h-9 items-center px-4 rounded-full border border-border text-[13px] text-fg-mute hover:text-fg"
+            >
+              Cancelar
+            </button>
+            <button
+              onClick={handleDiscount}
+              disabled={isPending}
+              className="inline-flex h-9 items-center px-4 rounded-full bg-primary text-[13px] font-semibold text-bg hover:bg-primary-hover disabled:opacity-50"
+            >
+              {isPending ? 'Salvando…' : 'Conceder desconto'}
             </button>
           </div>
         </div>

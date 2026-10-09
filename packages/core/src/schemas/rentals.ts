@@ -212,17 +212,9 @@ export const RegisterPaymentSchema = z.object({
 
 export type RegisterPayment = z.infer<typeof RegisterPaymentSchema>
 
-// ---------------------------------------------------------------------------
-// Cobrança — desconto
-// ---------------------------------------------------------------------------
-
-export const ApplyDiscountSchema = z.object({
-  billing_id:      z.string().uuid(),
-  discount_amount: z.number().positive({ error: 'Valor do desconto deve ser positivo' }),
-  discount_reason: z.string().min(3, { error: 'Motivo deve ter ao menos 3 caracteres' }),
-})
-
-export type ApplyDiscount = z.infer<typeof ApplyDiscountSchema>
+// `ApplyDiscountSchema` mudou de endereço: desconto se aplica a qualquer
+// cobrança, não só à de locação, e mora em `schemas/ledger.ts` junto de
+// `CancelChargeSchema`/`WriteOffChargeSchema`, que são a mesma família.
 
 // ---------------------------------------------------------------------------
 // Cobrança — avulsa

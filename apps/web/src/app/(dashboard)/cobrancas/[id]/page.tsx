@@ -127,6 +127,7 @@ const SOURCE_LABELS: Record<string, string> = {
   // aparece.
   rental:       'Locação',
   late_charge:  'Encargo por atraso',
+  discount:     'Desconto',
   fine:         'Multa',
   maintenance:  'Manutenção',
   expense:      'Despesa',
@@ -464,6 +465,16 @@ export default async function BillingDetailPage({
   const formas = new Set(recebimentos.map((p) => p.payment_method))
   const formaUnica: string | null =
     balance.status === 'paid' && formas.size === 1 ? [...formas][0]! : null
+
+  // Desconto é item negativo (`source_module = 'discount'`), não coluna —
+  // `balance.total_amount` já vem NETO dele. O valor bruto emitido é a soma
+  // do que sobra sem os itens de desconto; sem separar os dois, "R$ 30 − R$ 5
+  // de desconto" mostraria R$ 25, quando o total já é R$ 30.
+  const discountAmount = round2(
+    -items.filter((i) => i.source_module === 'discount').reduce((sum, i) => sum + i.amount, 0),
+  )
+  const grossAmount = round2(balance.total_amount + discountAmount)
+
   const billing = {
     id: balance.charge_id,
     charge_number: balance.charge_number,
@@ -494,8 +505,8 @@ export default async function BillingDetailPage({
     cancellation_reason: charge?.cancellation_reason ?? null,
     lease_id: balance.rental_id,
     description: principalItem?.description ?? `Cobrança #${balance.charge_number}`,
-    original_amount: balance.total_amount,
-    discount_amount: 0,
+    original_amount: grossAmount,
+    discount_amount: discountAmount,
     credit_applied: 0,
     due_date: balance.due_date,
     status: balance.status,

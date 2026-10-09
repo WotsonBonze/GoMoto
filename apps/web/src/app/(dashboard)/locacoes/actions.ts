@@ -10,7 +10,6 @@ import {
   TerminateRentalSchema,
   ReturnRemainingDepositSchema,
   RegisterPaymentSchema,
-  ApplyDiscountSchema,
   OneTimeChargeSchema,
   AddToQueueSchema,
   UploadClientDocumentSchema,
@@ -31,7 +30,6 @@ import type {
   CreateRental,
   TerminateRental,
   RegisterPayment,
-  ApplyDiscount,
   CreateOneTimeCharge,
   AddToQueue,
   UploadClientDocument,
@@ -997,97 +995,10 @@ export async function registerPayment(
   return { ok: true, data: undefined }
 }
 
-// ---------------------------------------------------------------------------
-// applyDiscount — desconto como ITEM NEGATIVO da cobrança
-// ---------------------------------------------------------------------------
-// `billings.discount_amount` deixou de existir. Desconto passa a ser um item de
-// valor negativo, o que o torna rastreável como qualquer outra composição —
-// aparece no extrato, tem origem e entra no ledger.
-
-export async function applyDiscount(
-  data: ApplyDiscount,
-): Promise<ActionResult<void>> {
-  const supabase = await createClient()
-  const { data: { user } } = await supabase.auth.getUser()
-  if (!user) return { ok: false, error: { code: 'UNAUTHORIZED', message: 'Não autorizado' } }
-
-  const tenantId = await getCurrentTenantId(supabase)
-  if (!tenantId) return { ok: false, error: { code: 'UNAUTHORIZED', message: 'Tenant não encontrado' } }
-
-  const parsed = ApplyDiscountSchema.safeParse(data)
-  if (!parsed.success) {
-    return { ok: false, error: { code: 'VALIDATION_ERROR', message: 'Dados inválidos' } }
-  }
-
-  const { data: balance } = await supabase
-    .from('charge_balances')
-    .select('charge_id, customer_id, rental_id, status, open_amount')
-    .eq('charge_id', parsed.data.billing_id)
-    .eq('tenant_id', tenantId)
-    .maybeSingle()
-
-  const b = balance as {
-    charge_id: string; customer_id: string; rental_id: string | null
-    status: string; open_amount: number
-  } | null
-
-  if (!b) return { ok: false, error: { code: 'NOT_FOUND', message: 'Cobrança não encontrada' } }
-  if (b.status !== 'open') {
-    return { ok: false, error: { code: 'CONFLICT', message: 'Só cobrança em aberto admite desconto.' } }
-  }
-  if (parsed.data.discount_amount > b.open_amount) {
-    return { ok: false, error: { code: 'VALIDATION_ERROR', message: 'Desconto maior que o saldo em aberto.' } }
-  }
-
-  const amount = -Math.abs(parsed.data.discount_amount)
-
-  const { error } = await supabase.from('charge_items').insert({
-    tenant_id: tenantId,
-    charge_id: b.charge_id,
-    description: parsed.data.discount_reason
-      ? `Desconto — ${parsed.data.discount_reason}`
-      : 'Desconto',
-    credit_account_code: ACCOUNTS.RENTAL_REVENUE,
-    quantity: 1,
-    unit_amount: amount,
-    amount,
-  })
-
-  if (error) return { ok: false, error: { code: 'INTERNAL_ERROR', message: error.message } }
-
-  // Estorna a receita na proporção do desconto.
-  try {
-    await postTransaction(supabase, tenantId, {
-      event: {
-        type: 'charge_issuance_reversed',
-        amount: Math.abs(amount),
-        debit_account: ACCOUNTS.RENTAL_REVENUE,
-        dimensions: dimensionsOf({
-          customerId: b.customer_id,
-          rentalId: b.rental_id,
-          chargeId: b.charge_id,
-        }),
-      },
-      description: 'Desconto concedido',
-      sourceModule: 'discount',
-      sourceId: b.charge_id,
-      createdBy: user.id,
-    })
-  } catch (err) {
-    return { ok: false, error: { code: 'INTERNAL_ERROR', message: String(err) } }
-  }
-
-  await logAction({
-    action: 'update',
-    table: 'charges',
-    recordId: b.charge_id,
-    newData: { discount: parsed.data.discount_amount, reason: parsed.data.discount_reason },
-  })
-
-  revalidatePath('/cobrancas')
-  revalidatePath('/locacoes')
-  return { ok: true, data: undefined }
-}
+// `applyDiscount` mudou de endereço: mora em `cobrancas/actions.ts`, como
+// `applyDiscountAction` — desconto se aplica a qualquer cobrança, não só à de
+// locação, e a Server Action fica co-localizada com a tela que a chama (ADR
+// 0002).
 
 // ---------------------------------------------------------------------------
 // createOneTimeCharge — cobrança avulsa

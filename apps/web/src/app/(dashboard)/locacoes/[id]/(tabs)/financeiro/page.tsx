@@ -176,15 +176,27 @@ export default async function RentalFinancialTab({
   const { data: itemRows } = billings.length
     ? await supabase
         .from('charge_items')
-        .select('charge_id, description, amount')
+        .select('charge_id, description, source_module')
         .in('charge_id', billings.map(b => b.charge_id))
     : { data: [] }
 
+  const itemsByCharge = new Map<string, { description: string; source_module: string }[]>()
+  for (const i of (itemRows ?? []) as { charge_id: string; description: string; source_module: string }[]) {
+    const list = itemsByCharge.get(i.charge_id) ?? []
+    list.push(i)
+    itemsByCharge.set(i.charge_id, list)
+  }
+
   const descByCharge = new Map<string, string>()
-  for (const i of (itemRows ?? []) as { charge_id: string; description: string; amount: number }[]) {
-    // Item de maior valor representa a cobrança.
-    const atual = descByCharge.get(i.charge_id)
-    if (!atual) descByCharge.set(i.charge_id, i.description)
+  for (const [chargeId, list] of itemsByCharge) {
+    // Uma cobrança cobra uma coisa só (ADR 0024): o item PRINCIPAL vence,
+    // nunca um ACESSÓRIO (encargo por atraso, desconto) — sem isso, o
+    // primeiro item que a consulta devolvesse (ordem não garantida sem
+    // ORDER BY) podia ser "Desconto — <motivo>", e a coluna mostraria o
+    // motivo do desconto no lugar da descrição da cobrança.
+    const principal = list.find(i => i.source_module !== 'late_charge' && i.source_module !== 'discount')
+      ?? list[0]
+    descByCharge.set(chargeId, principal!.description)
   }
 
   // ── Totais ────────────────────────────────────────────────────────────────

@@ -80,6 +80,20 @@ export const WriteOffChargeSchema = z.object({
   reason: z.string().trim().min(3, 'Informe o motivo da baixa').max(500),
 })
 
+/**
+ * Desconto concedido a uma cobrança em aberto.
+ *
+ * Nunca edita item existente (ADR 0024, Princípio 5) — vira item negativo,
+ * rastreável como qualquer outra composição. `discount_amount` é limitado ao
+ * saldo em aberto pela Server Action, não aqui: o teto depende do estado atual
+ * da cobrança, que o schema não enxerga.
+ */
+export const ApplyDiscountSchema = z.object({
+  charge_id: z.string().uuid('Cobrança inválida'),
+  discount_amount: money,
+  discount_reason: z.string().trim().min(3, 'Informe o motivo do desconto').max(500),
+})
+
 // ============================================================
 // Pagamento
 // ============================================================
@@ -214,6 +228,7 @@ export const AccountMappingSchema = z.object({
 
 export type ChargeItemInput = z.infer<typeof ChargeItemSchema>
 export type CreateChargeInput = z.infer<typeof CreateChargeSchema>
+export type ApplyDiscountInput = z.infer<typeof ApplyDiscountSchema>
 export type ReceivePaymentInput = z.infer<typeof ReceivePaymentSchema>
 export type ReversePaymentInput = z.infer<typeof ReversePaymentSchema>
 export type CreatePayableInput = z.infer<typeof CreatePayableSchema>
