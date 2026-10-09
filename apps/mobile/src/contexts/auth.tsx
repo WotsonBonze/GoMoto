@@ -104,32 +104,47 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }
 
   useEffect(() => {
-    supabase.auth.getSession().then(async ({ data }) => {
-      if (data.session) {
-        const list = await syncTenantsFor(data.session.user.id)
-        if (list.length === 0) {
-          // Não é cliente em nenhum tenant — encerra a sessão.
-          await supabase.auth.signOut()
-          setSession(null)
-        } else {
-          setSession(data.session)
+    // try/finally: qualquer falha no bootstrap (rede, RLS, storage) precisa
+    // soltar o gate de loading — senão o app fica preso no spinner.
+    ;(async () => {
+      try {
+        const { data } = await supabase.auth.getSession()
+        if (data.session) {
+          const list = await syncTenantsFor(data.session.user.id)
+          if (list.length === 0) {
+            // Não é cliente em nenhum tenant — encerra a sessão.
+            await supabase.auth.signOut()
+            setSession(null)
+          } else {
+            setSession(data.session)
+          }
         }
+      } catch (err) {
+        console.warn('[auth] falha ao restaurar sessão', err)
+      } finally {
+        setLoading(false)
       }
-      setLoading(false)
-    })
+    })()
 
     Linking.getInitialURL().then(consumeAuthCallback)
     const linkingSub = Linking.addEventListener('url', (event) => {
       void consumeAuthCallback(event.url)
     })
 
-    const { data: sub } = supabase.auth.onAuthStateChange(async (_event, next) => {
+    // O callback NÃO pode aguardar chamadas ao supabase: o auth-js aguarda os
+    // subscribers dentro do initialize(). Ao abrir o app com o access token
+    // vencido, o initialize() faz refresh e emite TOKEN_REFRESHED; se o callback
+    // aguardar uma query, a query chama getSession(), que aguarda o initialize(),
+    // que aguarda o callback → deadlock e spinner infinito (na 2ª abertura o
+    // token já foi renovado e salvo, por isso "funcionava"). O setTimeout tira
+    // o trabalho de dentro do ciclo de notificação, como a doc do Supabase manda.
+    const { data: sub } = supabase.auth.onAuthStateChange((_event, next) => {
       setSession(next)
-      if (next?.user) {
-        await syncTenantsFor(next.user.id)
-      } else {
-        await syncTenantsFor(null)
-      }
+      setTimeout(() => {
+        syncTenantsFor(next?.user?.id ?? null).catch((err) => {
+          console.warn('[auth] falha ao sincronizar tenants', err)
+        })
+      }, 0)
     })
 
     return () => {
