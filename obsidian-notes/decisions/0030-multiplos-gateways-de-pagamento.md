@@ -81,6 +81,18 @@ Não há abstração honesta sobre "webhook de gateway": cada provedor tem contr
 
 Deno não alcança `packages/core` pelo workspace, então esse núcleo vive em `_shared` e não em `@gomoto/core`. É a fronteira real do runtime, não uma duplicação por descuido.
 
+#### Adendo 2026-09-25 — o dono do pagamento sai da cobrança, nunca da conta
+
+O MP era o único provedor que resolvia o tenant pelo `user_id` do IPN (`resolveAccount`, busca em `payment_provider_accounts`). Isso pressupunha **uma conta MP por tenant**, e o banco nunca garantiu isso: o único é `(tenant_id, provider, external_account_id)`. Em produção, a mesma conta `251267991` estava ligada à Go Motos (desconectada) e à WAT Motos. A busca achou duas linhas, o `.maybeSingle()` devolveu erro, o erro foi lido como "conta não existe" e o evento foi marcado como processado: um Pix pago sumiu sem erro e sem rastro no diagnóstico.
+
+Regra, agora igual nos três provedores:
+
+1. `data.id` → `payment_intents.provider_intent_id`. É o intent que diz tenant, cobrança, conta e valor. `resolveAccount` foi **removido**.
+2. Sem intent → pagamento que o GoMoto não gerou (maquininha, link avulso). Loga `webhook.foreign_payment` e marca processado. Não há corrida "intent ainda não gravado": o QR só é entregue depois de `fn_open_payment_intent`.
+3. A consulta ao MP usa a credencial da conta **do intent**, e o resultado é conferido por `_shared/mercadopago-check.ts` (função pura, testada com `deno test`): `user_id` do IPN, `collector_id` e `external_reference` (= `charge_id`) precisam bater com a conta e a cobrança do intent, e o valor pago com o valor do intent, em centavos. Qualquer divergência → exceção: o evento fica na fila com `processing_error`, visível ao tenant, e nada vai ao razão.
+
+Consequência: **a mesma conta MP em vários tenants passa a ser segura**. Cada pagamento sabe de quem é pelo intent. O dinheiro de todos cai na mesma conta MP, mas isso é uma decisão de negócio, não uma inconsistência do razão.
+
 ### 6. O que o intent pede é o que o intent cobra
 
 `method` passa a ser validado contra `descriptor.methods` antes de chegar ao provedor, tem `CHECK` no banco, e `fn_confirm_gateway_payment` **deriva** o método do intent em vez de assumir `pix`. Mata G-05 nos três pontos onde ele sobrevivia.

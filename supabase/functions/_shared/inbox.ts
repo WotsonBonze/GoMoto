@@ -125,25 +125,6 @@ export async function recordEvent(
   return (data as { id: string }).id
 }
 
-/** A conta do tenant naquele provedor. Sem ela não há tenant a creditar. */
-export async function resolveAccount(
-  supabase: SupabaseClient,
-  provider: string,
-  externalAccountId: string,
-): Promise<ProviderAccount | null> {
-  // Sem filtro por `active` de propósito: uma conta desconectada ainda pode
-  // receber o pagamento de um QR gerado antes. Dinheiro que entrou tem que ser
-  // reconhecido, mesmo que a locadora já tenha trocado de gateway.
-  const { data } = await supabase
-    .from('payment_provider_accounts')
-    .select('id, tenant_id')
-    .eq('provider', provider)
-    .eq('external_account_id', externalAccountId)
-    .maybeSingle()
-
-  return (data ?? null) as ProviderAccount | null
-}
-
 /** Credencial do Vault. Ponto único de leitura, com checagem de tenant dentro. */
 export async function accountCredentials(
   supabase: SupabaseClient,

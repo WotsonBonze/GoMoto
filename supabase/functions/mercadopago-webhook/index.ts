@@ -25,7 +25,9 @@ import { PROVIDER, processMercadoPagoEvent } from '../_shared/mercadopago.ts'
 
 const IPNSchema = z.object({
   type: z.enum(['payment', 'merchant_order']),
-  user_id: z.string(),
+  // O MP manda como string hoje, mas já mandou como número. Número caía no
+  // `safeParse` e virava `unknown_type` — pagamento descartado como ruído.
+  user_id: z.union([z.string(), z.number()]).transform(String),
   data: z.object({ id: z.string() }),
 })
 

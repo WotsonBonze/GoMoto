@@ -121,7 +121,7 @@ async function renovarCredenciais(
 
     // Sem filtro por `active`: conta desconectada ainda pode ter evento parado,
     // e reconhecer o dinheiro que entrou vale mais que o estado da conexão —
-    // mesmo motivo de `resolveAccount` não filtrar.
+    // o processador também usa a conta do intent sem olhar `active`.
     const { data: contas } = await supabase
       .from('payment_provider_accounts')
       .select('id, provider')
