@@ -217,6 +217,44 @@ test.describe('Rota do QR — autenticação e titularidade', () => {
     expect(res.status()).toBe(404)
   })
 
+  test('cliente de DUAS locadoras alcança a própria cobrança', async ({ request }) => {
+    // Regressão de produção (2026-09-25): a rota buscava o cadastro com
+    // `.maybeSingle()` por `user_id`. Com um cadastro por locadora (PRD 0001),
+    // o PostgREST devolvia erro e o cliente ouvia "Cliente não encontrado".
+    const { data: outra, error: tErr } = await admin()
+      .from('tenants')
+      .insert({ name: `${TEST_TAG} Outra ${RUN}`, slug: `e2e-outra-${RUN}` })
+      .select('id')
+      .single()
+    if (tErr) throw new Error(`tenant: ${tErr.message}`)
+    const outraId = (outra as { id: string }).id
+
+    try {
+      const { error: cErr } = await admin().from('customers').insert({
+        tenant_id: outraId, name: `${TEST_TAG} App outra`, cpf: dono.cpf,
+        phone: '21988887777', state: 'RJ', active: true, in_queue: false,
+        user_id: dono.userId,
+      })
+      if (cErr) throw new Error(`cliente na outra locadora: ${cErr.message}`)
+
+      const res = await request.post(`/api/charges/${chargeDoDono}/payment-intent`, {
+        headers: { Authorization: `Bearer ${dono.token}` },
+        data: {},
+      })
+      const body = await res.json()
+
+      // Sem gateway configurado a rota ainda pode recusar (403 "Pagamento
+      // online não configurado"); o que NÃO pode é negar que ele é cliente
+      // nem que a cobrança é dele.
+      expect(body.error?.message, 'dono com dois cadastros foi tratado como não-cliente')
+        .not.toBe('Cliente não encontrado')
+      expect(res.status(), 'dono com dois cadastros não alcançou a própria cobrança').not.toBe(404)
+    } finally {
+      await admin().from('customers').delete().eq('tenant_id', outraId)
+      await admin().from('tenants').delete().eq('id', outraId)
+    }
+  })
+
   test('usuário autenticado que não é cliente é barrado', async ({ request }) => {
     // Operador do cockpit tem token válido e nenhum `customers.user_id`.
     const { data: session } = await createClient(

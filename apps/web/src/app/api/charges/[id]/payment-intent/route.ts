@@ -48,30 +48,41 @@ export async function POST(req: NextRequest, ctx: RouteContext) {
     process.env.SUPABASE_SERVICE_ROLE_KEY!,
   )
 
-  const { data: customer } = await admin
+  // TODOS os cadastros do login, um por locadora (PRD 0001: o mesmo CPF pode
+  // ser cliente de mais de um tenant). Era `.maybeSingle()`: com dois cadastros
+  // o PostgREST devolve erro, `data` vinha null e a rota respondia "Cliente não
+  // encontrado" a quem é cliente — em produção, 2026-09-25.
+  const { data: customers, error: customersError } = await admin
     .from('customers')
     .select('id, tenant_id')
     .eq('user_id', user.id)
-    .maybeSingle()
 
-  if (!customer) {
+  if (customersError) {
+    log('error', 'intent.customer_lookup_failed', { user_id: user.id, error: customersError.message })
+    return json({ ok: false, error: { code: 'INTERNAL', message: 'Falha ao gerar cobrança. Tente novamente.' } }, 500)
+  }
+  if (!customers || customers.length === 0) {
     log('warn', 'intent.customer_not_found', { user_id: user.id, charge_id: chargeId })
     return json({ ok: false, error: { code: 'FORBIDDEN', message: 'Cliente não encontrado' } }, 403)
   }
 
-  const c = customer as { id: string; tenant_id: string }
-
-  // Titularidade: a cobrança precisa ser deste cliente. Sem esta checagem, o
-  // service role contornaria a RLS.
+  // Titularidade: a cobrança precisa ser de UM destes cadastros, na locadora
+  // dele. Sem esta checagem, o service role contornaria a RLS. Cobrança alheia
+  // e inexistente respondem igual (404), para não revelar qual existe.
   const { data: charge } = await admin
     .from('charges')
-    .select('id, customer_id')
+    .select('id, tenant_id, customer_id')
     .eq('id', chargeId)
-    .eq('tenant_id', c.tenant_id)
     .maybeSingle()
 
-  if (!charge || (charge as { customer_id: string }).customer_id !== c.id) {
-    log('warn', 'intent.charge_not_owned', { charge_id: chargeId, customer_id: c.id })
+  const ch = charge as { tenant_id: string; customer_id: string } | null
+  const c = ch
+    ? (customers as { id: string; tenant_id: string }[])
+        .find((cu) => cu.id === ch.customer_id && cu.tenant_id === ch.tenant_id)
+    : undefined
+
+  if (!c) {
+    log('warn', 'intent.charge_not_owned', { charge_id: chargeId, user_id: user.id })
     return json({ ok: false, error: { code: 'NOT_FOUND', message: 'Cobrança não encontrada' } }, 404)
   }
 
