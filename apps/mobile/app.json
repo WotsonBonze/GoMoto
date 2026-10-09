@@ -2,7 +2,7 @@
   "expo": {
     "name": "GoMoto Mobile",
     "slug": "gomotos",
-    "version": "0.2.0",
+    "version": "0.4.0",
     "scheme": "gomoto",
     "orientation": "portrait",
     "userInterfaceStyle": "automatic",
@@ -14,7 +14,7 @@
     },
     "android": {
       "package": "com.gomoto.mobile",
-      "versionCode": 7,
+      "versionCode": 9,
       "adaptiveIcon": {
         "foregroundImage": "./assets/adaptive-icon-foreground.png",
         "backgroundColor": "#2563EB"
@@ -37,7 +37,8 @@
             "backgroundColor": "#0B1120"
           }
         }
-      ]
+      ],
+      "expo-web-browser"
     ],
     "extra": {
       "router": {},

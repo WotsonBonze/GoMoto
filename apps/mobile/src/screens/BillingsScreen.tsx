@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import * as Clipboard from 'expo-clipboard'
+import * as WebBrowser from 'expo-web-browser'
 import {
   ActivityIndicator,
   Alert,
@@ -15,7 +16,7 @@ import {
 } from 'react-native'
 import { SafeAreaView } from 'react-native-safe-area-context'
 import { useFocusEffect } from 'expo-router'
-import { useMyCharges } from '@gomoto/data'
+import { useMyCharges, usePaymentIntentStatus } from '@gomoto/data'
 import type { MyChargeRow } from '@gomoto/data'
 import {
 } from '@gomoto/core'
@@ -26,19 +27,42 @@ import { useTheme, type ThemeTokens } from '../theme'
 // Types
 // ---------------------------------------------------------------------------
 
-type PaymentMethod = 'pix' | 'boleto' | 'card'
-
-type PixResult = {
-  /** Copia-e-cola do Pix. Campo canônico, comum a todo gateway (ADR 0031 §4). */
-  emv?: string
-  qr_code: string
-  qr_code_base64: string
+/**
+ * Resposta de `POST /api/charges/[id]/payment-intent` (`PaymentIntentResult`
+ * em `apps/web/src/lib/payment/intents.ts`).
+ *
+ * O app não escolhe gateway nem meio: quem decide é a conta que a locadora
+ * elegeu (ADR 0030). O que muda de provedor para provedor mora em `payload`,
+ * e a tela se orienta por `method`:
+ *
+ * - `pix` (Mercado Pago, Cora): `payload.emv` + `payload.qr_code_base64`. A
+ *   imagem é garantida pelo servidor (`ensureQrImage`, ADR 0031 §4).
+ * - `payment_link` (InfinitePay): `payload.checkout_url` — página hospedada
+ *   onde o cliente escolhe Pix ou cartão (ADR 0032).
+ *
+ * Antes o app lia `emv`/`qr_code_base64` no primeiro nível da resposta, onde
+ * eles nunca estiveram: QR `base64,undefined` e copia-e-cola vazio para
+ * qualquer gateway.
+ */
+type PaymentIntent = {
+  intent_id: string
+  provider: string
+  provider_label: string
+  method: string
+  amount: number
   /**
    * `null` quando o gateway não declara validade — é o caso da Cora, cujo Pix
-   * não vence sozinho. Antes isto era `string` e a tela fazia
-   * `expires_at.slice(0, 10)` direto: o primeiro QR da Cora derrubaria o modal.
+   * não vence sozinho, e do link da InfinitePay.
    */
   expires_at: string | null
+  payload: {
+    /** Copia-e-cola do Pix. Campo canônico, comum a todo gateway (ADR 0031 §4). */
+    emv?: string
+    /** Nome legado do copia-e-cola, ainda gravado por MP e Cora. */
+    qr_code?: string
+    qr_code_base64?: string
+    checkout_url?: string
+  } | null
   is_reused: boolean
 }
 
@@ -119,18 +143,44 @@ function vehicleLabel(billing: MyChargeRow): string | null {
   return billing.vehicle_plate
 }
 
-async function generatePix(billingId: string): Promise<PixResult> {
+async function createPaymentIntent(billingId: string): Promise<PaymentIntent> {
   const { data: { session } } = await supabase.auth.getSession()
   if (!session) throw new Error('Não autenticado')
   const webUrl = process.env.EXPO_PUBLIC_WEB_URL ?? ''
   if (!webUrl) throw new Error('EXPO_PUBLIC_WEB_URL não configurado')
+  // Sem `method` no corpo: o default é o meio principal do gateway eleito,
+  // resolvido no servidor. Pedir `pix` aqui quebraria a InfinitePay.
   const res = await fetch(`${webUrl}/api/charges/${billingId}/payment-intent`, {
     method: 'POST',
-    headers: { Authorization: `Bearer ${session.access_token}` },
+    headers: {
+      Authorization: `Bearer ${session.access_token}`,
+      'Content-Type': 'application/json',
+    },
+    body: '{}',
   })
-  const json = await res.json()
-  if (!json.ok) throw new Error(json.error?.message ?? 'Falha ao gerar Pix')
-  return json.data as PixResult
+  const json = await res.json().catch(() => null)
+  if (!json?.ok) throw new Error(json?.error?.message ?? 'Falha ao gerar pagamento')
+  return json.data as PaymentIntent
+}
+
+/** Copia-e-cola do Pix, pelo nome canônico ou pelo legado. */
+function pixCodeOf(intent: PaymentIntent): string | null {
+  return intent.payload?.emv || intent.payload?.qr_code || null
+}
+
+/**
+ * Abre o checkout hospedado num navegador DENTRO do app (Custom Tabs no
+ * Android, SFSafariViewController no iOS): o cliente paga e fecha, sem se
+ * perder entre apps — `Linking.openURL` jogaria para o navegador externo.
+ */
+async function openCheckout(url: string): Promise<void> {
+  try {
+    await WebBrowser.openBrowserAsync(url, {
+      presentationStyle: WebBrowser.WebBrowserPresentationStyle.PAGE_SHEET,
+    })
+  } catch {
+    Alert.alert('Erro', 'Não foi possível abrir a página de pagamento.')
+  }
 }
 
 
@@ -284,118 +334,123 @@ function HistoryRow({ billing, onPress, styles }: { billing: MyChargeRow; onPres
 }
 
 // ---------------------------------------------------------------------------
-// PaymentMethodSelector
+// PaymentModal
 // ---------------------------------------------------------------------------
 
-function PaymentMethodSelector({
-  selected,
-  onChange,
-  styles,
-}: {
-  selected: PaymentMethod
-  onChange: (m: PaymentMethod) => void
-  styles: Styles
-}) {
-  const methods: { id: PaymentMethod; label: string; available: boolean }[] = [
-    { id: 'pix',    label: 'Pix',    available: true },
-    { id: 'boleto', label: 'Boleto', available: false },
-    { id: 'card',   label: 'Cartão', available: false },
-  ]
-
-  return (
-    <View style={styles.methodSelector}>
-      {methods.map((m) => (
-        <Pressable
-          key={m.id}
-          style={[
-            styles.methodBtn,
-            selected === m.id && styles.methodBtnActive,
-            !m.available && styles.methodBtnDisabled,
-          ]}
-          onPress={() => m.available && onChange(m.id)}
-          disabled={!m.available}
-        >
-          <Text style={[
-            styles.methodBtnText,
-            selected === m.id && styles.methodBtnTextActive,
-            !m.available && styles.methodBtnTextDisabled,
-          ]}>
-            {m.label}
-          </Text>
-          {!m.available && (
-            <Text style={styles.methodBtnSoon}>em breve</Text>
-          )}
-        </Pressable>
-      ))}
-    </View>
-  )
-}
-
-// ---------------------------------------------------------------------------
-// PixModal
-// ---------------------------------------------------------------------------
-
-function PixModal({
+/**
+ * Tela de pagamento, desenhada pelo `method` que o gateway eleito devolveu.
+ *
+ * O seletor "Pix / Boleto / Cartão" que existia antes foi removido: o app não
+ * escolhe meio nenhum (o servidor usa o do gateway da locadora), então ele
+ * prometia uma escolha que não existia.
+ */
+function PaymentModal({
   billing,
-  result,
-  pixPaid,
+  intent,
+  paid,
   onClose,
   styles,
 }: {
   billing: MyChargeRow
-  result: PixResult
-  pixPaid: boolean
+  intent: PaymentIntent
+  paid: boolean
   onClose: () => void
   styles: Styles
 }) {
-  // F-05: o valor devido vem pronto do servidor, já com encargo e crédito.
-  const finalAmount = billing.amount_due
+  const isLink  = intent.method === 'payment_link'
+  const isPix   = intent.method === 'pix'
+  const pixCode = pixCodeOf(intent)
+  const qrImage = intent.payload?.qr_code_base64
+  const url     = intent.payload?.checkout_url
 
   function copyCode() {
-    void Clipboard.setStringAsync(result.emv ?? result.qr_code)
+    if (!pixCode) return
+    void Clipboard.setStringAsync(pixCode)
     Alert.alert('Copiado!', 'Código Pix copiado para a área de transferência.')
   }
+
+  const title = isPix ? 'Pagar com Pix' : `Pagar com ${intent.provider_label}`
 
   return (
     <Modal visible animationType="slide" presentationStyle="pageSheet" onRequestClose={onClose}>
       <SafeAreaView style={styles.modalSafe}>
         <View style={styles.modalHeader}>
-          <Text style={styles.modalTitle}>Pagar com Pix</Text>
+          <Text style={styles.modalTitle}>{title}</Text>
           <Pressable onPress={onClose} hitSlop={12}>
             <Text style={styles.modalClose}>Fechar</Text>
           </Pressable>
         </View>
         <ScrollView contentContainerStyle={styles.modalBody}>
-          {pixPaid && (
+          {paid && (
             <View style={styles.pixPaidConfirm}>
               <Text style={styles.pixPaidConfirmText}>Pagamento confirmado!</Text>
             </View>
           )}
-          {result.is_reused && (
+          {intent.is_reused && (
             <View style={styles.reuseNote}>
-              <Text style={styles.reuseNoteText}>Pix ativo reutilizado — mesmo código gerado anteriormente.</Text>
+              <Text style={styles.reuseNoteText}>
+                {isLink
+                  ? 'Link de pagamento ativo reutilizado — o mesmo gerado anteriormente.'
+                  : 'Pix ativo reutilizado — mesmo código gerado anteriormente.'}
+              </Text>
             </View>
           )}
-          <View style={styles.pixQrContainer}>
-            <Image
-              source={{ uri: `data:image/png;base64,${result.qr_code_base64}` }}
-              style={styles.pixQrImage}
-              resizeMode="contain"
-            />
-          </View>
+
+          {isPix && qrImage ? (
+            <View style={styles.pixQrContainer}>
+              <Image
+                source={{ uri: `data:image/png;base64,${qrImage}` }}
+                style={styles.pixQrImage}
+                resizeMode="contain"
+              />
+            </View>
+          ) : null}
+
           <View style={styles.pixInfo}>
-            <Text style={styles.pixAmount}>{formatCurrency(finalAmount)}</Text>
-            {result.expires_at ? (
-              <Text style={styles.pixExpiry}>Vence em {formatDate(result.expires_at.slice(0, 10))}</Text>
+            {/* O valor da tentativa, não o da lista: é o que o código cobra. */}
+            <Text style={styles.pixAmount}>{formatCurrency(intent.amount ?? billing.amount_due)}</Text>
+            {intent.expires_at ? (
+              <Text style={styles.pixExpiry}>Vence em {formatDate(intent.expires_at.slice(0, 10))}</Text>
             ) : null}
           </View>
-          <View style={styles.pixCodeBlock}>
-            <Text style={styles.pixCodeLabel}>Copia e Cola</Text>
-            <Text style={styles.pixCode} selectable>{result.emv ?? result.qr_code}</Text>
-          </View>
-          <TouchableOpacity style={styles.copyBtn} onPress={copyCode}>
-            <Text style={styles.copyBtnText}>Copiar Código Pix</Text>
-          </TouchableOpacity>
+
+          {isPix && pixCode ? (
+            <>
+              <View style={styles.pixCodeBlock}>
+                <Text style={styles.pixCodeLabel}>Copia e Cola</Text>
+                <Text style={styles.pixCode} selectable>{pixCode}</Text>
+              </View>
+              <TouchableOpacity style={styles.copyBtn} onPress={copyCode}>
+                <Text style={styles.copyBtnText}>Copiar Código Pix</Text>
+              </TouchableOpacity>
+            </>
+          ) : null}
+
+          {isLink && url ? (
+            <>
+              <View style={styles.pixCodeBlock}>
+                <Text style={styles.linkNoteText}>
+                  O pagamento é feito na página segura da {intent.provider_label}, onde você
+                  escolhe Pix ou cartão. Ao terminar, feche a página e volte para cá — a
+                  confirmação aparece automaticamente.
+                </Text>
+              </View>
+              <TouchableOpacity style={styles.payBtn} onPress={() => void openCheckout(url)}>
+                <Text style={styles.payBtnText}>Abrir página de pagamento</Text>
+              </TouchableOpacity>
+            </>
+          ) : null}
+
+          {/* Gateway novo que esta versão do app ainda não sabe desenhar, ou
+              payload incompleto: dizer isso em vez de mostrar um QR vazio. */}
+          {!(isPix && pixCode) && !(isLink && url) && (
+            <View style={styles.reuseNote}>
+              <Text style={styles.reuseNoteText}>
+                Esta forma de pagamento ainda não é suportada nesta versão do app.
+                Atualize o aplicativo ou fale com a locadora.
+              </Text>
+            </View>
+          )}
         </ScrollView>
       </SafeAreaView>
     </Modal>
@@ -409,23 +464,55 @@ function PixModal({
 function BillingDetailModal({
   billing,
   onClose,
-  onPixGenerated,
-  pixPaid,
+  onPaid,
   styles,
   typeTone,
   statusTone,
 }: {
   billing: MyChargeRow
   onClose: () => void
-  onPixGenerated?: (billingId: string) => void
-  pixPaid?: boolean
+  /** Pagamento confirmado pelo gateway — a tela recarrega a lista e fecha. */
+  onPaid?: () => void
   styles: Styles
   typeTone: TypeTone
   statusTone: StatusTone
 }) {
-  const [selectedMethod, setSelectedMethod] = useState<PaymentMethod>('pix')
-  const [generatingPix, setGeneratingPix]   = useState(false)
-  const [pixResult, setPixResult]           = useState<PixResult | null>(null)
+  const [generating, setGenerating] = useState(false)
+  const [intent, setIntent]         = useState<PaymentIntent | null>(null)
+  const [paid, setPaid]             = useState(false)
+  // Fechar o modal de pagamento NÃO encerra a tentativa: o Pix pode compensar
+  // depois, e o polling segue enquanto o detalhe estiver aberto.
+  const [showPayment, setShowPayment] = useState(false)
+
+  // Confirmação: o MESMO mecanismo do cockpit (`BillingActions.tsx`) — lê o
+  // status da tentativa a cada 5s até virar `paid`. O pagamento chega por
+  // webhook, fora do app; a política `customer_read_own_payment_intents`
+  // deixa o cliente ler a própria tentativa.
+  //
+  // Antes o app esperava a cobrança aparecer como `paid` em `useMyCharges(true)`
+  // — que só devolve cobranças EM ABERTO. Paga, a cobrança sumia da lista e o
+  // "Pagamento confirmado!" nunca aparecia.
+  const intentStatus = usePaymentIntentStatus(intent?.intent_id, !!intent && !paid)
+
+  useEffect(() => {
+    if (!intent || paid || intentStatus.data !== 'paid') return
+    setPaid(true)
+    setShowPayment(true)
+    // iOS: fecha o checkout hospedado se o cliente ainda estiver nele. No
+    // Android não há como fechar a Custom Tab pelo app (a chamada rejeita);
+    // ele volta sozinho.
+    Promise.resolve()
+      .then(() => WebBrowser.dismissBrowser())
+      .catch(() => { /* nada aberto, ou plataforma sem suporte */ })
+  }, [intentStatus.data, intent, paid])
+
+  // Timer em efeito PRÓPRIO: no efeito acima, `setPaid(true)` o reexecutaria e
+  // o cleanup cancelaria o fechamento antes de ele acontecer.
+  useEffect(() => {
+    if (!paid) return
+    const t = setTimeout(() => onPaid?.(), 2500)
+    return () => clearTimeout(t)
+  }, [paid, onPaid])
 
   const original  = billing.total_amount
   const discount  = 0
@@ -436,17 +523,20 @@ function BillingDetailModal({
   const daysOver  = overdue ? billing.days_overdue : 0
   const plate     = vehicleLabel(billing)
 
-  async function handlePix() {
-    setGeneratingPix(true)
+  async function handlePay() {
+    setGenerating(true)
     try {
-      const result = await generatePix(billing.charge_id)
-      setPixResult(result)
-      onPixGenerated?.(billing.charge_id)
+      const result = await createPaymentIntent(billing.charge_id)
+      setIntent(result)
+      setShowPayment(true)
+      // Checkout hospedado: abre direto, o modal fica por trás para reabrir.
+      const url = result.payload?.checkout_url
+      if (result.method === 'payment_link' && url) void openCheckout(url)
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : 'Falha ao gerar Pix'
+      const msg = err instanceof Error ? err.message : 'Falha ao gerar pagamento'
       Alert.alert('Erro', msg)
     } finally {
-      setGeneratingPix(false)
+      setGenerating(false)
     }
   }
 
@@ -545,19 +635,16 @@ function BillingDetailModal({
             {/* Pagamento */}
             {canPay && (
               <View style={styles.detailSection}>
-                <Text style={styles.detailSectionTitle}>Pagar com</Text>
-                <PaymentMethodSelector selected={selectedMethod} onChange={setSelectedMethod} styles={styles} />
-                {selectedMethod === 'pix' && (
-                  <TouchableOpacity
-                    style={[styles.payBtn, generatingPix && styles.payBtnDisabled]}
-                    onPress={handlePix}
-                    disabled={generatingPix}
-                  >
-                    <Text style={styles.payBtnText}>
-                      {generatingPix ? 'Gerando Pix…' : 'Gerar Pix'}
-                    </Text>
-                  </TouchableOpacity>
-                )}
+                <Text style={styles.detailSectionTitle}>Pagamento</Text>
+                <TouchableOpacity
+                  style={[styles.payBtn, generating && styles.payBtnDisabled]}
+                  onPress={handlePay}
+                  disabled={generating}
+                >
+                  <Text style={styles.payBtnText}>
+                    {generating ? 'Gerando pagamento…' : `Pagar ${formatCurrency(billing.amount_due)}`}
+                  </Text>
+                </TouchableOpacity>
               </View>
             )}
 
@@ -575,12 +662,12 @@ function BillingDetailModal({
         </SafeAreaView>
       </Modal>
 
-      {pixResult && (
-        <PixModal
+      {intent && showPayment && (
+        <PaymentModal
           billing={billing}
-          result={pixResult}
-          pixPaid={pixPaid ?? false}
-          onClose={() => setPixResult(null)}
+          intent={intent}
+          paid={paid}
+          onClose={() => setShowPayment(false)}
           styles={styles}
         />
       )}
@@ -605,8 +692,6 @@ export function BillingsScreen() {
   const [selected, setSelected]         = useState<MyChargeRow | null>(null)
   const [refreshing, setRefreshing]     = useState(false)
   const [historyOpen, setHistoryOpen]   = useState(false)
-  const [pixBillingId, setPixBillingId] = useState<string | null>(null)
-  const [pixPaid, setPixPaid]           = useState(false)
   const theme = useTheme()
   const styles = useMemo(() => createStyles(theme), [theme])
   const typeTone = useMemo(() => getBillingTypeTone(theme), [theme])
@@ -621,25 +706,13 @@ export function BillingsScreen() {
     }, [query.refetch]),
   )
 
-  // Poll a cada 5 s enquanto o Pix está aberto — detecta confirmação via webhook
-  useEffect(() => {
-    if (!pixBillingId) return
-    const id = setInterval(() => { void query.refetch() }, 5000)
-    return () => clearInterval(id)
-  }, [pixBillingId, query])
-
-  useEffect(() => {
-    if (!pixBillingId || pixPaid) return
-    const latest = (query.data ?? []).find((b) => b.charge_id === pixBillingId)
-    if (latest?.status === 'paid') {
-      setPixPaid(true)
-      setTimeout(() => {
-        setSelected(null)
-        setPixBillingId(null)
-        setPixPaid(false)
-      }, 2500)
-    }
-  }, [query.data, pixBillingId, pixPaid])
+  // Paga, a cobrança sai de "em aberto" e entra no histórico: recarrega as
+  // duas listas e fecha o detalhe.
+  const handlePaid = useCallback(() => {
+    setSelected(null)
+    void query.refetch()
+    void historyQuery.refetch()
+  }, [query.refetch, historyQuery.refetch])
 
   async function handleRefresh() {
     setRefreshing(true)
@@ -800,9 +873,8 @@ export function BillingsScreen() {
       {selected && (
         <BillingDetailModal
           billing={selected}
-          onClose={() => { setSelected(null); setPixBillingId(null); setPixPaid(false) }}
-          onPixGenerated={setPixBillingId}
-          pixPaid={pixBillingId === selected.charge_id && pixPaid}
+          onClose={() => setSelected(null)}
+          onPaid={handlePaid}
           styles={styles}
           typeTone={typeTone}
           statusTone={statusTone}
@@ -1116,46 +1188,6 @@ const createStyles = (theme: ThemeTokens) => StyleSheet.create({
     lineHeight: 20,
   },
 
-  // Payment method selector
-  methodSelector: {
-    flexDirection: 'row',
-    gap: 8,
-    marginBottom: 12,
-  },
-  methodBtn: {
-    flex: 1,
-    alignItems: 'center',
-    paddingVertical: 10,
-    borderRadius: 8,
-    backgroundColor: theme.surface,
-    borderColor: theme.surfaceAlt,
-    borderWidth: 1,
-    gap: 2,
-  },
-  methodBtnActive: {
-    backgroundColor: theme.successBg,
-    borderColor: theme.primary,
-  },
-  methodBtnDisabled: {
-    opacity: 0.5,
-  },
-  methodBtnText: {
-    color: theme.textMute,
-    fontSize: 13,
-    fontWeight: '600',
-  },
-  methodBtnTextActive: {
-    color: theme.primary,
-  },
-  methodBtnTextDisabled: {
-    color: theme.border,
-  },
-  methodBtnSoon: {
-    color: theme.border,
-    fontSize: 9,
-    fontWeight: '500',
-  },
-
   // Pay button
   payBtn: {
     backgroundColor: theme.primary,
@@ -1398,5 +1430,10 @@ const createStyles = (theme: ThemeTokens) => StyleSheet.create({
     color: theme.text,
     fontSize: 14,
     fontWeight: '600',
+  },
+  linkNoteText: {
+    color: theme.textMute,
+    fontSize: 13,
+    lineHeight: 19,
   },
 })
