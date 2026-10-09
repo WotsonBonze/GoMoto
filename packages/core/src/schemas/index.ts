@@ -80,6 +80,10 @@ export const CustomerSchema = z.object({
   emergency_contact: z.string().trim().max(300).optional().nullable(),
   emergency_contact_name: z.string().trim().max(200).optional().nullable(),
   emergency_contact_phone: z.string().trim().max(20).optional().nullable(),
+  emergency_contact_name2: z.string().trim().max(200).optional().nullable(),
+  emergency_contact_phone2: z.string().trim().max(20).optional().nullable(),
+  emergency_contact_name3: z.string().trim().max(200).optional().nullable(),
+  emergency_contact_phone3: z.string().trim().max(20).optional().nullable(),
   // Endereço estruturado
   street: z.string().trim().max(300).optional().nullable(),
   street_number: z.string().trim().max(20).optional().nullable(),

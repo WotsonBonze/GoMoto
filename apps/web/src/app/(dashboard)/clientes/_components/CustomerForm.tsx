@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useTransition } from 'react'
+import { Fragment, useState, useTransition } from 'react'
 import { useRouter } from 'next/navigation'
 import Link from 'next/link'
 import { AlertCircle, Upload, X, Loader2, MapPin, Sparkles } from 'lucide-react'
@@ -70,6 +70,10 @@ interface FormState {
   email: string
   emergency_contact_name: string
   emergency_contact_phone: string
+  emergency_contact_name2: string
+  emergency_contact_phone2: string
+  emergency_contact_name3: string
+  emergency_contact_phone3: string
   // Endereço
   zip_code: string
   street: string
@@ -88,6 +92,20 @@ interface FormState {
   departure_date: string
   departure_reason: string
 }
+
+/**
+ * Os três contatos de emergência. O primeiro par não tem sufixo por ser o que
+ * já existia — mesma convenção de phone/phone2.
+ */
+const EMERGENCY_CONTACT_FIELDS: {
+  position: 1 | 2 | 3
+  nameKey: keyof FormState & `emergency_contact_name${'' | '2' | '3'}`
+  phoneKey: keyof FormState & `emergency_contact_phone${'' | '2' | '3'}`
+}[] = [
+  { position: 1, nameKey: 'emergency_contact_name',  phoneKey: 'emergency_contact_phone'  },
+  { position: 2, nameKey: 'emergency_contact_name2', phoneKey: 'emergency_contact_phone2' },
+  { position: 3, nameKey: 'emergency_contact_name3', phoneKey: 'emergency_contact_phone3' },
+]
 
 export interface CustomerFormProps {
   customerId?: string
@@ -111,11 +129,11 @@ function SectionHeader({ title, hint }: { title: string; hint?: string }) {
 }
 
 function Field({
-  label, children, className, lowConfidence,
-}: { label: string; children: React.ReactNode; className?: string; lowConfidence?: boolean }) {
+  label, children, className, lowConfidence, htmlFor,
+}: { label: string; children: React.ReactNode; className?: string; lowConfidence?: boolean; htmlFor?: string }) {
   return (
     <div className={className}>
-      <label className={labelCls}>
+      <label className={labelCls} htmlFor={htmlFor}>
         {label}
         {lowConfidence && (
           <span
@@ -232,6 +250,10 @@ export function CustomerForm({ customerId, initialData }: CustomerFormProps) {
     email:                    initialData?.email ?? '',
     emergency_contact_name:   initialData?.emergency_contact_name ?? '',
     emergency_contact_phone:  initialData?.emergency_contact_phone ? applyPhoneMask(initialData.emergency_contact_phone) : '',
+    emergency_contact_name2:  initialData?.emergency_contact_name2 ?? '',
+    emergency_contact_phone2: initialData?.emergency_contact_phone2 ? applyPhoneMask(initialData.emergency_contact_phone2) : '',
+    emergency_contact_name3:  initialData?.emergency_contact_name3 ?? '',
+    emergency_contact_phone3: initialData?.emergency_contact_phone3 ? applyPhoneMask(initialData.emergency_contact_phone3) : '',
     zip_code:                 initialData?.zip_code ? applyZipMask(initialData.zip_code) : '',
     street:                   initialData?.street ?? '',
     street_number:            initialData?.street_number ?? '',
@@ -370,6 +392,10 @@ export function CustomerForm({ customerId, initialData }: CustomerFormProps) {
         email:                    form.email.trim() || null,
         emergency_contact_name:   !isCompany ? (form.emergency_contact_name.trim() || null) : null,
         emergency_contact_phone:  !isCompany ? (stripPhone(form.emergency_contact_phone) || null) : null,
+        emergency_contact_name2:  !isCompany ? (form.emergency_contact_name2.trim() || null) : null,
+        emergency_contact_phone2: !isCompany ? (stripPhone(form.emergency_contact_phone2) || null) : null,
+        emergency_contact_name3:  !isCompany ? (form.emergency_contact_name3.trim() || null) : null,
+        emergency_contact_phone3: !isCompany ? (stripPhone(form.emergency_contact_phone3) || null) : null,
         // Endereço
         zip_code:                 form.zip_code.replace(/\D/g, '') || null,
         street:                   form.street.trim() || null,
@@ -638,14 +664,18 @@ export function CustomerForm({ customerId, initialData }: CustomerFormProps) {
               </Field>
               {!isCompany && (
                 <>
-                  <Field label="Nome do Contato de Emergência">
-                    <input className={inputCls} placeholder="Nome do familiar ou responsável"
-                      value={form.emergency_contact_name} onChange={(e) => set('emergency_contact_name', e.target.value)} />
-                  </Field>
-                  <Field label="Telefone do Contato de Emergência">
-                    <input className={inputCls} placeholder="(21) 99999-9999"
-                      value={form.emergency_contact_phone} onChange={(e) => set('emergency_contact_phone', applyPhoneMask(e.target.value))} />
-                  </Field>
+                  {EMERGENCY_CONTACT_FIELDS.map(({ position, nameKey, phoneKey }) => (
+                    <Fragment key={position}>
+                      <Field label={`Nome do Contato de Emergência ${position}`} htmlFor={nameKey}>
+                        <input id={nameKey} className={inputCls} placeholder="Nome do familiar ou responsável"
+                          value={form[nameKey]} onChange={(e) => set(nameKey, e.target.value)} />
+                      </Field>
+                      <Field label={`Telefone do Contato de Emergência ${position}`} htmlFor={phoneKey}>
+                        <input id={phoneKey} className={inputCls} placeholder="(21) 99999-9999"
+                          value={form[phoneKey]} onChange={(e) => set(phoneKey, applyPhoneMask(e.target.value))} />
+                      </Field>
+                    </Fragment>
+                  ))}
                 </>
               )}
             </div>

@@ -63,7 +63,13 @@ interface Customer {
   email?: string
   address?: string
   zip_code?: string
-  emergency_contact?: string
+  emergency_contact?: string          // legado, texto livre
+  emergency_contact_name?: string
+  emergency_contact_phone?: string
+  emergency_contact_name2?: string
+  emergency_contact_phone2?: string
+  emergency_contact_name3?: string
+  emergency_contact_phone3?: string
   drivers_license?: string
   drivers_license_validity?: string
   drivers_license_category?: string

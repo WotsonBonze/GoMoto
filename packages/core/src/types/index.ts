@@ -236,6 +236,10 @@ export interface Customer {
   emergency_contact?: string | null;
   emergency_contact_name?: string | null;
   emergency_contact_phone?: string | null;
+  emergency_contact_name2?: string | null;
+  emergency_contact_phone2?: string | null;
+  emergency_contact_name3?: string | null;
+  emergency_contact_phone3?: string | null;
   // Endereço estruturado (novos campos)
   street?: string | null;
   street_number?: string | null;

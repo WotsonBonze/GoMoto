@@ -12,6 +12,13 @@ import type { Customer, Rental } from '@gomoto/core'
 
 const BUCKET = 'customer-documents'
 
+/** Espelha os três pares do CustomerForm — o primeiro sem sufixo, como phone/phone2. */
+const EMERGENCY_CONTACTS = [
+  { position: 1, nameKey: 'emergency_contact_name',  phoneKey: 'emergency_contact_phone'  },
+  { position: 2, nameKey: 'emergency_contact_name2', phoneKey: 'emergency_contact_phone2' },
+  { position: 3, nameKey: 'emergency_contact_name3', phoneKey: 'emergency_contact_phone3' },
+] as const
+
 function fmt(d: string | null | undefined) {
   if (!d) return '—'
   const date = d.includes('T') ? new Date(d) : new Date(d + 'T12:00:00')
@@ -362,12 +369,18 @@ export default async function CustomerDetailPage({
                   </tr>
                 )}
                 <Row label="Email" value={customer.email} />
-                {!isCompany && customer.emergency_contact_name && (
-                  <Row label="Contato de Emergência" value={
-                    [customer.emergency_contact_name, customer.emergency_contact_phone ? applyPhoneMask(customer.emergency_contact_phone) : null]
-                      .filter(Boolean).join(' — ')
-                  } />
-                )}
+                {!isCompany && EMERGENCY_CONTACTS.map(({ position, nameKey, phoneKey }) => {
+                  const name  = customer[nameKey]
+                  const phone = customer[phoneKey]
+                  if (!name && !phone) return null
+                  return (
+                    <Row
+                      key={position}
+                      label={`Contato de Emergência ${position}`}
+                      value={[name, phone ? applyPhoneMask(phone) : null].filter(Boolean).join(' — ')}
+                    />
+                  )
+                })}
               </tbody>
             </table>
           </div>
@@ -423,13 +436,13 @@ export default async function CustomerDetailPage({
           </section>
         )}
 
-        {/* ── Acesso ao App (somente PF com email) ─────────────────────────── */}
+        {/* ── Acesso ao App (somente PF; login por CPF) ─────────────────────────── */}
         {!isCompany && (
           <section>
             <div className="bg-surface rounded-xl p-4">
               <CustomerAppAccess
                 customerId={id}
-                customerEmail={customer.email}
+                customerCpf={customer.cpf}
                 hasAppAccess={!!customer.user_id}
               />
             </div>

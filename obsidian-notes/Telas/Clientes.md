@@ -47,7 +47,7 @@ Layout com navegação lateral por seção (sticky), não é mais um form plano.
 |---|---|
 | Dados Pessoais | Nome completo, CPF, RG, Data de Nascimento |
 | Habilitação (CNH) | Número, Categoria (A/B/AB/C/AC/D/AD/E/AE), Validade |
-| Contato | Telefone 1, Telefone 2, Email, Nome/Telefone do Contato de Emergência |
+| Contato | Telefone 1, Telefone 2, Email, Nome/Telefone dos Contatos de Emergência **1, 2 e 3** |
 | Endereço | CEP (com **busca automática** via ViaCEP — preenche Logradouro/Bairro/Cidade/UF), Logradouro, Número, Complemento, Bairro, Cidade, UF |
 | Documentos | Foto da CNH, Comprovante de Residência (upload, ver §Documentos abaixo) |
 | Observações | Observações internas |
@@ -58,10 +58,22 @@ Layout com navegação lateral por seção (sticky), não é mais um form plano.
 Mesma estrutura, exceto:
 - "Dados Pessoais" vira "Dados da Empresa": Razão Social, Nome Fantasia, Nome do Responsável, CNPJ.
 - Sem seção de Habilitação (CNH) — não se aplica a PJ.
-- Sem Contato de Emergência.
+- Sem Contatos de Emergência.
 - "Documentos" pede "Cartão CNPJ ou documento da empresa" no lugar de comprovante de residência.
 
 Todos os campos são opcionais (sem `required` no HTML), exceto os que o Zod schema de `@gomoto/core` exigir no server.
+
+### Contatos de emergência
+
+São **três** pares nome/telefone, todos opcionais e só para Pessoa Física. As colunas seguem a convenção já usada em `phone`/`phone2` — o primeiro par não tem sufixo:
+
+| Posição | Colunas |
+|---|---|
+| 1 | `emergency_contact_name`, `emergency_contact_phone` |
+| 2 | `emergency_contact_name2`, `emergency_contact_phone2` |
+| 3 | `emergency_contact_name3`, `emergency_contact_phone3` |
+
+O telefone é gravado só com dígitos (`stripPhone`) e mascarado na exibição. No detalhe do cliente, cada par só vira linha se tiver nome ou telefone preenchido. A coluna legada `emergency_contact` (texto livre) continua no banco e no `CustomerSchema`, mas nenhuma tela escreve nela.
 
 ## Documentos (upload)
 
@@ -82,7 +94,7 @@ A extração em si não persiste nada — o arquivo só sobe pro Storage no save
 
 Não é mais modal — página própria, com signed URLs (1h) geradas server-side para os documentos.
 
-Seções condicionais conforme o registro: Contrato Ativo (locação + veículo vinculado), Dados da Empresa (PJ) / Dados Pessoais (PF), Contato, Endereço, Habilitação — CNH (PF, com aviso visual "(Vencida)" se `drivers_license_validity` no passado), Acesso ao App (`CustomerAppAccess`, só PF com email), **Documentos** (thumbnails via função local `DocumentThumb` — não é componente exportado/reutilizável), Encerramento (ex-clientes), Situação financeira (bloqueio por inadimplência + créditos disponíveis), Créditos, Observações.
+Seções condicionais conforme o registro: Contrato Ativo (locação + veículo vinculado), Dados da Empresa (PJ) / Dados Pessoais (PF), Contato, Endereço, Habilitação — CNH (PF, com aviso visual "(Vencida)" se `drivers_license_validity` no passado), Acesso ao App (`CustomerAppAccess`, só PF com **CPF** — o login do app é CPF + senha via `cpfShellEmail`; o email do cadastro não participa do acesso), **Documentos** (thumbnails via função local `DocumentThumb` — não é componente exportado/reutilizável), Encerramento (ex-clientes), Situação financeira (bloqueio por inadimplência + créditos disponíveis), Créditos, Observações.
 
 ## Tags
 `#projeto/tela` `#gomoto/clientes`
