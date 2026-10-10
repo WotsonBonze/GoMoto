@@ -53,8 +53,8 @@ export type GatewayMethod = z.infer<typeof GatewayMethodSchema>
  *
  * O ramo de cada modo entra junto com o provedor que o usa, não antes:
  * formulário sem provedor por trás é a mesma tela que aceita e descarta que a
- * ADR 0030 foi escrita para corrigir. `api_key` e `certificate` seguem sem
- * implementação, de propósito.
+ * ADR 0030 foi escrita para corrigir. `api_key` nasce com o Asaas (ADR 0037);
+ * `certificate` segue sem implementação, de propósito.
  */
 export const ProviderConnectionModeSchema = z.enum(['oauth', 'api_key', 'certificate', 'handle'])
 export type ProviderConnectionMode = z.infer<typeof ProviderConnectionModeSchema>
@@ -87,6 +87,17 @@ export type PaymentProviderDescriptor = {
    * ninguém clica num botão que não faz nada.
    */
   available: boolean
+  /**
+   * O código de pagamento carrega multa e juros e o banco do PAGADOR os
+   * calcula na hora de pagar (Pix com vencimento, ADR 0037).
+   *
+   * Muda duas coisas: a emissão manda os termos de `embeddedLateChargeTerms`
+   * em vez de um valor congelado, e uma tentativa pendente pode ser
+   * reaproveitada de um dia para o outro — o próprio código soma os dias.
+   * Nos demais, o valor é congelado na geração e reaproveitar depois de o
+   * encargo crescer entrega um código que quita a dívida a menor (ADR 0038, P1).
+   */
+  accruesLateChargesNatively?: boolean
 }
 
 /**
@@ -142,6 +153,21 @@ export const PAYMENT_PROVIDERS: PaymentProviderDescriptor[] = [
     // recusados, 100 passa — e "greater than" na verdade é "a partir de".
     minAmount: 1,
     available: true,
+  },
+  {
+    id: 'asaas',
+    label: 'Asaas',
+    description: 'Pix com multa e juros calculados no pagamento, mesmo se o cliente pagar depois. Conexão por chave de API.',
+    // Chave colada pelo tenant. Só é aceita chave SEM permissão de saque — a
+    // conexão sonda e recusa a que tiver (ADR 0037, decisão 1).
+    connectionMode: 'api_key',
+    methods: ['pix'],
+    // Sondado no sandbox: 4,99 é recusado com "não pode ser menor que R$ 5,00".
+    minAmount: 5,
+    // A conexão falha com mensagem nomeada se o deploy não tiver
+    // ASAAS_WEBHOOK_URL/TOKEN: nunca fica conectado sem retorno de pagamento.
+    available: true,
+    accruesLateChargesNatively: true,
   },
 ]
 

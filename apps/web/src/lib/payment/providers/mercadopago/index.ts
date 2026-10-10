@@ -66,7 +66,7 @@ export const mercadoPagoProvider: PaymentProvider = {
     },
   },
 
-  async createIntent({ amount, chargeId, method, credentials, customer }) {
+  async createIntent({ amount, chargeId, method, credentials, customer, timezone }) {
     // O registry já barrou método fora de `descriptor.methods`. A guarda aqui é
     // contra o próximo método suportado entrar no catálogo antes de a
     // implementação existir — que foi exatamente como `boleto` chegou a ser
@@ -89,6 +89,7 @@ export const mercadoPagoProvider: PaymentProvider = {
         customerLastName: lastName,
         customerCpf: customer.document,
         accessToken: accessTokenOf(credentials),
+        timezone: timezone ?? null,
       })
 
       return {

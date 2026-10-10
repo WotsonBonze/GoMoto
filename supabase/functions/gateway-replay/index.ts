@@ -40,6 +40,7 @@ import { log, markFailed, markProcessed, type StoredEvent } from '../_shared/inb
 import { processCoraEvent } from '../_shared/cora.ts'
 import { processMercadoPagoEvent } from '../_shared/mercadopago.ts'
 import { processInfinitePayEvent } from '../_shared/infinitepay.ts'
+import { processAsaasEvent } from '../_shared/asaas.ts'
 
 type Processador = (
   supabase: ReturnType<typeof createClient>,
@@ -58,6 +59,7 @@ const PROCESSADORES: Record<string, Processador> = {
   cora: processCoraEvent,
   mercadopago: processMercadoPagoEvent,
   infinitepay: processInfinitePayEvent,
+  asaas: processAsaasEvent,
 }
 
 type EventRow = {

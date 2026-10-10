@@ -10,7 +10,7 @@
  * significar "mexer em toda rota que toca pagamento".
  */
 
-import type { GatewayMethod, PaymentProviderDescriptor } from '@gomoto/core'
+import type { EmbeddedLateChargeTerms, GatewayMethod, PaymentProviderDescriptor } from '@gomoto/core'
 
 /**
  * Formato livre por provedor. Vai inteiro para o Vault e volta inteiro de lá;
@@ -38,6 +38,15 @@ export type CreateIntentParams = {
   method: GatewayMethod
   credentials: ProviderCredentials
   customer: { name: string | null; email: string | null; document: string | null }
+  /**
+   * Multa e juros a embutir no código, para provedor com
+   * `accruesLateChargesNatively` (ADR 0037). `null` para os demais — e o
+   * provedor que os embute recusa gerar sem eles, em vez de emitir um código
+   * que quitaria a dívida sem encargo.
+   */
+  lateCharge?: EmbeddedLateChargeTerms | null
+  /** Fuso da locadora, para quem precisa de "fim do dia" (validade do código). */
+  timezone?: string | null
 }
 
 export type CreatedIntent = {
@@ -59,6 +68,25 @@ export type PaymentProvider = {
     exchangeCode(code: string): Promise<ProviderConnection>
     refresh(credentials: ProviderCredentials): Promise<ProviderCredentials>
   }
+
+  /**
+   * Presente apenas quando `descriptor.connectionMode === 'api_key'`.
+   *
+   * `connect` SONDA a chave antes de qualquer gravação e devolve a conexão
+   * pronta para o Vault — inclusive o que o provedor configurou do lado dele
+   * (o webhook do Asaas). Se a gravação falhar depois, `disconnect` desfaz.
+   */
+  apiKey?: {
+    connect(key: string): Promise<ProviderConnection>
+  }
+
+  /**
+   * Desfaz no provedor o que a conexão criou lá (ex.: o webhook do Asaas).
+   *
+   * Best-effort: desconectar é decisão do tenant e já aconteceu do nosso lado.
+   * Quem chama registra a falha e segue.
+   */
+  disconnect?(credentials: ProviderCredentials): Promise<void>
 
   createIntent(params: CreateIntentParams): Promise<CreatedIntent>
 

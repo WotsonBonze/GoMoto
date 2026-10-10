@@ -12,10 +12,13 @@
  */
 
 import type { SupabaseClient } from '@supabase/supabase-js'
-import { calculateAmountDue, type LateChargePolicy } from '@gomoto/core'
+import { calculateAmountDue, embeddedLateChargeTerms, type LateChargePolicy } from '@gomoto/core'
 import { assertMethodSupported, getProvider, PROVIDER_REGISTRY, type ProviderRegistry } from './registry'
 import { resolveCredentials } from './credentials'
+import { cancelChargeIntents } from './cancel'
 import { ensureQrImage } from './qr'
+import { tenantToday } from './business-time'
+import { representsDebt } from './intent-reuse'
 import { codedError, ProviderAuthError } from './types'
 
 export type PaymentIntentResult = {
@@ -53,48 +56,9 @@ export async function getOrCreateIntent(
 ): Promise<PaymentIntentResult> {
   const { tenantId, chargeId } = params
 
-  // ── 1. Tentativa pendente e ainda válida ──────────────────────────
-  const { data: existing } = await supabase
-    .from('payment_intents')
-    .select(PENDING_COLUMNS)
-    .eq('charge_id', chargeId)
-    .eq('status', 'pending')
-    .maybeSingle()
-
-  if (existing) {
-    const e = existing as PendingIntentRow
-    const stillValid = !e.expires_at || new Date(e.expires_at) > new Date()
-    if (stillValid) return reuse(e, registry)
-
-    // Por RPC: `payment_intents` deixou de aceitar UPDATE de `authenticated`
-    // (ADR 0034 §2.4). A função confere o tenant por dentro e só mexe no que
-    // ainda está `pending`.
-    const { error: expireError } = await supabase.rpc('fn_expire_payment_intent', {
-      p_intent_id: e.id,
-    })
-    if (expireError) throw codedError('INTERNAL', expireError.message)
-  }
-
-  // ── 2. Qual gateway o tenant elegeu ───────────────────────────────
-  // Resolvido ANTES de calcular valor e de ler o cliente: sem gateway eleito
-  // nada do resto importa, e a falha sai barata e nomeada. A ordem inversa
-  // fazia três consultas antes de descobrir que não havia com o que cobrar.
-  const account = await resolveActiveAccount(supabase, tenantId)
-  const provider = getProvider(account.provider, registry)
-
-  // Sem método pedido, o meio principal do gateway ELEITO — nunca um literal
-  // do chamador. A rota do app e a ação do cockpit escreviam `'pix'` como
-  // default, o que só funcionava porque os dois únicos provedores geravam PIX:
-  // eleger um gateway de checkout hospedado fazia a cobrança morrer em
-  // "InfinitePay não gera cobrança por pix" — a locadora trocou de gateway e o
-  // produto respondia acusando ela de pedir a coisa errada.
-  const requested = params.method ?? provider.descriptor.methods[0]
-  if (!requested) {
-    throw codedError('CONFLICT', `${provider.descriptor.label} não declara nenhum meio de cobrança`)
-  }
-  const method = assertMethodSupported(provider, requested)
-
-  // ── 3. Valor devido — fonte única ─────────────────────────────────
+  // ── 1. Valor devido — fonte única ─────────────────────────────────
+  // Calculado ANTES de olhar a tentativa pendente: é ele que diz se o código
+  // que o cliente já tem ainda representa a dívida (ADR 0037, decisão 3b).
   const { data: balance, error: balanceError } = await supabase
     .from('charge_balances')
     .select('charge_id, customer_id, due_date, total_amount, paid_amount, open_amount, late_charge_amount, status')
@@ -116,9 +80,68 @@ export async function getOrCreateIntent(
   }
 
   const policy = await resolvePolicy(supabase, tenantId, chargeId)
-  const { accrued, amount_due } = calculateAmountDue(b, policy)
+  // "Hoje" da LOCADORA: o servidor roda em UTC e às 22h de Brasília já estaria
+  // no dia seguinte — um dia de encargo a mais aqui, um dia de juros a menos
+  // no vencimento mandado ao provedor.
+  const timezone = await resolveTimezone(supabase, tenantId)
+  const asOf = tenantToday(timezone)
+  const due = calculateAmountDue(b, policy, asOf)
+  const { amount_due } = due
 
   if (amount_due <= 0) throw codedError('CONFLICT', 'Nada a cobrar nesta cobrança')
+
+  // ── 2. Tentativa pendente que ainda representa a dívida ───────────
+  const { data: existing } = await supabase
+    .from('payment_intents')
+    .select(PENDING_COLUMNS)
+    .eq('charge_id', chargeId)
+    .eq('status', 'pending')
+    .maybeSingle()
+
+  if (existing) {
+    const e = existing as PendingIntentRow
+    const stillValid = !e.expires_at || new Date(e.expires_at) > new Date()
+    if (stillValid && representsDebt(e, due)) return reuse(e, registry, due.amount_due)
+
+    // Vencida, ou o valor mudou (dia novo de juros, pagamento parcial,
+    // desconto). Descarta pelo mesmo caminho do cancelamento da cobrança:
+    // cancela no provedor PRIMEIRO, depois expira aqui. Sem isso, o código
+    // velho seguiria vivo na mão do cliente quitando a dívida a menor.
+    const r = await cancelChargeIntents(supabase, tenantId, chargeId)
+    if (r.expiradas === 0) {
+      throw codedError('INTERNAL', 'Não foi possível substituir o código de pagamento anterior')
+    }
+  }
+
+  // ── 3. Qual gateway o tenant elegeu ───────────────────────────────
+  // Resolvido antes de ler o cliente e de falar com o provedor: sem gateway
+  // eleito nada do resto importa, e a falha sai nomeada.
+  const account = await resolveActiveAccount(supabase, tenantId)
+  const provider = getProvider(account.provider, registry)
+
+  // Sem método pedido, o meio principal do gateway ELEITO — nunca um literal
+  // do chamador. A rota do app e a ação do cockpit escreviam `'pix'` como
+  // default, o que só funcionava porque os dois únicos provedores geravam PIX:
+  // eleger um gateway de checkout hospedado fazia a cobrança morrer em
+  // "InfinitePay não gera cobrança por pix" — a locadora trocou de gateway e o
+  // produto respondia acusando ela de pedir a coisa errada.
+  const requested = params.method ?? provider.descriptor.methods[0]
+  if (!requested) {
+    throw codedError('CONFLICT', `${provider.descriptor.label} não declara nenhum meio de cobrança`)
+  }
+  const method = assertMethodSupported(provider, requested)
+
+  // Gateway que embute multa e juros no código recebe os TERMOS, não um valor
+  // congelado: o banco do pagador calcula no dia em que pagar (ADR 0037). Nos
+  // demais o valor é o de hoje, e o encargo embutido é só a parte ainda NÃO
+  // realizada — realizar o total lançava de novo o encargo que um pagamento
+  // parcial ou estorno já tinha documentado (ADR 0028), e a cobrança ficava
+  // aberta exatamente nesse valor.
+  const terms = provider.descriptor.accruesLateChargesNatively
+    ? embeddedLateChargeTerms(b, policy, asOf)
+    : null
+  const amount = terms ? terms.value : amount_due
+  const accruedIncluded = terms ? terms.accruedIncluded : due.accrued_pending
 
   // Piso do gateway, conferido ANTES de gastar a chamada.
   //
@@ -129,12 +152,12 @@ export async function getOrCreateIntent(
   //
   // Aqui a mensagem diz o limite e nomeia o gateway, e a decisão sai do
   // provedor específico: qualquer um que declare `minAmount` ganha a guarda.
-  if (amount_due < provider.descriptor.minAmount) {
+  if (amount < provider.descriptor.minAmount) {
     throw codedError(
       'CONFLICT',
       `${provider.descriptor.label} não gera cobrança abaixo de `
       + `${provider.descriptor.minAmount.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' })}`
-      + ` — esta cobrança tem ${amount_due.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' })}.`,
+      + ` — esta cobrança tem ${amount.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' })}.`,
     )
   }
 
@@ -147,21 +170,33 @@ export async function getOrCreateIntent(
 
   const { data: customer } = await supabase
     .from('customers')
-    .select('name, email, cpf')
+    .select('name, email, cpf, cnpj, company_name')
     .eq('id', b.customer_id)
     .maybeSingle()
 
-  const c = (customer ?? null) as { name: string | null; email: string | null; cpf: string | null } | null
+  const c = (customer ?? null) as {
+    name: string | null; email: string | null
+    cpf: string | null; cnpj: string | null; company_name: string | null
+  } | null
 
   // ── 5. Cria no provedor ───────────────────────────────────────────
   let created
   try {
     created = await provider.createIntent({
-      amount: amount_due,
+      amount,
       chargeId,
       method,
       credentials,
-      customer: { name: c?.name ?? null, email: c?.email ?? null, document: c?.cpf ?? null },
+      lateCharge: terms,
+      timezone,
+      // Cliente PJ não tem CPF: o documento é o CNPJ, e o nome que o banco
+      // mostra é a razão social. Mandar só `cpf` fazia o provedor que exige
+      // documento recusar todo cliente PJ.
+      customer: {
+        name: c?.company_name || c?.name || null,
+        email: c?.email ?? null,
+        document: c?.cpf || c?.cnpj || null,
+      },
     })
   } catch (err) {
     // Credencial recusada não é "tente novamente": alguém precisa reconectar.
@@ -181,6 +216,16 @@ export async function getOrCreateIntent(
   // provedor que não a ofereça (ADR 0031 §4).
   const payload = await ensureQrImage(created.payload)
 
+  // Base do código, guardada para o reaproveitamento saber se ele ainda
+  // representa a dívida (`representsDebt`).
+  if (terms) {
+    payload.late_charge_terms = {
+      ...terms,
+      principal: due.principal,
+      realized: due.late_charge_realized,
+    }
+  }
+
   // ── 6. Persiste ───────────────────────────────────────────────────
   // Por RPC, não por INSERT: a tabela deixou de aceitar escrita de
   // `authenticated` (ADR 0034 §2.4). A função confere o tenant, e confere
@@ -193,14 +238,19 @@ export async function getOrCreateIntent(
     p_provider_account_id: account.id,
     p_method: method,
     p_provider_intent_id: created.providerIntentId,
-    p_amount: amount_due,
-    // Quanto deste QR é encargo. A confirmação precisa saber para realizá-lo
+    p_amount: amount,
+    // Quanto deste QR é encargo AINDA NÃO REALIZADO. A confirmação o realiza
     // antes de alocar — sem isso o cliente paga principal + encargo, a
     // cobrança só deve o principal, e o saldo fica NEGATIVO com o encargo
     // nunca virando receita. Guardar em vez de recalcular na confirmação:
     // entre gerar o código e o cliente pagar passam horas, e um recálculo
     // daria outro número, deixando a conta sem fechar.
-    p_accrued_amount: accrued.total,
+    //
+    // Era `accrued.total`: com encargo já realizado (pagamento parcial,
+    // estorno), a confirmação o lançava de novo e a cobrança ficava aberta
+    // exatamente nesse valor — reproduzido no banco, R$ 102,73 + 2,80
+    // fechando em 105,53 com 2,73 em aberto.
+    p_accrued_amount: accruedIncluded,
     p_expires_at: created.expiresAt,
     p_payload: payload,
   })
@@ -222,7 +272,7 @@ export async function getOrCreateIntent(
       .eq('status', 'pending')
       .maybeSingle()
 
-    if (vencedora) return reuse(vencedora as PendingIntentRow, registry)
+    if (vencedora) return reuse(vencedora as PendingIntentRow, registry, amount_due)
   }
 
   if (error) throw codedError('INTERNAL', error.message)
@@ -274,7 +324,7 @@ async function resolveActiveAccount(
 }
 
 /** Tentativa pendente reaproveitada — o QR que o cliente já tem na mão. */
-function reuse(row: PendingIntentRow, registry: ProviderRegistry): PaymentIntentResult {
+function reuse(row: PendingIntentRow, registry: ProviderRegistry, amountDue: number): PaymentIntentResult {
   // O provedor pode ter sido removido do registry entre a criação e o reuso.
   // O QR continua válido no gateway, então devolvê-lo é o certo; só o rótulo
   // bonito se perde.
@@ -285,11 +335,20 @@ function reuse(row: PendingIntentRow, registry: ProviderRegistry): PaymentIntent
     provider: row.provider,
     provider_label: label,
     method: row.method,
-    amount: row.amount,
+    // O valor devido HOJE. Igual ao do código para quem congela valor (senão
+    // ele não seria reaproveitado); para quem embute encargo, o código vale
+    // mais a cada dia e o banco do pagador mostra o mesmo que isto.
+    amount: amountDue,
     expires_at: row.expires_at,
     payload: row.payload,
     is_reused: true,
   }
+}
+
+/** Fuso da locadora (`tenants.timezone`); ausente cai no default do banco. */
+async function resolveTimezone(supabase: SupabaseClient, tenantId: string): Promise<string | null> {
+  const { data } = await supabase.from('tenants').select('timezone').eq('id', tenantId).maybeSingle()
+  return (data as { timezone: string | null } | null)?.timezone ?? null
 }
 
 /** Política fixada na emissão da cobrança — não a vigente hoje (R-08). */

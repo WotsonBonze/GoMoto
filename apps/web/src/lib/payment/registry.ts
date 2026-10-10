@@ -17,6 +17,7 @@ import { codedError } from './types'
 import { mercadoPagoProvider } from './providers/mercadopago'
 import { coraProvider } from './providers/cora'
 import { infinitePayProvider } from './providers/infinitepay'
+import { asaasProvider } from './providers/asaas'
 
 export type ProviderRegistry = Record<string, PaymentProvider>
 
@@ -31,6 +32,7 @@ export const PROVIDER_REGISTRY: ProviderRegistry = {
   [mercadoPagoProvider.descriptor.id]: mercadoPagoProvider,
   [coraProvider.descriptor.id]: coraProvider,
   [infinitePayProvider.descriptor.id]: infinitePayProvider,
+  [asaasProvider.descriptor.id]: asaasProvider,
 }
 
 /**
@@ -77,4 +79,16 @@ export function getOAuthProvider(id: string, registry: ProviderRegistry = PROVID
     throw codedError('CONFLICT', `${descriptor.label} não se conecta por OAuth`)
   }
   return { descriptor, oauth: provider.oauth }
+}
+
+/** Provedor que se conecta por chave de API, ou falha dizendo por quê. */
+export function getApiKeyProvider(id: string, registry: ProviderRegistry = PROVIDER_REGISTRY) {
+  const descriptor = findPaymentProvider(id)
+  if (!descriptor) throw codedError('NOT_FOUND', `Gateway "${id}" desconhecido`)
+
+  const provider = getProvider(id, registry)
+  if (descriptor.connectionMode !== 'api_key' || !provider.apiKey) {
+    throw codedError('CONFLICT', `${descriptor.label} não se conecta por chave de API`)
+  }
+  return { descriptor, provider, apiKey: provider.apiKey }
 }

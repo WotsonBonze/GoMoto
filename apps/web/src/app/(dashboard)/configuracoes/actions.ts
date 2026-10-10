@@ -7,7 +7,10 @@ import {
 } from '@gomoto/core'
 import { createClient } from '@/lib/supabase/server'
 import { getCurrentTenantId, requireTenantOwner } from '@/lib/auth/tenant'
-import { getOAuthProvider } from '@/lib/payment/registry'
+import { getApiKeyProvider, getOAuthProvider, PROVIDER_REGISTRY } from '@/lib/payment/registry'
+import { AsaasKeyRejectedError } from '@/lib/payment/providers/asaas/api'
+import { resolveCredentials } from '@/lib/payment/credentials'
+import { createAdminClient } from '@/lib/supabase/admin'
 import {
   verifyHandle, normalizeHandle, isValidHandleFormat, InfinitePayHandleError,
 } from '@/lib/payment/providers/infinitepay/api'
@@ -210,6 +213,111 @@ export async function connectGatewayWithHandleAction(
 }
 
 /**
+ * Conecta um gateway cuja credencial é uma CHAVE DE API (ADR 0037).
+ *
+ * A chave é um segredo de verdade — ao contrário do handle da InfinitePay —, e
+ * a sonda do provedor vem antes de qualquer escrita: identidade da conta,
+ * recusa de chave com permissão de saque e criação do webhook. Se a gravação
+ * falhar depois disso, o que foi criado no provedor é desfeito.
+ *
+ * A chave não volta para a tela, não vai para o `logAction` e não aparece em
+ * mensagem de erro.
+ */
+export async function connectGatewayWithApiKeyAction(
+  providerId: unknown,
+  rawKey: unknown,
+): Promise<ActionData<{ accountId: string; label: string | null }>> {
+  const ctx = await getOwnerTenant()
+  if ('error' in ctx) return { ok: false, error: ownerError(ctx.error, 'conectar um gateway de pagamento') }
+
+  const parsed = ProviderIdSchema.safeParse(providerId)
+  if (!parsed.success) return { ok: false, error: { code: 'VALIDATION', message: 'Provedor inválido' } }
+
+  let impl
+  try {
+    impl = getApiKeyProvider(parsed.data)
+  } catch {
+    return { ok: false, error: { code: 'CONFLICT', message: 'Este gateway não se conecta por chave de API' } }
+  }
+
+  if (typeof rawKey !== 'string' || !rawKey.trim()) {
+    return { ok: false, error: { code: 'VALIDATION', message: 'Informe a chave de API' } }
+  }
+
+  let connection
+  try {
+    connection = await impl.apiKey.connect(rawKey)
+  } catch (err) {
+    if (err instanceof AsaasKeyRejectedError) {
+      return { ok: false, error: { code: 'VALIDATION', message: err.message } }
+    }
+    console.error(`[gateway] conexão por chave falhou (${parsed.data}):`, err instanceof Error ? err.message : err)
+    return {
+      ok: false,
+      error: { code: 'INTERNAL', message: `Não foi possível falar com ${impl.descriptor.label} agora. Tente de novo.` },
+    }
+  }
+
+  const { data, error } = await ctx.supabase.rpc('fn_connect_provider_account', {
+    p_tenant_id: ctx.tenantId,
+    p_provider: parsed.data,
+    p_external_account_id: connection.externalAccountId,
+    p_account_label: connection.accountLabel,
+    p_credentials: connection.credentials,
+  })
+
+  const conta = (Array.isArray(data) ? data[0] : data) as { account_id: string } | null
+
+  if (error || !conta?.account_id) {
+    // Nada ficou do nosso lado; o webhook criado lá não pode ficar apontando
+    // para uma conexão que não existe — a não ser que outra conta ativa use a
+    // mesma carteira (reconexão, ou a mesma conta em outro tenant).
+    if (!(await walletInUseElsewhere(parsed.data, connection.externalAccountId, null))) {
+      await impl.provider.disconnect?.(connection.credentials).catch((e: unknown) => {
+        console.error('[gateway] desfazer conexão no provedor falhou:', e instanceof Error ? e.message : e)
+      })
+    }
+    return { ok: false, error: error ? gatewayError(error.message) : { code: 'INTERNAL', message: 'Não foi possível concluir a operação' } }
+  }
+
+  await logAction({
+    action: 'connect_payment',
+    table: 'payment_provider_accounts',
+    recordId: conta.account_id,
+    newData: { tenant_id: ctx.tenantId, provider: parsed.data, external_account_id: connection.externalAccountId },
+  })
+
+  revalidatePath('/configuracoes')
+  return { ok: true, data: { accountId: conta.account_id, label: connection.accountLabel } }
+}
+
+/**
+ * Outra conta ATIVA, de qualquer tenant, usa a mesma conta no provedor?
+ *
+ * Com `service_role` de propósito: a RLS esconderia os outros tenants, e é
+ * justamente deles que se precisa saber. O Asaas guarda um webhook por URL e
+ * a reconexão o reaproveita — apagá-lo porque UM tenant desconectou cortaria
+ * a confirmação de pagamento do outro.
+ */
+async function walletInUseElsewhere(
+  provider: string,
+  externalAccountId: string,
+  exceptAccountId: string | null,
+): Promise<boolean> {
+  let q = createAdminClient()
+    .from('payment_provider_accounts')
+    .select('id', { count: 'exact', head: true })
+    .eq('provider', provider)
+    .eq('external_account_id', externalAccountId)
+    .eq('active', true)
+  if (exceptAccountId) q = q.neq('id', exceptAccountId)
+  const { count, error } = await q
+  // Na dúvida, NÃO apaga: webhook sobrando é inofensivo; faltando, perde dinheiro.
+  if (error) return true
+  return (count ?? 0) > 0
+}
+
+/**
  * Elege qual gateway gera as cobranças.
  *
  * O tenant pode ter vários conectados; exatamente um cobra. A troca é ato
@@ -246,8 +354,31 @@ export async function disconnectGatewayAction(accountId: unknown): Promise<Actio
     return { ok: false, error: { code: 'VALIDATION', message: 'Conta inválida' } }
   }
 
+  // Lido ANTES de desconectar: o que o provedor precisa para desfazer o que a
+  // conexão criou lá (o webhook do Asaas) está na credencial.
+  const { data: row } = await ctx.supabase
+    .from('payment_provider_accounts')
+    .select('id, provider, external_account_id')
+    .eq('id', accountId)
+    .eq('tenant_id', ctx.tenantId)
+    .maybeSingle()
+  const account = row as { id: string; provider: string; external_account_id: string } | null
+  const impl = account ? PROVIDER_REGISTRY[account.provider] : undefined
+  const credentials = account && impl?.disconnect
+    ? await resolveCredentials(account, impl).catch(() => null)
+    : null
+
   const { error } = await ctx.supabase.rpc('fn_disconnect_provider_account', { p_account_id: accountId })
   if (error) return { ok: false, error: gatewayError(error.message) }
+
+  // Best-effort e DEPOIS: desconectar já aconteceu do nosso lado e o provedor
+  // não pode desfazer isso.
+  if (account && impl?.disconnect && credentials
+    && !(await walletInUseElsewhere(account.provider, account.external_account_id, account.id))) {
+    await impl.disconnect(credentials).catch((e: unknown) => {
+      console.error('[gateway] limpeza no provedor falhou:', e instanceof Error ? e.message : e)
+    })
+  }
 
   await logAction({
     action: 'disconnect_payment',

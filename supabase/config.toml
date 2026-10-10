@@ -428,6 +428,8 @@ s3_secret_key = "env(S3_SECRET_KEY)"
 #   cora-webhook        → segredo no path, porque a Cora não assina nada
 #   infinitepay-webhook → segredo no path + reconsulta em payment_check, porque
 #                         a InfinitePay não assina E o corpo afirma o pagamento
+#   asaas-webhook       → token no header `asaas-access-token` + reconsulta em
+#                         GET /payments com a chave da conta dona do intent
 
 [functions.mercadopago-webhook]
 verify_jwt = false
@@ -436,6 +438,9 @@ verify_jwt = false
 verify_jwt = false
 
 [functions.infinitepay-webhook]
+verify_jwt = false
+
+[functions.asaas-webhook]
 verify_jwt = false
 
 # Dreno da fila de replay (ADR 0034 Fase 3b). `verify_jwt` LIGADO, ao contrário

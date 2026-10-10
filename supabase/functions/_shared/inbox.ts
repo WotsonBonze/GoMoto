@@ -60,6 +60,15 @@ export type NormalizedPayment = {
    * só num log que ninguém abre.
    */
   notes?: string | null
+  /**
+   * Encargo que o PROVEDOR somou ao código na hora de pagar (ADR 0037).
+   *
+   * Só existe para quem embute multa e juros no código (Pix com vencimento do
+   * Asaas): o banco do pagador calcula, e o valor pago passa do valor do
+   * intent. Sem isto a diferença entraria como pagamento — saldo negativo e
+   * receita de encargo fora do DRE.
+   */
+  extraLateCharge?: number
   /** Vai para o motivo do estorno e para o log. */
   detail: string
 }
@@ -239,6 +248,9 @@ export async function applyPayment(
       // mesma string.
       p_gateway_event_id: eventId,
       p_provider: provider,
+      // Só quando existe: os outros gateways não passam a depender da
+      // assinatura nova da RPC (migration 20261010231422).
+      ...(payment.extraLateCharge ? { p_extra_late_charge: payment.extraLateCharge } : {}),
     })
     if (error) throw new Error(`confirmação: ${error.message}`)
 

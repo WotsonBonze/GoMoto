@@ -18,6 +18,10 @@ const MP_AUTH  = 'https://auth.mercadopago.com.br'
 const MP_TOKEN = 'https://api.mercadopago.com'
 
 import { oauthRedirectUri } from '../../oauth-state'
+import { endOfTenantDayIso } from '../../business-time'
+
+/** O MP recusa `date_of_expiration` a menos de 30 minutos. */
+const MP_MIN_EXPIRATION_MS = 30 * 60 * 1000
 
 const REDIRECT_URI = () => oauthRedirectUri('mercadopago')
 
@@ -103,8 +107,11 @@ export interface PixChargeParams {
   customerEmail: string
   customerFirstName: string
   customerLastName: string
+  /** CPF ou CNPJ — o tipo é deduzido pelo tamanho. */
   customerCpf?: string | null
   accessToken: string
+  /** Fuso da locadora: o código vale até o fim do dia DELA. */
+  timezone?: string | null
 }
 
 export interface PixCharge {
@@ -114,13 +121,26 @@ export interface PixCharge {
   expires_at: string
 }
 
+/** O documento chega como CPF ou CNPJ (cliente PJ); o MP precisa do tipo certo. */
+function identificationOf(raw: string): { type: 'CPF' | 'CNPJ'; number: string } {
+  const number = raw.replace(/\D/g, '')
+  return { type: number.length === 14 ? 'CNPJ' : 'CPF', number }
+}
+
 export async function createPixCharge(params: PixChargeParams): Promise<PixCharge> {
+  const expiration = endOfTenantDayIso(params.timezone, new Date(), MP_MIN_EXPIRATION_MS)
+
   const res = await fetch(`${MP_BASE}/v1/payments`, {
     method: 'POST',
     headers: {
       'Content-Type':  'application/json',
       Authorization:   `Bearer ${params.accessToken}`,
-      'X-Idempotency-Key': `billing-${params.billingId}`,
+      // Uma chave por (cobrança, valor, dia). Era só a cobrança: o código novo
+      // de um dia seguinte — com o valor atualizado pelos juros — voltava como
+      // o pagamento ANTIGO, porque o MP devolve o resultado da primeira
+      // requisição para a mesma chave. Dois toques no mesmo minuto continuam
+      // caindo na mesma chave, que é o que a idempotência existe para pegar.
+      'X-Idempotency-Key': `billing-${params.billingId}-${Math.round(params.amount * 100)}-${expiration.slice(0, 10)}`,
     },
     body: JSON.stringify({
       transaction_amount: params.amount,
@@ -133,10 +153,13 @@ export async function createPixCharge(params: PixChargeParams): Promise<PixCharg
         first_name: params.customerFirstName,
         last_name:  params.customerLastName,
         ...(params.customerCpf
-          ? { identification: { type: 'CPF', number: params.customerCpf.replace(/\D/g, '') } }
+          ? { identification: identificationOf(params.customerCpf) }
           : {}),
       },
-      date_of_expiration: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
+      // Fim do dia da LOCADORA, não 24h corridas: um código gerado às 9h valia
+      // até as 9h do dia seguinte, e um código gerado antes do vencimento
+      // ainda pagava sem multa no primeiro dia de atraso (ADR 0038, P2).
+      date_of_expiration: expiration,
     }),
   })
 

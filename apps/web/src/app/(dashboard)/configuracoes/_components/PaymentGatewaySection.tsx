@@ -22,7 +22,7 @@ import { cn } from '@/lib/utils'
 import { PAYMENT_PROVIDERS, type PaymentProviderDescriptor } from '@gomoto/core'
 import type { ProviderAccountRow } from '@gomoto/data'
 import {
-  connectGatewayAction, connectGatewayWithHandleAction,
+  connectGatewayAction, connectGatewayWithApiKeyAction, connectGatewayWithHandleAction,
   disconnectGatewayAction, setDefaultGatewayAction,
 } from '../actions'
 
@@ -68,6 +68,8 @@ export function PaymentGatewaySection({ accounts, isLoading, feedback, onFeedbac
   const [toDisconnect, setToDisconnect] = useState<Row | null>(null)
   /** Provedor cuja credencial é digitada, não autorizada por redirecionamento. */
   const [toType, setToType] = useState<Row | null>(null)
+  /** Provedor cuja credencial é uma chave de API colada pelo operador. */
+  const [toKey, setToKey] = useState<Row | null>(null)
   /** Conta recém-conectada por handle, à espera de conferência do operador. */
   const [toConfirm, setToConfirm] = useState<
     { label: string; accountId: string; handle: string; checkoutUrl: string } | null
@@ -97,6 +99,11 @@ export function PaymentGatewaySection({ accounts, isLoading, feedback, onFeedbac
     if (row.descriptor.connectionMode === 'handle') {
       onFeedback(null)
       setToType(row)
+      return
+    }
+    if (row.descriptor.connectionMode === 'api_key') {
+      onFeedback(null)
+      setToKey(row)
       return
     }
 
@@ -188,6 +195,16 @@ export function PaymentGatewaySection({ accounts, isLoading, feedback, onFeedbac
         onConnected={(data) => {
           setToType(null)
           setToConfirm(data)
+          onChanged()
+        }}
+      />
+
+      <ApiKeyConnectModal
+        row={toKey}
+        onClose={() => setToKey(null)}
+        onConnected={(message) => {
+          setToKey(null)
+          onFeedback({ type: 'success', message })
           onChanged()
         }}
       />
@@ -430,6 +447,90 @@ function HandleConnectModal({
             Cancelar
           </Button>
           <Button size="sm" loading={busy} disabled={!handle.trim()} onClick={() => void submeter()}>
+            Conectar
+          </Button>
+        </div>
+      </div>
+    </Modal>
+  )
+}
+
+/**
+ * Conexão por CHAVE DE API (ADR 0037).
+ *
+ * Ao contrário da InfiniteTag, aqui o campo é um segredo de verdade: mascarado,
+ * sem autocompletar, e a chave não volta para a tela depois de gravada. A
+ * conexão recusa chave com permissão de saque — a orientação para criar uma
+ * chave só de cobrança vem antes do campo, para o operador não ter de errar
+ * primeiro.
+ */
+function ApiKeyConnectModal({
+  row, onClose, onConnected,
+}: {
+  row: Row | null
+  onClose: () => void
+  onConnected: (message: string) => void
+}) {
+  const [key, setKey] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [erro, setErro] = useState<string | null>(null)
+
+  function fechar() {
+    setKey('')
+    setErro(null)
+    onClose()
+  }
+
+  async function submeter() {
+    if (!row || busy) return
+    setBusy(true)
+    setErro(null)
+
+    const result = await connectGatewayWithApiKeyAction(row.descriptor.id, key)
+    setBusy(false)
+
+    if (!result.ok) {
+      setErro(result.error.message)
+      return
+    }
+
+    setKey('')
+    const conta = result.data.label ? ` (${result.data.label})` : ''
+    onConnected(`${row.descriptor.label} conectado${conta}. Clique em Ativar para usá-lo nas cobranças.`)
+  }
+
+  return (
+    <Modal open={!!row} onClose={fechar} title={`Conectar ${row?.descriptor.label ?? ''}`} size="sm">
+      <div className="space-y-4">
+        <p className="text-[13px] text-fg-mute">
+          No Asaas, abra <span className="text-fg">Integrações → Chaves de API</span> e crie uma chave
+          só para o GoMoto, <span className="text-fg">sem</span> habilitar saque via API. Ela aparece
+          uma única vez: copie e cole aqui.
+        </p>
+
+        <Input
+          label="Chave de API"
+          type="password"
+          autoComplete="off"
+          spellCheck={false}
+          placeholder="$aact_prod_..."
+          value={key}
+          autoFocus
+          onChange={(e) => setKey(e.target.value)}
+          onKeyDown={(e) => { if (e.key === 'Enter') void submeter() }}
+          error={erro ?? undefined}
+          hint="Chaves com permissão de saque são recusadas: o GoMoto só precisa gerar e consultar cobranças."
+        />
+
+        <p className="text-[12px] text-fg-mute">
+          Ao conectar, o GoMoto cadastra um webhook na sua conta Asaas para saber quando cada Pix é pago.
+        </p>
+
+        <div className="flex justify-end gap-2">
+          <Button variant="ghost" size="sm" disabled={busy} onClick={fechar}>
+            Cancelar
+          </Button>
+          <Button size="sm" loading={busy} disabled={!key.trim()} onClick={() => void submeter()}>
             Conectar
           </Button>
         </div>
