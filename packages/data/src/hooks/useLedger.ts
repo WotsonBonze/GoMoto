@@ -23,6 +23,7 @@ import {
   listChargesForCockpit,
   listPayables,
   listProviderAccounts,
+  listGatewayHistory,
   getPaymentIntentStatus,
   listLateChargePolicies,
   listOpenChargesByRental,
@@ -536,6 +537,16 @@ export function useProviderAccounts() {
         is_billing_enabled: active !== null,
       }
     },
+  })
+}
+
+/** Histórico de alterações das integrações de pagamento (ADR 0039). */
+export function useGatewayHistory() {
+  const supabase = useSupabaseContext()
+
+  return useQuery({
+    queryKey: ['payment-provider-accounts', 'history'],
+    queryFn: () => listGatewayHistory(supabase),
   })
 }
 

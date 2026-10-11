@@ -13,19 +13,21 @@
  */
 
 import { useState, useTransition } from 'react'
-import { AlertTriangle, CheckCircle2, CreditCard, ExternalLink, Link2, Link2Off, Loader2 } from 'lucide-react'
+import { AlertTriangle, CheckCircle2, CreditCard, ExternalLink, History, Link2, Link2Off, Loader2, Trash2 } from 'lucide-react'
 import { Card } from '@/components/ui/Card'
 import { Button } from '@/components/ui/Button'
 import { Input } from '@/components/ui/Input'
 import { Modal } from '@/components/ui/Modal'
+import { Table } from '@/components/ui/Table'
 import { cn } from '@/lib/utils'
 import type { PaymentProviderDescriptor } from '@gomoto/core'
-import type { ProviderAccountRow } from '@gomoto/data'
+import { useGatewayHistory, type ProviderAccountRow } from '@gomoto/data'
 import {
   connectGatewayAction, connectGatewayWithApiKeyAction, connectGatewayWithHandleAction,
-  disconnectGatewayAction, setDefaultGatewayAction,
+  deleteGatewayAction, disconnectGatewayAction, setDefaultGatewayAction,
 } from '../actions'
 import { buildGatewayRows, type GatewayRowState } from './gateway-rows'
+import { toHistoryRow, type GatewayHistoryRow } from './gateway-history'
 
 export type GatewayFeedback = { type: 'success' | 'error'; message: string }
 
@@ -39,8 +41,16 @@ type Props = {
 
 type Row = GatewayRowState
 
-export function PaymentGatewaySection({ accounts, isLoading, feedback, onFeedback, onChanged }: Props) {
+export function PaymentGatewaySection({ accounts, isLoading, feedback, onFeedback, onChanged: onAccountsChanged }: Props) {
   const [pending, startTransition] = useTransition()
+  const history = useGatewayHistory()
+  /** Toda alteração também entra no histórico — recarrega os dois. */
+  const onChanged = () => {
+    onAccountsChanged()
+    void history.refetch()
+  }
+  /** Desconectada, à espera de confirmação da exclusão irreversível. */
+  const [toDelete, setToDelete] = useState<Row | null>(null)
   /** Qual linha está em ação — para o spinner não acender em todas. */
   const [busyId, setBusyId] = useState<string | null>(null)
   const [toDisconnect, setToDisconnect] = useState<Row | null>(null)
@@ -150,6 +160,7 @@ export function PaymentGatewaySection({ accounts, isLoading, feedback, onFeedbac
                   )
                 }
                 onDisconnect={() => setToDisconnect(row)}
+                onDelete={() => setToDelete(row)}
               />
             ))}
 
@@ -246,16 +257,19 @@ export function PaymentGatewaySection({ accounts, isLoading, feedback, onFeedbac
         size="sm"
       >
         <div className="space-y-4">
+          {toDisconnect?.billing && (
+            <p className="text-[13px] text-critical">
+              Este é o gateway que gera as cobranças. Até você ativar outro, o app do cliente
+              deixa de gerar cobrança online.
+            </p>
+          )}
+          {/* Texto da ADR 0039. Desconectar é reversível e NÃO desfaz nada no
+              provedor: a promessa de baixa automática é verdadeira porque a
+              credencial e o webhook continuam. */}
           <p className="text-[13px] text-fg-mute">
-            {toDisconnect?.billing
-              // "deixa de gerar Pix" era verdade enquanto todo gateway gerava
-              // Pix. A InfinitePay gera link de checkout, então a frase passou
-              // a prometer errado justamente na tela que decide o dinheiro.
-              ? 'Este é o gateway que gera as cobranças. Ao desconectar, o app do cliente deixa de gerar cobrança online até você ativar outro.'
-              : 'Esta conta deixa de ficar disponível. Você pode reconectá-la depois.'}
-          </p>
-          <p className="text-[13px] text-fg-mute">
-            Cobranças já pagas e o histórico de tentativas continuam no sistema.
+            Este gateway deixa de gerar cobranças. Os códigos de pagamento já enviados aos
+            clientes continuam válidos e, se forem pagos, a cobrança é baixada automaticamente.
+            Você pode reconectar esta mesma conta depois.
           </p>
           <div className="flex justify-end gap-2">
             <Button variant="ghost" size="sm" onClick={() => setToDisconnect(null)}>
@@ -280,12 +294,104 @@ export function PaymentGatewaySection({ accounts, isLoading, feedback, onFeedbac
           </div>
         </div>
       </Modal>
+
+      <Modal
+        open={!!toDelete}
+        onClose={() => setToDelete(null)}
+        title={`Excluir integração ${toDelete?.descriptor.label ?? ''}`}
+        size="sm"
+      >
+        <div className="space-y-4">
+          {/* Texto da ADR 0039 — o usuário confirma sabendo do risco residual. */}
+          <p className="text-[13px] text-critical font-medium">Esta ação não pode ser desfeita.</p>
+          <p className="text-[13px] text-fg-mute">
+            Os códigos de pagamento (Pix e links) gerados por esta integração e ainda não pagos
+            serão cancelados, e a credencial será apagada.
+          </p>
+          <p className="text-[13px] text-fg-mute">
+            Se um cliente pagar um desses códigos depois da exclusão, o pagamento{' '}
+            <span className="text-fg font-medium">não será baixado automaticamente</span>: será
+            preciso registrá-lo manualmente na cobrança.
+          </p>
+          <p className="text-[13px] text-fg-mute">
+            Os pagamentos já recebidos e o histórico continuam no sistema.
+          </p>
+          <div className="flex justify-end gap-2">
+            <Button variant="ghost" size="sm" onClick={() => setToDelete(null)}>
+              Cancelar
+            </Button>
+            <Button
+              variant="danger"
+              size="sm"
+              loading={pending}
+              onClick={() => {
+                const row = toDelete!
+                setToDelete(null)
+                setBusyId(row.descriptor.id)
+                onFeedback(null)
+                startTransition(async () => {
+                  const result = await deleteGatewayAction(row.account!.id)
+                  setBusyId(null)
+                  if (!result.ok) {
+                    onFeedback({ type: 'error', message: result.error.message })
+                    return
+                  }
+                  const { canceledAtProvider, notCanceled } = result.data
+                  const detalhe = canceledAtProvider + notCanceled === 0
+                    ? ''
+                    : ` ${canceledAtProvider} código(s) cancelado(s) no provedor`
+                      + (notCanceled ? `; ${notCanceled} não puderam ser cancelados.` : '.')
+                  onFeedback({ type: 'success', message: `Integração ${row.descriptor.label} excluída.${detalhe}` })
+                  onChanged()
+                })
+              }}
+            >
+              <Trash2 className="w-4 h-4" />
+              Excluir integração
+            </Button>
+          </div>
+        </div>
+      </Modal>
+
+      <GatewayHistory rows={(history.data ?? []).map((e) => toHistoryRow(e))} loading={history.isLoading} />
     </section>
   )
 }
 
+/**
+ * Quem alterou as integrações, e quando (ADR 0039).
+ *
+ * A fonte é a trilha escrita pelo banco — inclui integrações já excluídas, que
+ * a lista acima não mostra mais.
+ */
+function GatewayHistory({ rows, loading }: { rows: GatewayHistoryRow[]; loading: boolean }) {
+  return (
+    <div className="mt-6">
+      <div className="flex items-center gap-2 mb-2">
+        <History className="w-4 h-4 text-fg-mute" />
+        <h3 className="text-[15px] font-semibold text-fg">Histórico de alterações</h3>
+      </div>
+      <Card>
+        <Table<GatewayHistoryRow>
+          columns={[
+            { key: 'when', header: 'Data', render: (r) => r.when },
+            { key: 'gateway', header: 'Gateway', render: (r) => r.gateway },
+            { key: 'action', header: 'Alteração', render: (r) => r.action },
+            { key: 'account', header: 'Conta', render: (r) => r.account },
+            { key: 'actor', header: 'Por', render: (r) => r.actor },
+          ]}
+          data={rows}
+          keyExtractor={(r) => r.id}
+          loading={loading}
+          emptyMessage="Nenhuma alteração registrada ainda"
+        />
+      </Card>
+    </div>
+  )
+}
+
 function GatewayRow({
-  row, busy, disabled, onConnect, onActivate, onDisconnect,
+  row, busy, disabled, onConnect, onActivate, onDisconnect, onDelete,
 }: {
   row: Row
   busy: boolean
@@ -293,6 +399,7 @@ function GatewayRow({
   onConnect: () => void
   onActivate: () => void
   onDisconnect: () => void
+  onDelete: () => void
 }) {
   const { descriptor, account, connected, billing } = row
   const identidade = account?.account_label ?? account?.external_account_id ?? null
@@ -335,15 +442,26 @@ function GatewayRow({
               Desconectar
             </Button>
           ) : (
-            <Button
-              size="sm"
-              variant={account ? 'outline' : 'primary'}
-              disabled={disabled || !descriptor.available}
-              onClick={onConnect}
-            >
-              <Link2 className="w-4 h-4" />
-              {account ? 'Reconectar' : 'Conectar'}
-            </Button>
+            <>
+              {/* Desconectada: reconectar aceita só a MESMA conta; para outra,
+                  exclui-se primeiro (ADR 0039). */}
+              <Button
+                size="sm"
+                variant={account ? 'outline' : 'primary'}
+                disabled={disabled || !descriptor.available}
+                onClick={onConnect}
+                title={account ? 'Reconecta esta mesma conta. Para usar outra conta, exclua a integração.' : undefined}
+              >
+                <Link2 className="w-4 h-4" />
+                {account ? 'Reconectar' : 'Conectar'}
+              </Button>
+              {account && (
+                <Button variant="danger" size="sm" disabled={disabled} onClick={onDelete}>
+                  <Trash2 className="w-4 h-4" />
+                  Excluir
+                </Button>
+              )}
+            </>
           )}
         </div>
       )}

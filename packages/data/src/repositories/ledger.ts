@@ -673,7 +673,9 @@ export type ProviderAccountRow = {
  * Contas de gateway do tenant (ADR 0030).
  *
  * Inclui as INATIVAS: a tela precisa mostrar "Mercado Pago — desconectado" com
- * botão de reconectar, e não fingir que a integração nunca existiu. Quem filtra
+ * botão de reconectar, e não fingir que a integração nunca existiu. As
+ * EXCLUÍDAS (ADR 0039) ficam de fora: saíram da tela e da unicidade, e o que
+ * resta delas é história — lida por `listGatewayHistory`. Quem filtra
  * por `is_default AND active` é quem vai cobrar, não quem vai desenhar.
  *
  * `secret_id` fica fora do select e fora do GRANT: a credencial mora no Vault e
@@ -687,11 +689,69 @@ export async function listProviderAccounts(
   const { data, error } = await client
     .from('payment_provider_accounts')
     .select('id, provider, external_account_id, account_label, is_default, active')
+    .is('deleted_at', null)
     .order('is_default', { ascending: false })
     .order('provider', { ascending: true })
 
   if (error) throw error
   return (data ?? []) as ProviderAccountRow[]
+}
+
+/** Uma alteração de integração, como a trilha do banco a registrou (ADR 0039). */
+export type GatewayHistoryEntry = {
+  id: string
+  action:
+    | 'gateway_connected' | 'gateway_reconnected' | 'gateway_activated'
+    | 'gateway_deactivated' | 'gateway_disconnected' | 'gateway_deleted'
+  created_at: string
+  provider: string
+  account_label: string | null
+  external_account_id: string | null
+  /** E-mail de quem fez, gravado no momento. `null` quando foi o sistema. */
+  actor_email: string | null
+  /** `system:…` quando não houve usuário (migration, rotina). */
+  actor_system: string | null
+}
+
+const GATEWAY_ACTIONS = [
+  'gateway_connected', 'gateway_reconnected', 'gateway_activated',
+  'gateway_deactivated', 'gateway_disconnected', 'gateway_deleted',
+] as const
+
+/**
+ * Quem alterou as integrações de pagamento, e quando (ADR 0039).
+ *
+ * A fonte é `audit_logs`, escrita por TRIGGER na mesma transação da mudança —
+ * não pela aplicação. Inclui integrações já excluídas: é justamente o que a
+ * lista de contas não mostra mais. A RLS de `audit_logs` limita ao tenant.
+ */
+export async function listGatewayHistory(
+  client: SupabaseClient,
+  limit = 100,
+): Promise<GatewayHistoryEntry[]> {
+  const { data, error } = await client
+    .from('audit_logs')
+    .select('id, action, created_at, actor_system, new_data')
+    .eq('table_name', 'payment_provider_accounts')
+    .in('action', GATEWAY_ACTIONS as unknown as string[])
+    .order('created_at', { ascending: false })
+    .limit(limit)
+
+  if (error) throw error
+  return (data ?? []).map((row) => {
+    const n = (row.new_data ?? {}) as Record<string, unknown>
+    const str = (v: unknown) => (typeof v === 'string' && v ? v : null)
+    return {
+      id: row.id as string,
+      action: row.action as GatewayHistoryEntry['action'],
+      created_at: row.created_at as string,
+      provider: str(n.provider) ?? '',
+      account_label: str(n.account_label),
+      external_account_id: str(n.external_account_id),
+      actor_email: str(n.actor_email),
+      actor_system: str(row.actor_system),
+    }
+  })
 }
 
 /**

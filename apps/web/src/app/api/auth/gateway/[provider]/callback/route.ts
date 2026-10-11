@@ -22,7 +22,6 @@ import { createClient } from '@/lib/supabase/server'
 import { getCurrentTenantId } from '@/lib/auth/tenant'
 import { getOAuthProvider } from '@/lib/payment/registry'
 import { oauthStateSecret } from '@/lib/payment/oauth-state'
-import { logAction } from '@/lib/audit'
 import { revalidatePath } from 'next/cache'
 
 const REDIRECT_BASE = '/configuracoes'
@@ -120,7 +119,11 @@ export async function GET(req: NextRequest, ctx: RouteContext) {
   })
 
   if (error) {
-    const reason = error.message.includes('GATEWAY_OWNER_ONLY') ? 'forbidden' : 'db_error'
+    // Outra conta do mesmo provedor com uma integração viva: o banco recusa
+    // (ADR 0039) e a tela orienta a excluir a atual.
+    const reason = error.message.includes('GATEWAY_OWNER_ONLY') ? 'forbidden'
+      : error.message.includes('GATEWAY_PROVIDER_ALREADY_CONNECTED') ? 'other_account'
+      : 'db_error'
     serverLog('error', 'gateway_oauth.error', {
       provider: providerId, reason, tenant_id: tenantId, db_code: error.code, detail: error.message,
     })
@@ -134,18 +137,8 @@ export async function GET(req: NextRequest, ctx: RouteContext) {
     external_account_id: connection.externalAccountId, elected: result?.elected ?? false,
   })
 
-  await logAction({
-    action: 'connect_payment',
-    table: 'payment_provider_accounts',
-    recordId: result?.account_id,
-    newData: {
-      tenant_id: tenantId,
-      provider: providerId,
-      external_account_id: connection.externalAccountId,
-      account_label: connection.accountLabel,
-      is_default: result?.elected ?? false,
-    },
-  })
+  // Sem `logAction`: a trilha da integração é escrita pelo banco, por trigger,
+  // na mesma transação da conexão (ADR 0039).
 
   revalidatePath(REDIRECT_BASE)
   // `elected: false` significa que o tenant já tinha outro gateway cobrando.

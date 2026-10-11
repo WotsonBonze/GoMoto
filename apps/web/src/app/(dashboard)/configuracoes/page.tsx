@@ -260,6 +260,7 @@ export default function SettingsPage() {
         unknown_provider: 'Gateway desconhecido.',
         forbidden:        'Apenas o Owner da empresa pode conectar um gateway.',
         missing_params:   'Retorno incompleto do provedor. Tente novamente.',
+        other_account:    'Você autorizou uma conta diferente da integração atual deste gateway. Para usar outra conta, exclua a integração atual primeiro.',
       }
       setPaymentFeedback({ type: 'error', message: messages[reason ?? ''] ?? 'Erro ao conectar.' })
     }

@@ -153,7 +153,7 @@ Isto **não** fecha o buraco do código salvo para MP/Cora/InfinitePay: só impe
 - **Token global (env), não por conta.** O token por conta obrigaria a resolver a conta *antes* de autenticar. E a mesma conta Asaas conectada em dois tenants (o caso que derrubou o MP em 2026-09-25) recebe o evento pelos dois webhooks, o que torna o "dono do token" ambíguo. A proteção real não é o token, é a reconsulta (decisão 5), como na InfinitePay.
 - **Sequencial:** a ordem importa, porque um estorno processado antes da confirmação viraria no-op e depois creditaria. Responder 200 logo depois de persistir faz a fila só travar quando a gravação no inbox falha, e nesse caso travar é o certo.
 - **Sempre `200` depois de persistir**, inclusive para evento ignorado. Qualquer outro código conta para as 15 falhas que pausam a fila.
-- Desconectar → `DELETE /webhooks/{id}`, best-effort.
+- ~~Desconectar → `DELETE /webhooks/{id}`~~ — **mudou na ADR 0039**: desconectar é reversível e mantém o webhook (um código já enviado e pago depois precisa ser baixado); o webhook sai no **Excluir**.
 
 ### 5. Processamento: o dono sai do intent, o fato sai da reconsulta
 

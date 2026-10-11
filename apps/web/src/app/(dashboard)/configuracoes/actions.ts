@@ -75,6 +75,15 @@ function gatewayError(message: string): ActionError {
   if (message.includes('GATEWAY_ACCOUNT_NOT_FOUND')) {
     return { code: 'NOT_FOUND', message: 'Conta de gateway não encontrada' }
   }
+  if (message.includes('GATEWAY_PROVIDER_ALREADY_CONNECTED')) {
+    return {
+      code: 'CONFLICT',
+      message: 'Já existe uma integração deste gateway com outra conta. Para usar outra conta, exclua a integração atual primeiro.',
+    }
+  }
+  if (message.includes('GATEWAY_DISCONNECT_FIRST')) {
+    return { code: 'CONFLICT', message: 'Desconecte a integração antes de excluí-la' }
+  }
   if (message.includes('GATEWAY_ACCOUNT_INACTIVE')) {
     return { code: 'CONFLICT', message: 'Reconecte esta conta antes de ativá-la' }
   }
@@ -198,13 +207,6 @@ export async function connectGatewayWithHandleAction(
     return { ok: false, error: { code: 'INTERNAL', message: 'Não foi possível concluir a operação' } }
   }
 
-  await logAction({
-    action: 'connect_payment',
-    table: 'payment_provider_accounts',
-    recordId: conta.account_id,
-    newData: { tenant_id: ctx.tenantId, provider: parsed.data, external_account_id: handle },
-  })
-
   revalidatePath('/configuracoes')
   // `accountId` volta para a tela poder oferecer o desfazer imediato: se o link
   // de conferência não abrir a loja do operador, desconectar é um clique, não
@@ -280,19 +282,12 @@ export async function connectGatewayWithApiKeyAction(
     return { ok: false, error: error ? gatewayError(error.message) : { code: 'INTERNAL', message: 'Não foi possível concluir a operação' } }
   }
 
-  await logAction({
-    action: 'connect_payment',
-    table: 'payment_provider_accounts',
-    recordId: conta.account_id,
-    newData: { tenant_id: ctx.tenantId, provider: parsed.data, external_account_id: connection.externalAccountId },
-  })
-
   revalidatePath('/configuracoes')
   return { ok: true, data: { accountId: conta.account_id, label: connection.accountLabel } }
 }
 
 /**
- * Outra conta ATIVA, de qualquer tenant, usa a mesma conta no provedor?
+ * Outra integração NÃO EXCLUÍDA, de qualquer tenant, usa a mesma conta no provedor?
  *
  * Com `service_role` de propósito: a RLS esconderia os outros tenants, e é
  * justamente deles que se precisa saber. O Asaas guarda um webhook por URL e
@@ -309,7 +304,9 @@ async function walletInUseElsewhere(
     .select('id', { count: 'exact', head: true })
     .eq('provider', provider)
     .eq('external_account_id', externalAccountId)
-    .eq('active', true)
+    // Não excluída, e não "ativa": uma conta DESCONECTADA ainda depende do
+    // webhook para baixar o pagamento de um código já enviado (ADR 0039).
+    .is('deleted_at', null)
   if (exceptAccountId) q = q.neq('id', exceptAccountId)
   const { count, error } = await q
   // Na dúvida, NÃO apaga: webhook sobrando é inofensivo; faltando, perde dinheiro.
@@ -334,18 +331,20 @@ export async function setDefaultGatewayAction(accountId: unknown): Promise<Actio
   const { error } = await ctx.supabase.rpc('fn_set_default_provider_account', { p_account_id: accountId })
   if (error) return { ok: false, error: gatewayError(error.message) }
 
-  await logAction({
-    action: 'connect_payment',
-    table: 'payment_provider_accounts',
-    recordId: accountId,
-    newData: { tenant_id: ctx.tenantId, is_default: true },
-  })
-
   revalidatePath('/configuracoes')
   return { ok: true }
 }
 
-/** Desconecta uma conta de gateway. Desativa, nunca apaga (ADR 0024, Princípio 3). */
+/**
+ * Desconecta: o gateway deixa de gerar cobranças (ADR 0039).
+ *
+ * REVERSÍVEL, e por isso nada é desfeito no provedor: a credencial e o webhook
+ * ficam, para que um código já enviado ao cliente e pago depois ainda seja
+ * conferido e baixe a cobrança. Remover o webhook aqui — como a primeira versão
+ * do Asaas fazia — deixava esse pagamento sem aviso nenhum.
+ *
+ * Sem `logAction`: a trilha é do banco, por trigger (ADR 0039).
+ */
 export async function disconnectGatewayAction(accountId: unknown): Promise<ActionResult> {
   const ctx = await getOwnerTenant()
   if ('error' in ctx) return { ok: false, error: ownerError(ctx.error, 'desconectar um gateway de pagamento') }
@@ -354,41 +353,88 @@ export async function disconnectGatewayAction(accountId: unknown): Promise<Actio
     return { ok: false, error: { code: 'VALIDATION', message: 'Conta inválida' } }
   }
 
-  // Lido ANTES de desconectar: o que o provedor precisa para desfazer o que a
-  // conexão criou lá (o webhook do Asaas) está na credencial.
-  const { data: row } = await ctx.supabase
-    .from('payment_provider_accounts')
-    .select('id, provider, external_account_id')
-    .eq('id', accountId)
-    .eq('tenant_id', ctx.tenantId)
-    .maybeSingle()
-  const account = row as { id: string; provider: string; external_account_id: string } | null
-  const impl = account ? PROVIDER_REGISTRY[account.provider] : undefined
-  const credentials = account && impl?.disconnect
-    ? await resolveCredentials(account, impl).catch(() => null)
-    : null
-
   const { error } = await ctx.supabase.rpc('fn_disconnect_provider_account', { p_account_id: accountId })
   if (error) return { ok: false, error: gatewayError(error.message) }
 
-  // Best-effort e DEPOIS: desconectar já aconteceu do nosso lado e o provedor
-  // não pode desfazer isso.
-  if (account && impl?.disconnect && credentials
-    && !(await walletInUseElsewhere(account.provider, account.external_account_id, account.id))) {
-    await impl.disconnect(credentials).catch((e: unknown) => {
-      console.error('[gateway] limpeza no provedor falhou:', e instanceof Error ? e.message : e)
-    })
-  }
-
-  await logAction({
-    action: 'disconnect_payment',
-    table: 'payment_provider_accounts',
-    recordId: accountId,
-    oldData: { tenant_id: ctx.tenantId },
-  })
-
   revalidatePath('/configuracoes')
   return { ok: true }
+}
+
+/**
+ * Exclui uma integração DESCONECTADA — irreversível (ADR 0039).
+ *
+ * A metade no provedor vem PRIMEIRO, enquanto a credencial existe: cancelar os
+ * códigos ainda não pagos (best-effort; a InfinitePay não oferece) e desfazer o
+ * que a conexão criou lá (o webhook do Asaas). Depois a RPC apaga a credencial
+ * do Vault e marca a linha como excluída, numa transação.
+ *
+ * A tela avisou: um código pago depois disto não baixa sozinho.
+ */
+export async function deleteGatewayAction(
+  accountId: unknown,
+): Promise<ActionData<{ canceledAtProvider: number; notCanceled: number }>> {
+  const ctx = await getOwnerTenant()
+  if ('error' in ctx) return { ok: false, error: ownerError(ctx.error, 'excluir um gateway de pagamento') }
+
+  if (typeof accountId !== 'string' || !accountId) {
+    return { ok: false, error: { code: 'VALIDATION', message: 'Conta inválida' } }
+  }
+
+  const { data: row } = await ctx.supabase
+    .from('payment_provider_accounts')
+    .select('id, provider, external_account_id, active')
+    .eq('id', accountId)
+    .eq('tenant_id', ctx.tenantId)
+    .is('deleted_at', null)
+    .maybeSingle()
+  const account = row as { id: string; provider: string; external_account_id: string; active: boolean } | null
+
+  if (!account) return { ok: false, error: { code: 'NOT_FOUND', message: 'Integração não encontrada' } }
+  // A RPC também recusa; conferir antes evita cancelar códigos no provedor de
+  // uma integração que não vai ser excluída.
+  if (account.active) {
+    return { ok: false, error: { code: 'CONFLICT', message: 'Desconecte a integração antes de excluí-la' } }
+  }
+
+  const impl = PROVIDER_REGISTRY[account.provider]
+  const credentials = impl ? await resolveCredentials(account, impl).catch(() => null) : null
+
+  let canceledAtProvider = 0
+  let notCanceled = 0
+
+  if (impl && credentials) {
+    const { data: intents } = await ctx.supabase
+      .from('payment_intents')
+      .select('id, provider_intent_id')
+      .eq('provider_account_id', account.id)
+      .in('status', ['pending', 'expired'])
+      .not('provider_intent_id', 'is', null)
+      .limit(500)
+
+    for (const it of (intents ?? []) as { id: string; provider_intent_id: string }[]) {
+      if (!impl.cancelIntent) { notCanceled++; continue }
+      try {
+        await impl.cancelIntent({ providerIntentId: it.provider_intent_id, credentials })
+        canceledAtProvider++
+      } catch (e) {
+        // Já pago, já cancelado, provedor fora: nunca bloqueia a exclusão.
+        notCanceled++
+        console.warn('[gateway] cancelar código na exclusão falhou:', it.id, e instanceof Error ? e.message : e)
+      }
+    }
+
+    if (impl.disconnect && !(await walletInUseElsewhere(account.provider, account.external_account_id, account.id))) {
+      await impl.disconnect(credentials).catch((e: unknown) => {
+        console.error('[gateway] limpeza no provedor falhou:', e instanceof Error ? e.message : e)
+      })
+    }
+  }
+
+  const { error } = await ctx.supabase.rpc('fn_delete_provider_account', { p_account_id: account.id })
+  if (error) return { ok: false, error: gatewayError(error.message) }
+
+  revalidatePath('/configuracoes')
+  return { ok: true, data: { canceledAtProvider, notCanceled } }
 }
 
 // ============================================================

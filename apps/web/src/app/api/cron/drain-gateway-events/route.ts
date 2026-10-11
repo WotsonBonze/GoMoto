@@ -127,6 +127,9 @@ async function renovarCredenciais(
       .select('id, provider')
       .eq('tenant_id', tenantId)
       .eq('provider', provider)
+      // Excluída não tem credencial (ADR 0039): tentar renovar só registraria
+      // uma falha falsa a cada execução.
+      .is('deleted_at', null)
 
     for (const conta of (contas ?? []) as { id: string; provider: string }[]) {
       try {
