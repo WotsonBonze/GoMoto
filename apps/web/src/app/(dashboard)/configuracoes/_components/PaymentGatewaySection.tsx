@@ -19,12 +19,13 @@ import { Button } from '@/components/ui/Button'
 import { Input } from '@/components/ui/Input'
 import { Modal } from '@/components/ui/Modal'
 import { cn } from '@/lib/utils'
-import { PAYMENT_PROVIDERS, type PaymentProviderDescriptor } from '@gomoto/core'
+import type { PaymentProviderDescriptor } from '@gomoto/core'
 import type { ProviderAccountRow } from '@gomoto/data'
 import {
   connectGatewayAction, connectGatewayWithApiKeyAction, connectGatewayWithHandleAction,
   disconnectGatewayAction, setDefaultGatewayAction,
 } from '../actions'
+import { buildGatewayRows, type GatewayRowState } from './gateway-rows'
 
 export type GatewayFeedback = { type: 'success' | 'error'; message: string }
 
@@ -36,30 +37,7 @@ type Props = {
   onChanged: () => void
 }
 
-/**
- * Estado de um provedor para esta tela.
- *
- * `connected` e `billing` são coisas diferentes, e a distinção é o ponto da
- * feature: uma conta pode estar conectada e não ser a que cobra.
- */
-type Row = {
-  descriptor: PaymentProviderDescriptor
-  account: ProviderAccountRow | null
-  connected: boolean
-  billing: boolean
-}
-
-function buildRows(accounts: ProviderAccountRow[]): Row[] {
-  return PAYMENT_PROVIDERS.map((descriptor) => {
-    const account = accounts.find((a) => a.provider === descriptor.id) ?? null
-    return {
-      descriptor,
-      account,
-      connected: !!account?.active,
-      billing: !!account?.is_default && !!account?.active,
-    }
-  })
-}
+type Row = GatewayRowState
 
 export function PaymentGatewaySection({ accounts, isLoading, feedback, onFeedback, onChanged }: Props) {
   const [pending, startTransition] = useTransition()
@@ -75,7 +53,7 @@ export function PaymentGatewaySection({ accounts, isLoading, feedback, onFeedbac
     { label: string; accountId: string; handle: string; checkoutUrl: string } | null
   >(null)
 
-  const rows = buildRows(accounts)
+  const rows = buildGatewayRows(accounts)
   const billingRow = rows.find((r) => r.billing) ?? null
   const hasConnected = rows.some((r) => r.connected)
 
