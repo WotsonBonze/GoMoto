@@ -1,6 +1,6 @@
 # ADR 0037 — Integração Asaas (chave de API)
 
-- **Status:** Proposta
+- **Status:** Aceita (ciclo fechado em produção com sandbox, 2026-10-11)
 - **Data:** 2026-10-09
 - **Autores:** Alan + agente IA
 - **Substitui:** —
@@ -242,10 +242,23 @@ Código real de ponta a ponta — `getOrCreateIntent` → adaptador → Asaas sa
 | Razão | débitos − créditos = 0,00 |
 | Porta do webhook | token errado → 401 (`webhook.bad_token`) |
 
+## Ciclo fechado em PRODUÇÃO com o Asaas sandbox (2026-10-11 00:07 UTC)
+
+Deploy do commit `712c16b` (migration, `asaas-webhook`, `gateway-replay`, envs com `ASAAS_ENVIRONMENT=sandbox`). Locadora "teste 01", cobrança #9 de R$ 5,00:
+
+- Vercel: conectar (00:03:22) → ativar (00:03:37) → criar cobrança → gerar Pix (00:04:27), tudo 200, zero `warning`/`error`.
+- Asaas: `pay_p9eoqi38ea6bipnu` com multa 2% / juros 0,99% e `externalReference gomoto:159e7a30…`; webhook de produção com `penalizedRequestsCount 0`, `interrupted false`.
+- **Entrega real do Asaas:** um único `PAYMENT_RECEIVED` (Pix não manda `CONFIRMED`, confirmado), `POST 200` em 00:07:00, processado em 00:07:03 (`outcome approved`, `attempts 0`, sem erro, `tenant_id` carimbado).
+- Razão: pagamento `gateway:asaas`, Pix, R$ 5,00, `gateway_event_id` ligado; débito `caixa_e_bancos` / crédito `contas_a_receber`, soma 0,00; cobrança `paid`, `open_amount 0`.
+- **Fuso validado ao vivo:** pago às 21:07 de Brasília = 00:07 UTC do dia seguinte; o Asaas informou `paymentDate 2026-10-10` = hoje da locadora → `paid_at` = instante da confirmação (e não meio-dia).
+- `fn_confirm_gateway_payment` em produção com a assinatura nova e `EXECUTE` só para `postgres`/`service_role`.
+
+Não exercitado em produção (só localmente): pagamento depois do vencimento com `p_extra_late_charge`.
+
 ## Ainda a confirmar (⚠)
 
-1. **Entrega feita pelo próprio Asaas** (formato real do corpo e header `asaas-access-token`). O túnel para a Edge Function local subiu e a porta respondeu certo, mas o modo automático do Claude Code bloqueou seguir com túnel de entrada externa; o teste foi feito entregando o evento documentado localmente. Fechar no deploy de homologação ou com o túnel autorizado.
-2. Tela de conexão por chave no navegador.
+1. ~~Entrega feita pelo próprio Asaas~~ — confirmada em produção (acima).
+2. ~~Tela de conexão por chave no navegador~~ — usada pelo Alan em produção.
 3. Formato do erro de limite diário e de chave desabilitada por inatividade.
 
 ## Para ir a produção
