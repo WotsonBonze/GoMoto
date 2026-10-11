@@ -61,3 +61,14 @@ Deno.test('paidAtOf: 22h em Brasília (UTC já é amanhã) ainda reconhece o pag
   const noite = new Date('2026-10-11T01:00:00Z')
   assertEquals(paidAtOf('2026-10-10', 'America/Sao_Paulo', noite), noite.toISOString())
 })
+
+import { environmentMismatch } from './asaas.ts'
+
+Deno.test('ambiente: conta sandbox em deploy de produção não credita', () => {
+  if (!environmentMismatch('sandbox', 'production')) throw new Error('deveria divergir')
+})
+
+Deno.test('ambiente: mesmo ambiente, ou deploy sem ASAAS_ENVIRONMENT, segue normal', () => {
+  assertEquals(environmentMismatch('production', 'production'), null)
+  assertEquals(environmentMismatch('sandbox', undefined), null)
+})

@@ -119,6 +119,18 @@ export const asaasProvider: PaymentProvider = {
 
     const conn = connOf(credentials)
 
+    // A trava de ambiente da CONEXÃO não basta: uma conta conectada com chave de
+    // sandbox continua gravada depois que o deploy vira produção, e geraria Pix
+    // que nenhum banco paga — ou, pago no sandbox, "quitaria" uma dívida real.
+    if (conn.environment !== acceptedEnvironment()) {
+      throw codedError(
+        'GATEWAY_UNAUTHORIZED',
+        conn.environment === 'sandbox'
+          ? 'A conta Asaas conectada é de SANDBOX. Reconecte com a chave de produção em Configurações.'
+          : 'A conta Asaas conectada é de PRODUÇÃO, e este ambiente só aceita sandbox. Reconecte em Configurações.',
+      )
+    }
+
     return authed(async () => {
       const customerId = await findOrCreateCustomer(conn, {
         name: customer.name?.trim() || 'Cliente',

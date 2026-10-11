@@ -117,7 +117,19 @@ export async function processAsaasEvent(
   const remote = await fetchPayment(paymentId, credentials)
   const timezone = await tenantTimezone(supabase, it.tenant_id)
 
-  const payment = normalize(type, remote, Number(it.amount), timezone)
+  let payment = normalize(type, remote, Number(it.amount), timezone)
+
+  // Conta de OUTRO ambiente não move dinheiro aqui. Uma conta sandbox esquecida
+  // conectada depois da virada para produção ainda recebe eventos do sandbox —
+  // pagamento fictício que, confirmado, quitaria uma dívida real. Registrado
+  // como ignorado (com o motivo) em vez de erro: reprocessar não muda nada.
+  const mismatch = environmentMismatch(credentials.environment, Deno.env.get('ASAAS_ENVIRONMENT'))
+  if (mismatch && payment.outcome !== 'ignored') {
+    log('error', 'asaas.ambiente_divergente', {
+      provider: PROVIDER, payment_id: paymentId, tenant_id: it.tenant_id, detail: mismatch,
+    })
+    payment = { ...payment, outcome: 'ignored', extraLateCharge: undefined, detail: mismatch }
+  }
 
   if (payment.outcome === 'approved' && payment.extraLateCharge) {
     log('info', 'asaas.encargo_cobrado_no_pagamento', {
@@ -187,6 +199,18 @@ export function normalize(
   }
 
   return { ...base, outcome: 'ignored', paidAt: null, detail: `status ${p.status}` }
+}
+
+/**
+ * A conta do evento é de um ambiente que este deploy não aceita?
+ *
+ * Sem `ASAAS_ENVIRONMENT` nos secrets da função, aceita qualquer um — é o
+ * comportamento de antes, e o desenvolvimento local fica sem configuração.
+ */
+export function environmentMismatch(credentialEnv: unknown, deployEnv: string | undefined): string | null {
+  if (deployEnv !== 'production' && deployEnv !== 'sandbox') return null
+  if (credentialEnv === deployEnv) return null
+  return `conta Asaas de ambiente ${String(credentialEnv)} num deploy ${deployEnv} — não credita`
 }
 
 /**

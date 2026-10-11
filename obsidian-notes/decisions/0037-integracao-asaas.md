@@ -283,6 +283,27 @@ A doc do Asaas descreve o mesmo caso ("João cria a cobrança em sua própria co
 
 **⚠ Não verificado (só em produção):** a doc cita a lista de *"carteiras autorizadas a receber split fora do arranjo"* (`WALLET_REMOVED_FROM_OUTSIDE_ARRANGEMENT_ALLOW_LIST`), sem explicar quem entra nela. Pode haver uma exigência regulatória ou comercial do Asaas para uma carteira receber split de contas que não são subcontas dela. O sandbox não impôs nada. **Confirmar com o Asaas antes de implementar.**
 
+## Trava de ambiente (2026-10-11)
+
+A recusa de chave de outro ambiente acontecia só na **conexão**. Uma conta conectada com chave sandbox continuava gravada depois da virada do deploy para produção, e:
+
+- **gerava Pix de sandbox** para clientes reais (o adaptador usa o ambiente gravado na credencial);
+- pior: um Pix de sandbox **pago no sandbox** chegava pelo webhook e quitava uma cobrança real com dinheiro fictício.
+
+Duas travas, com teste:
+
+1. `createIntent` recusa com `GATEWAY_UNAUTHORIZED` ("reconecte com a chave de produção") antes de chamar o Asaas.
+2. `processAsaasEvent`: com `ASAAS_ENVIRONMENT` nos secrets da Edge Function, evento de conta de outro ambiente vira `ignored` com o motivo, e `log('error', 'asaas.ambiente_divergente')`. Sem o secret, aceita qualquer ambiente (desenvolvimento local).
+
+## Migração do sandbox para produção
+
+1. **Conta Asaas da locadora:** aprovada, com **chave Pix cadastrada** (sem ela o QR vence às 23:59) e chave de API "GoMoto" **sem saque via API**. **Sem whitelist de IP** (Vercel e Supabase não têm IP fixo).
+2. **Vercel:** `ASAAS_ENVIRONMENT=production` e `vercel deploy --prod`.
+3. **Supabase:** `supabase secrets set ASAAS_ENVIRONMENT=production` e `supabase functions deploy asaas-webhook` (a trava 2 vem no código novo).
+4. **Locadora de teste:** ativar outro gateway e desconectar o Asaas sandbox. Com as travas, esquecer isto não gera mais Pix de sandbox, mas a locadora fica sem cobrar.
+5. Conectar a chave `$aact_prod_` e conferir o rótulo e o webhook no painel do Asaas.
+6. Pix real de R$ 5,00, conferido pelo webhook e pelo razão.
+
 ## Ainda a confirmar (⚠)
 
 1. ~~Entrega feita pelo próprio Asaas~~ — confirmada em produção (acima).

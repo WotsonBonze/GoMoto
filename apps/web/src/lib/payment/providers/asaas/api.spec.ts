@@ -76,3 +76,23 @@ describe('maskDocument', () => {
     expect(maskDocument('12.345.678/0001-90')).toBe('**.***.***/0001-**')
   })
 })
+
+describe('asaasProvider.createIntent — trava de ambiente', () => {
+  it('credencial de sandbox num deploy de produção é recusada ANTES de falar com o Asaas', async () => {
+    const { asaasProvider } = await import('./index')
+    const { embeddedLateChargeTerms } = await import('@gomoto/core')
+    vi.stubEnv('ASAAS_ENVIRONMENT', 'production')
+    const fetchSpy = vi.fn()
+    vi.stubGlobal('fetch', fetchSpy)
+
+    const lateCharge = embeddedLateChargeTerms(
+      { open_amount: 100, paid_amount: 0, late_charge_amount: 0, due_date: '2099-01-01' }, null,
+    )
+    await expect(asaasProvider.createIntent({
+      amount: lateCharge.value, chargeId: crypto.randomUUID(), method: 'pix', lateCharge,
+      credentials: { api_key: conn.apiKey, environment: 'sandbox', webhook_id: null },
+      customer: { name: 'X', email: null, document: '24971563792' },
+    })).rejects.toMatchObject({ code: 'GATEWAY_UNAUTHORIZED' })
+    expect(fetchSpy).not.toHaveBeenCalled()
+  })
+})
