@@ -255,6 +255,34 @@ Deploy do commit `712c16b` (migration, `asaas-webhook`, `gateway-replay`, envs c
 
 Não exercitado em produção (só localmente): pagamento depois do vencimento com `p_extra_late_charge`.
 
+## Split de pagamento — possível no modelo atual (registrado para o futuro, 2026-10-11)
+
+**Modelo atual:** cada locadora tem a própria conta Asaas e o GoMoto opera com a chave de API dela. O GoMoto não tem conta no Asaas, não recebe dinheiro e não é parceiro. **Subcontas (o GoMoto como conta raiz) foram descartadas pelo Alan.**
+
+**Pergunta:** dá para o GoMoto receber uma parte de cada cobrança (ex.: a taxa do SaaS) sem mudar esse modelo? **Sim.** Verificado no sandbox com duas contas **independentes**, nenhuma subconta da outra:
+
+- cobrança de R$ 100 criada na conta "locadora", com a chave dela, com `split: [{ walletId: <carteira de outra conta>, percentualValue: 5 }]` → aceita (200);
+- pagamento simulado → split `DONE` em ~3 s, `totalValue 4.95` (5% do `netValue` 99,01), e o saldo da carteira de destino subiu exatamente 4,95.
+
+A doc do Asaas descreve o mesmo caso ("João cria a cobrança em sua própria conta… o Split informa o `walletId` de Marcelo"): basta o recebedor ter conta Asaas.
+
+**O que seria preciso para implementar:**
+
+1. **O GoMoto abrir uma conta Asaas própria** (PJ do GoMoto) para ter um `walletId` de recebimento. É a única relação nova com o Asaas, e não envolve subcontas.
+2. `createPixCharge` mandar o array `split` na criação (`fixedValue` com 2 casas e/ou `percentualValue` com 4 casas). A carteira do GoMoto viria de env, nunca da locadora.
+3. **Razão da locadora:** hoje o GoMoto lança o valor BRUTO em `caixa_e_bancos`. Com split, parte do dinheiro nunca entra na conta da locadora, e o repasse precisa virar uma perna de despesa ("taxa da plataforma"). Senão o caixa do GoMoto diverge do extrato do Asaas.
+4. **Webhooks novos:** `PAYMENT_SPLIT_DONE`, `PAYMENT_SPLIT_CANCELLED`, `PAYMENT_SPLIT_DIVERGENCE_BLOCK` / `_FINISHED`.
+
+**Regras do Asaas que afetam o desenho:**
+
+- O split é calculado sobre o **`netValue`** (depois da tarifa do Asaas), não sobre o valor cobrado do cliente. Com o encargo embutido no `cobv`, o percentual também incide sobre multa e juros.
+- Estornar a cobrança **estorna o split junto**.
+- Split maior que o líquido **bloqueia o valor por 2 dias úteis** para ajuste e, sem correção, cancela o split.
+- Remover e restaurar a cobrança **apaga o split** (é preciso reconfigurar).
+- A carteira de destino não pode ser a da própria conta que cobra.
+
+**⚠ Não verificado (só em produção):** a doc cita a lista de *"carteiras autorizadas a receber split fora do arranjo"* (`WALLET_REMOVED_FROM_OUTSIDE_ARRANGEMENT_ALLOW_LIST`), sem explicar quem entra nela. Pode haver uma exigência regulatória ou comercial do Asaas para uma carteira receber split de contas que não são subcontas dela. O sandbox não impôs nada. **Confirmar com o Asaas antes de implementar.**
+
 ## Ainda a confirmar (⚠)
 
 1. ~~Entrega feita pelo próprio Asaas~~ — confirmada em produção (acima).
