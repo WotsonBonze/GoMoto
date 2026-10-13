@@ -4,6 +4,7 @@ import { createClient } from '@/lib/supabase/server'
 import { getCurrentTenantId } from '@/lib/auth/tenant'
 import {
   VEHICLE_STATUS_LABELS,
+  VEHICLE_TYPE_LABELS,
   VEHICLE_PHOTO_SLOT_LABELS,
   ACQUISITION_TYPE_LABELS,
   type VehiclePhotoSlot,
@@ -16,6 +17,7 @@ import { getSelectableStatuses } from '@gomoto/core'
 import { formatCurrency } from '@/lib/utils'
 import VehicleStatusActions from './_components/VehicleStatusActions'
 import VehiclePhotoGallery from './_components/VehiclePhotoGallery'
+import { VEHICLE_TRACKER_ENABLED } from '@/lib/vehicles/features'
 
 const INSPECTION_KIND_LABEL: Record<string, string> = {
   checkin: 'Check-in',
@@ -201,6 +203,7 @@ export default async function VehicleDetailPage({
               <tbody>
                 {[
                   ['Placa', moto.license_plate],
+                  ['Tipo', VEHICLE_TYPE_LABELS[moto.vehicle_type as keyof typeof VEHICLE_TYPE_LABELS] ?? null],
                   ['RENAVAM', moto.renavam ? formatRenavam(moto.renavam) : null],
                   ['Chassi', moto.chassis],
                   ['Marca', moto.make],
@@ -209,7 +212,7 @@ export default async function VehicleDetailPage({
                   ['Cor', moto.color],
                   ['Combustível', moto.fuel],
                   ['Cilindrada', moto.engine_capacity],
-                  ['KM de entrada', moto.km_entry != null ? moto.km_entry.toLocaleString('pt-BR') : '—'],
+                  ['KM de entrada', moto.km_entry != null ? moto.km_entry.toLocaleString('pt-BR') : 'Não informado (dá para informar na edição)'],
                   ['KM atual', moto.km_current != null ? moto.km_current.toLocaleString('pt-BR') : '—'],
                   ['Observações', moto.observations],
                 ].map(([label, value]) => (
@@ -271,30 +274,32 @@ export default async function VehicleDetailPage({
           </div>
         </section>
 
-        {/* Rastreador */}
-        <section>
-          <h2 className="text-[14px] font-bold text-primary mb-3">Rastreador GPS</h2>
-          <div className="bg-surface rounded-xl overflow-hidden">
-            {moto.has_tracker ? (
-              <table className="w-full text-[13px]">
-                <tbody>
-                  {[
-                    ['Marca', moto.tracker_brand],
-                    ['Modelo', moto.tracker_model],
-                    ['IMEI', moto.tracker_imei ? formatIMEI(moto.tracker_imei) : null],
-                  ].map(([label, value]) => (
-                    <tr key={label as string} className="border-b border-divider last:border-0">
-                      <td className="h-9 px-4 text-fg-mute w-48">{label}</td>
-                      <td className="h-9 px-4 text-fg font-mono">{value || '—'}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            ) : (
-              <p className="h-9 px-4 flex items-center text-[13px] text-fg-mute">Sem rastreador cadastrado</p>
-            )}
-          </div>
-        </section>
+        {/* Rastreador — escondido até existir a integração (lib/vehicles/features) */}
+        {VEHICLE_TRACKER_ENABLED && (
+          <section>
+            <h2 className="text-[14px] font-bold text-primary mb-3">Rastreador GPS</h2>
+            <div className="bg-surface rounded-xl overflow-hidden">
+              {moto.has_tracker ? (
+                <table className="w-full text-[13px]">
+                  <tbody>
+                    {[
+                      ['Marca', moto.tracker_brand],
+                      ['Modelo', moto.tracker_model],
+                      ['IMEI', moto.tracker_imei ? formatIMEI(moto.tracker_imei) : null],
+                    ].map(([label, value]) => (
+                      <tr key={label as string} className="border-b border-divider last:border-0">
+                        <td className="h-9 px-4 text-fg-mute w-48">{label}</td>
+                        <td className="h-9 px-4 text-fg font-mono">{value || '—'}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              ) : (
+                <p className="h-9 px-4 flex items-center text-[13px] text-fg-mute">Sem rastreador cadastrado</p>
+              )}
+            </div>
+          </section>
+        )}
 
         {/* Seguro */}
         <section>

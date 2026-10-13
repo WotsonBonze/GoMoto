@@ -6,6 +6,10 @@ const base = {
   renavam: '12345678901',
   make: 'Honda',
   model: 'CG 160',
+  vehicle_type: 'motorcycle',
+  year_manufacture: '2025',
+  year_model: '2026',
+  color: 'PRETA',
 }
 
 describe('VehicleSchema — IMEI', () => {
@@ -67,10 +71,37 @@ describe('VehicleSchema — campos obrigatórios', () => {
     expect(result.success).toBe(false)
   })
 
-  it('rejeita sem renavam', () => {
+  it.each(['vehicle_type', 'year_manufacture', 'year_model', 'color'] as const)('rejeita sem %s', (key) => {
+    const { [key]: _, ...rest } = base
+    expect(VehicleSchema.safeParse(rest).success).toBe(false)
+  })
+
+  it('aceita sem renavam e sem chassi', () => {
     const { renavam: _, ...rest } = base
-    const result = VehicleSchema.safeParse(rest)
+    expect(VehicleSchema.safeParse(rest).success).toBe(true)
+  })
+
+  it('grava renavam e chassi vazios como null (índice único por tenant)', () => {
+    const result = VehicleSchema.safeParse({ ...base, renavam: '', chassis: '  ' })
+    expect(result.success).toBe(true)
+    if (result.success) {
+      expect(result.data.renavam).toBeNull()
+      expect(result.data.chassis).toBeNull()
+    }
+  })
+
+  it('rejeita ano com formato inválido', () => {
+    expect(VehicleSchema.safeParse({ ...base, year_manufacture: '25' }).success).toBe(false)
+  })
+
+  it('rejeita ano modelo incoerente com a fabricação', () => {
+    const result = VehicleSchema.safeParse({ ...base, year_manufacture: '2025', year_model: '2023' })
     expect(result.success).toBe(false)
+    if (!result.success) expect(result.error.issues[0].path).toEqual(['year_model'])
+  })
+
+  it('rejeita tipo de veículo desconhecido', () => {
+    expect(VehicleSchema.safeParse({ ...base, vehicle_type: 'truck' }).success).toBe(false)
   })
 
   it('rejeita sem make', () => {

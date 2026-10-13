@@ -52,8 +52,11 @@ export interface Vehicle {
   year_manufacture: string;
   year_model?: string;
   color: string;
-  renavam: string;
-  chassis: string;
+  /** moto ou carro — ver `VEHICLE_TYPE_LABELS` */
+  vehicle_type: 'motorcycle' | 'car';
+  /** opcional desde o cadastro simplificado */
+  renavam: string | null;
+  chassis: string | null;
   fuel?: string;
   engine_capacity?: string;
   previous_owner?: string;

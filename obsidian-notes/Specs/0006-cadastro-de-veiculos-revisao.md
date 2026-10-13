@@ -1079,7 +1079,7 @@ SELECT
 | RN-007 | Histórico imutável | §4.3 (sem política UPDATE/DELETE), §6.2 | N/A — garantido por ausência de políticas RLS UPDATE/DELETE |
 | RN-008 | Criação gera 1ª entrada no histórico (previousStatus=null) | §3.2, §4.6 | E2E: `motos.spec.ts::criação gera histórico com status anterior vazio` |
 | RN-009 | Placa única por tenant | §4.2.3 (UNIQUE constraint), §5.1 | E2E: `motos.spec.ts::placa duplicada exibe erro inline` |
-| RN-010 | KM de entrada imutável | §4.2.4, §5.2 | E2E: `motos.spec.ts::km_entry ausente no formulário de edição` |
+| RN-010 | KM de entrada imutável — **revisada 2026-10-13: gravado uma vez só** (vazio → valor permitido na edição; troca/remoção proibidas, trigger `vehicles_km_entry_guard`) | §4.2.4, §5.2 | E2E: `motos.spec.ts::km_entry ausente no formulário de edição` |
 | RN-011 | Dono anterior só quando aquisição ≠ zero_km | §3.2, §4.8 | E2E: `motos.spec.ts::zero_km oculta campos de dono anterior` |
 | RN-012 | Máximo 1 rastreador por vez; novo substitui | §4.2.4 (colunas únicas em motorcycles) | N/A — garantido por estrutura: 1 set de colunas scalar por row |
 | RN-013 | Cada slot comporta 1 foto; upload substitui | §4.4 (UNIQUE INDEX `(motorcycle_id, slot)`), §5.2 | E2E: `motos.spec.ts::nova imagem substitui anterior no slot` |

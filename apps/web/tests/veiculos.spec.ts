@@ -39,14 +39,19 @@ test.describe('Veículos — CRUD', () => {
     await page.waitForURL('**/veiculos/novo', { timeout: 30_000 })
     await waitForPageLoad(page)
 
+    // Cadastro simplificado: o Essencial fica à vista; o resto, recolhido.
     await page.getByLabel('Placa *').fill(PLACA)
-    // RENAVAM é único por tenant: valor fixo colide com execução anterior.
-    await page.getByLabel(/RENAVAM/i).fill(Date.now().toString().slice(-11).padStart(11, '1'))
+    await page.getByRole('radio', { name: 'Moto' }).click()
     await page.getByLabel(/^Marca/i).fill('HONDA')
     await page.getByLabel(/^Modelo/i).fill('CG 160 Fan')
     await page.getByLabel(/^Ano fabrica/i).fill('2024')
     await page.getByLabel(/^Ano modelo/i).fill('2024')
     await page.getByLabel(/^Cor/i).fill('VERMELHO')
+
+    // RENAVAM e chassi são opcionais e moram em "Identificação complementar".
+    await page.getByRole('button', { name: /identificação complementar/i }).click()
+    // RENAVAM é único por tenant: valor fixo colide com execução anterior.
+    await page.getByLabel(/RENAVAM/i).fill(Date.now().toString().slice(-11).padStart(11, '1'))
     await page.getByLabel(/^Chassi/i).fill(`9C2${Date.now()}`.padEnd(17, '0').slice(0, 17))
 
     // O rótulo do submit muda entre criar e editar ("Cadastrar" / "Salvar").
@@ -55,8 +60,9 @@ test.describe('Veículos — CRUD', () => {
     await waitForPageLoad(page)
 
     const { data: criado } = await getSupabaseAdmin()
-      .from('vehicles').select('id, model').eq('license_plate', PLACA).maybeSingle()
+      .from('vehicles').select('id, model, vehicle_type').eq('license_plate', PLACA).maybeSingle()
     expect(criado, 'veículo não foi criado').not.toBeNull()
+    expect((criado as { vehicle_type: string }).vehicle_type).toBe('motorcycle')
     const vehicleId = (criado as { id: string }).id
 
     // ── EDITAR ───────────────────────────────────────────────────────────────
@@ -182,6 +188,62 @@ test.describe('Veículo locado — edição e documentação anual', () => {
       expect(Number(r.exempt_count)).toBe(1)
       expect(Number(r.unbilled_count), 'isento virou "custo não lançado"').toBe(0)
       expect(r.is_compliant, 'veículo isento não pode ser reprovado').toBe(true)
+    } finally {
+      await admin.from('vehicle_obligations').delete().eq('vehicle_id', vehicleId)
+      await admin.from('vehicles').delete().eq('id', vehicleId)
+    }
+  })
+})
+
+test.describe('KM de entrada — gravado uma vez', () => {
+  test.slow()
+
+  /**
+   * Com o cadastro simplificado o KM de entrada virou opcional. Antes, deixar
+   * em branco era definitivo: a edição não mostrava o campo e a action
+   * descartava o valor. Agora ele pode ser informado depois — uma vez — e o
+   * KM atual sobe junto (a locação usa km_current como KM inicial).
+   */
+  test('veículo sem KM recebe na edição, e depois o valor trava', async ({ page }) => {
+    const admin = getSupabaseAdmin()
+    const placa = `KME${Date.now().toString().slice(-4)}`.slice(0, 7).toUpperCase()
+    const { data: tenant } = await admin.from('tenants').select('id').limit(1).single()
+
+    const { data: criado, error } = await admin
+      .from('vehicles')
+      .insert({
+        tenant_id: (tenant as { id: string }).id, license_plate: placa, make: 'TEST', model: 'KM E2E',
+        vehicle_type: 'motorcycle', year_manufacture: '2024', year_model: '2024', color: 'PRETO',
+        acquisition_type: 'used', status: 'available',
+      })
+      .select('id')
+      .single()
+    if (error) throw new Error(`setup: ${error.message}`)
+    const vehicleId = (criado as { id: string }).id
+
+    try {
+      await page.goto(`/veiculos/${vehicleId}/editar`)
+      await waitForPageLoad(page)
+      await page.getByLabel('KM de entrada').fill('12000')
+      await page.getByRole('button', { name: /^salvar$/i }).click()
+      await page.waitForURL(`**/veiculos/${vehicleId}`, { timeout: 20_000 })
+
+      const { data: depois } = await admin
+        .from('vehicles').select('km_entry, km_current').eq('id', vehicleId).single()
+      const v = depois as { km_entry: number; km_current: number }
+      expect(v.km_entry, 'KM de entrada não gravou na edição').toBe(12000)
+      expect(v.km_current, 'KM atual não partiu do KM de entrada').toBe(12000)
+
+      // Preenchido, o campo some da edição…
+      await page.goto(`/veiculos/${vehicleId}/editar`)
+      await waitForPageLoad(page)
+      await expect(page.getByLabel(/^Cor/)).toBeVisible()
+      await expect(page.getByLabel('KM de entrada')).toHaveCount(0)
+
+      // …e o banco recusa a troca mesmo por fora da tela.
+      const { error: troca } = await admin
+        .from('vehicles').update({ km_entry: 13000 }).eq('id', vehicleId)
+      expect(troca?.message ?? '').toContain('não pode ser alterado')
     } finally {
       await admin.from('vehicle_obligations').delete().eq('vehicle_id', vehicleId)
       await admin.from('vehicles').delete().eq('id', vehicleId)
