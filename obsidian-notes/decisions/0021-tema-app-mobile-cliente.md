@@ -4,7 +4,7 @@
 - **Data:** 2026-08-05
 - **Autores:** Stakeholder + agente IA
 - **Substitui:** —
-- **Substituída por:** —
+- **Substituída por:** [[decisions/0040-identidade-visual-app-mobile-v2|ADR 0040]] (só a paleta, §1 — o mecanismo de tema segue valendo)
 - **Estende:** [[decisions/0019-sistema-multi-tema-web|ADR 0019]] §"Quando reavaliar" — previa reabrir quando `apps/mobile` ganhasse suporte a tema.
 
 ## Contexto
