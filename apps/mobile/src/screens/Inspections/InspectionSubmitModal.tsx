@@ -13,11 +13,13 @@ import {
   TextInput,
   View,
 } from 'react-native'
+import { SafeAreaView } from 'react-native-safe-area-context'
 import * as ImagePicker from 'expo-image-picker'
 import { useSupabaseContext, useRequiredTenantId, usePeriodicInspectionProfileForRental } from '@gomoto/data'
 import type { InspectionScheduleWithStatus } from '@gomoto/core'
 import { supabase } from '../../lib/supabase'
 import { useTheme, type ThemeTokens } from '../../theme'
+import { Button, Card, EmptyState, Icon, ModalHeader, SectionHeader, radius } from '../../components/ui'
 
 type AnswerDraft = { status: 'ok' | 'not_ok' | null; note: string }
 type PhotoDraft = { uri: string; storage_path: string | null; uploading: boolean }
@@ -151,173 +153,220 @@ export function InspectionSubmitModal({ schedule, onClose, onSubmitted }: Props)
 
   if (!schedule) return null
 
+  const checklist = profileQuery.data?.checklist_items ?? []
+  const photoItems = profileQuery.data?.photo_items ?? []
+  const answered = checklist.filter((item) => answers[item.id]?.status).length
+  const requiredPhotos = photoItems.filter((item) => item.is_required)
+  const sentRequired = requiredPhotos.filter((item) => photos[item.id]?.storage_path).length
+  const totalSteps = checklist.length + requiredPhotos.length
+  const doneSteps = answered + sentRequired
+  const progress = totalSteps > 0 ? doneSteps / totalSteps : 0
+
+  function setStatus(itemId: string, status: 'ok' | 'not_ok') {
+    setAnswers((prev) => ({ ...prev, [itemId]: { ...prev[itemId], status } }))
+  }
+
   return (
     <Modal visible animationType="slide" presentationStyle="pageSheet" onRequestClose={onClose}>
-      <KeyboardAvoidingView style={styles.flex} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
-        <View style={styles.header}>
-          <Text style={styles.title}>Vistoria periódica</Text>
-          <Pressable onPress={onClose} disabled={submitting} hitSlop={12}>
-            <Text style={styles.closeText}>Fechar</Text>
-          </Pressable>
-        </View>
+      <SafeAreaView style={styles.flex} edges={['top', 'bottom']}>
+        <KeyboardAvoidingView style={styles.flex} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+          <ModalHeader
+            title="Vistoria periódica"
+            subtitle={`Prazo: ${schedule.target_date.split('-').reverse().join('/')}`}
+            onClose={onClose}
+            disabled={submitting}
+          />
 
-        {profileQuery.isLoading ? (
-          <View style={styles.centered}>
-            <ActivityIndicator color={theme.primary} size="large" />
-          </View>
-        ) : !profileQuery.data ? (
-          <View style={styles.centered}>
-            <Text style={styles.emptyText}>Não foi possível carregar o checklist desta vistoria.</Text>
-          </View>
-        ) : (
-          <>
-            <ScrollView style={styles.body} contentContainerStyle={styles.bodyContent} keyboardShouldPersistTaps="handled">
-              <Text style={styles.sectionLabel}>Checklist</Text>
-              {(profileQuery.data.checklist_items ?? []).map((item) => {
-                const draft = answers[item.id]
-                return (
-                  <View key={item.id} style={styles.checklistCard}>
-                    <Text style={styles.checklistName}>{item.name}</Text>
-                    <View style={styles.checklistBtnRow}>
-                      <Pressable
-                        style={[styles.checklistBtn, draft?.status === 'ok' && styles.checklistBtnOk]}
-                        onPress={() => setAnswers((prev) => ({ ...prev, [item.id]: { ...prev[item.id], status: 'ok' } }))}
-                      >
-                        <Text style={[styles.checklistBtnText, draft?.status === 'ok' && styles.checklistBtnTextOk]}>OK</Text>
-                      </Pressable>
-                      <Pressable
-                        style={[styles.checklistBtn, draft?.status === 'not_ok' && styles.checklistBtnNotOk]}
-                        onPress={() => setAnswers((prev) => ({ ...prev, [item.id]: { ...prev[item.id], status: 'not_ok' } }))}
-                      >
-                        <Text style={[styles.checklistBtnText, draft?.status === 'not_ok' && styles.checklistBtnTextNotOk]}>Não OK</Text>
-                      </Pressable>
-                    </View>
-                    <TextInput
-                      value={draft?.note ?? ''}
-                      onChangeText={(v) => setAnswers((prev) => ({ ...prev, [item.id]: { ...prev[item.id], note: v } }))}
-                      placeholder="Observação (opcional)"
-                      placeholderTextColor={theme.textMute}
-                      style={styles.noteInput}
-                    />
-                  </View>
-                )
-              })}
+          {profileQuery.isLoading ? (
+            <View style={styles.centered}>
+              <ActivityIndicator color={theme.primary} size="large" />
+            </View>
+          ) : !profileQuery.data ? (
+            <EmptyState
+              icon="alert-circle-outline"
+              tone="danger"
+              title="Checklist indisponível"
+              text="Não foi possível carregar o checklist desta vistoria. Tente novamente em instantes."
+            />
+          ) : (
+            <>
+              {/* Progresso: o que falta para poder enviar */}
+              <View style={styles.progressWrap}>
+                <View style={styles.progressTrack}>
+                  <View style={[styles.progressFill, { width: `${Math.round(progress * 100)}%` }]} />
+                </View>
+                <Text style={styles.progressText}>
+                  {doneSteps} de {totalSteps} obrigatórios concluídos
+                </Text>
+              </View>
 
-              <Text style={styles.sectionLabel}>Fotos</Text>
-              <View style={styles.photoGrid}>
-                {(profileQuery.data.photo_items ?? []).map((item) => {
-                  const draft = photos[item.id]
+              <ScrollView style={styles.body} contentContainerStyle={styles.bodyContent} keyboardShouldPersistTaps="handled">
+                <SectionHeader title="Checklist" trailing={`${answered}/${checklist.length}`} />
+                {checklist.map((item) => {
+                  const draft = answers[item.id]
+                  const ok = draft?.status === 'ok'
+                  const notOk = draft?.status === 'not_ok'
                   return (
-                    <Pressable key={item.id} style={styles.photoSlot} onPress={() => pickPhoto(item.id)}>
-                      {draft?.uploading ? (
-                        <ActivityIndicator color={theme.primary} />
-                      ) : draft?.uri ? (
-                        <Image source={{ uri: draft.uri }} style={styles.photoThumb} />
-                      ) : (
-                        <Text style={styles.photoSlotText}>Toque para fotografar</Text>
-                      )}
-                      <Text style={styles.photoSlotLabel} numberOfLines={1}>
-                        {item.label} {item.is_required ? '*' : ''}
-                      </Text>
-                    </Pressable>
+                    <Card key={item.id} style={notOk ? { borderColor: theme.danger } : undefined}>
+                      <Text style={styles.checklistName}>{item.name}</Text>
+                      <View style={styles.choiceRow}>
+                        <Pressable
+                          style={[styles.choice, ok && { backgroundColor: theme.successBg, borderColor: theme.success }]}
+                          onPress={() => setStatus(item.id, 'ok')}
+                          accessibilityRole="radio"
+                          accessibilityState={{ checked: ok }}
+                        >
+                          <Icon name={ok ? 'checkmark-circle' : 'checkmark-circle-outline'} size={18} color={ok ? theme.success : theme.textSoft} />
+                          <Text style={[styles.choiceText, ok && { color: theme.success }]}>Tudo certo</Text>
+                        </Pressable>
+                        <Pressable
+                          style={[styles.choice, notOk && { backgroundColor: theme.dangerBg, borderColor: theme.danger }]}
+                          onPress={() => setStatus(item.id, 'not_ok')}
+                          accessibilityRole="radio"
+                          accessibilityState={{ checked: notOk }}
+                        >
+                          <Icon name={notOk ? 'close-circle' : 'close-circle-outline'} size={18} color={notOk ? theme.danger : theme.textSoft} />
+                          <Text style={[styles.choiceText, notOk && { color: theme.danger }]}>Com problema</Text>
+                        </Pressable>
+                      </View>
+                      <TextInput
+                        value={draft?.note ?? ''}
+                        onChangeText={(v) => setAnswers((prev) => ({ ...prev, [item.id]: { ...prev[item.id], note: v } }))}
+                        placeholder={notOk ? 'Descreva o problema' : 'Observação (opcional)'}
+                        placeholderTextColor={theme.textMute}
+                        style={styles.noteInput}
+                      />
+                    </Card>
                   )
                 })}
+
+                <View style={styles.photosHeader}>
+                  <SectionHeader title="Fotos" trailing={`${sentRequired}/${requiredPhotos.length} obrigatórias`} />
+                </View>
+                <View style={styles.photoGrid}>
+                  {photoItems.map((item) => {
+                    const draft = photos[item.id]
+                    const done = !!draft?.storage_path
+                    return (
+                      <Pressable
+                        key={item.id}
+                        style={({ pressed }) => [
+                          styles.photoSlot,
+                          done && styles.photoSlotDone,
+                          pressed && styles.pressed,
+                        ]}
+                        onPress={() => pickPhoto(item.id)}
+                        accessibilityRole="button"
+                        accessibilityLabel={`Foto: ${item.label}`}
+                      >
+                        {draft?.uploading ? (
+                          <ActivityIndicator color={theme.primary} />
+                        ) : draft?.uri ? (
+                          <>
+                            <Image source={{ uri: draft.uri }} style={styles.photoThumb} />
+                            {done ? (
+                              <View style={styles.photoCheck}>
+                                <Icon name="checkmark" size={12} color="#FFFFFF" />
+                              </View>
+                            ) : null}
+                          </>
+                        ) : (
+                          <Icon name="camera-outline" size={26} color={theme.primary} />
+                        )}
+                        <Text style={styles.photoSlotLabel} numberOfLines={2}>
+                          {item.label}
+                          {item.is_required ? <Text style={{ color: theme.danger }}> *</Text> : null}
+                        </Text>
+                      </Pressable>
+                    )
+                  })}
+                </View>
+              </ScrollView>
+              <View style={styles.footer}>
+                <Button
+                  label="Enviar vistoria"
+                  icon="paper-plane-outline"
+                  onPress={handleSubmit}
+                  loading={submitting}
+                />
               </View>
-            </ScrollView>
-            <View style={styles.footer}>
-              <Pressable
-                style={({ pressed }) => [styles.submitBtn, pressed && styles.submitBtnPressed, submitting && styles.submitBtnDisabled]}
-                onPress={handleSubmit}
-                disabled={submitting}
-              >
-                {submitting ? <ActivityIndicator color={theme.primaryContrast} /> : <Text style={styles.submitText}>Enviar vistoria</Text>}
-              </Pressable>
-            </View>
-          </>
-        )}
-      </KeyboardAvoidingView>
+            </>
+          )}
+        </KeyboardAvoidingView>
+      </SafeAreaView>
     </Modal>
   )
 }
 
 const createStyles = (theme: ThemeTokens) => StyleSheet.create({
   flex: { flex: 1, backgroundColor: theme.bg },
-  header: {
-    paddingHorizontal: 20,
-    paddingTop: 18,
-    paddingBottom: 14,
+  centered: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: 20 },
+  pressed: { opacity: 0.8 },
+  progressWrap: { paddingHorizontal: 20, paddingBottom: 12, gap: 6 },
+  progressTrack: { height: 6, borderRadius: 3, backgroundColor: theme.surfaceAlt, overflow: 'hidden' },
+  progressFill: { height: '100%', borderRadius: 3, backgroundColor: theme.primary },
+  progressText: { color: theme.textSoft, fontSize: 12.5 },
+  body: { flex: 1 },
+  bodyContent: { padding: 16, paddingTop: 4, paddingBottom: 32, gap: 12 },
+  checklistName: { color: theme.text, fontSize: 15, fontWeight: '600' },
+  choiceRow: { flexDirection: 'row', gap: 8, marginTop: 12 },
+  choice: {
+    flex: 1,
     flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'space-between',
-    borderBottomColor: theme.surfaceAlt,
-    borderBottomWidth: 1,
-  },
-  title: { color: theme.text, fontSize: 18, fontWeight: '700' },
-  closeText: { color: theme.primary, fontSize: 14, fontWeight: '600' },
-  centered: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: 20 },
-  emptyText: { color: theme.textMute, fontSize: 13, textAlign: 'center' },
-  body: { flex: 1 },
-  bodyContent: { padding: 20, paddingBottom: 40, gap: 10 },
-  sectionLabel: {
-    color: theme.textMute,
-    fontSize: 11,
-    fontWeight: '700',
-    textTransform: 'uppercase',
-    letterSpacing: 0.5,
-    marginTop: 10,
-    marginBottom: 4,
-  },
-  checklistCard: {
-    backgroundColor: theme.surface,
-    borderColor: theme.surfaceAlt,
-    borderWidth: 1,
-    borderRadius: 12,
-    padding: 12,
-    gap: 8,
-  },
-  checklistName: { color: theme.text, fontSize: 14, fontWeight: '600' },
-  checklistBtnRow: { flexDirection: 'row', gap: 8 },
-  checklistBtn: {
-    paddingHorizontal: 16,
-    paddingVertical: 8,
-    borderRadius: 999,
-    backgroundColor: theme.surfaceAlt,
-  },
-  checklistBtnOk: { backgroundColor: theme.success },
-  checklistBtnNotOk: { backgroundColor: theme.danger },
-  checklistBtnText: { color: theme.textMute, fontSize: 12, fontWeight: '700' },
-  checklistBtnTextOk: { color: 'white' },
-  checklistBtnTextNotOk: { color: 'white' },
-  noteInput: {
-    backgroundColor: theme.surfaceAlt,
+    justifyContent: 'center',
+    gap: 6,
+    minHeight: 44,
+    borderRadius: radius.md,
+    borderWidth: 1.5,
     borderColor: theme.border,
-    borderWidth: 1,
-    borderRadius: 8,
-    paddingHorizontal: 10,
-    paddingVertical: 8,
-    color: theme.text,
-    fontSize: 12,
+    backgroundColor: theme.surface,
   },
+  choiceText: { color: theme.textSoft, fontSize: 14, fontWeight: '600' },
+  noteInput: {
+    marginTop: 10,
+    backgroundColor: theme.surfaceAlt,
+    borderRadius: radius.sm + 2,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    color: theme.text,
+    fontSize: 14,
+  },
+  photosHeader: { marginTop: 12 },
   photoGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 10 },
   photoSlot: {
     width: '31%',
-    aspectRatio: 1,
+    aspectRatio: 0.9,
     backgroundColor: theme.surface,
     borderColor: theme.border,
-    borderWidth: 1,
+    borderWidth: 1.5,
     borderStyle: 'dashed',
-    borderRadius: 10,
+    borderRadius: radius.md,
     alignItems: 'center',
     justifyContent: 'center',
     padding: 6,
-    gap: 4,
+    gap: 6,
   },
-  photoSlotText: { color: theme.textMute, fontSize: 10, textAlign: 'center' },
-  photoSlotLabel: { color: theme.textMute, fontSize: 10, textAlign: 'center' },
-  photoThumb: { width: '100%', height: '70%', borderRadius: 6 },
-  footer: { padding: 20, borderTopColor: theme.surfaceAlt, borderTopWidth: 1 },
-  submitBtn: { backgroundColor: theme.primary, paddingVertical: 14, borderRadius: 10, alignItems: 'center' },
-  submitBtnPressed: { opacity: 0.85 },
-  submitBtnDisabled: { opacity: 0.5 },
-  submitText: { color: theme.primaryContrast, fontSize: 14, fontWeight: '700' },
+  photoSlotDone: { borderStyle: 'solid', borderColor: theme.success },
+  photoSlotLabel: { color: theme.textSoft, fontSize: 11.5, textAlign: 'center', fontWeight: '500' },
+  photoThumb: { width: '100%', height: '62%', borderRadius: radius.sm },
+  photoCheck: {
+    position: 'absolute',
+    top: 8,
+    right: 8,
+    width: 20,
+    height: 20,
+    borderRadius: 10,
+    backgroundColor: theme.success,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  footer: {
+    paddingHorizontal: 16,
+    paddingTop: 12,
+    paddingBottom: 8,
+    borderTopColor: theme.border,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    backgroundColor: theme.surface,
+  },
 })

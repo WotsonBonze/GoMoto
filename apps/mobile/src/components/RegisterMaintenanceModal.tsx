@@ -1,6 +1,5 @@
 import { useMemo, useState } from 'react'
 import {
-  ActivityIndicator,
   Alert,
   Image,
   KeyboardAvoidingView,
@@ -10,13 +9,14 @@ import {
   ScrollView,
   StyleSheet,
   Text,
-  TextInput,
   View,
 } from 'react-native'
+import { SafeAreaView } from 'react-native-safe-area-context'
 import * as ImagePicker from 'expo-image-picker'
 import { useCreateMaintenanceRecord } from '@gomoto/data'
 import type { Maintenance } from '@gomoto/core'
 import { useTheme, type ThemeTokens } from '../theme'
+import { Button, Icon, IconCircle, ModalHeader, Notice, TextField, radius } from './ui'
 
 type PickedPhoto = {
   uri: string
@@ -136,138 +136,161 @@ export function RegisterMaintenanceModal({ visible, onClose, customerId, mainten
     }
   }
 
+  const predicted = maintenance?.predicted_km
+    ? `KM previsto: ${maintenance.predicted_km.toLocaleString('pt-BR')}`
+    : undefined
+
   return (
     <Modal visible={visible} animationType="slide" presentationStyle="pageSheet" onRequestClose={handleClose}>
-      <KeyboardAvoidingView
-        style={styles.flex}
-        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-      >
-        <View style={styles.header}>
-          <Text style={styles.title}>Registrar conclusão</Text>
-          <Pressable onPress={handleClose} disabled={submitting} hitSlop={12}>
-            <Text style={styles.closeText}>Fechar</Text>
-          </Pressable>
-        </View>
-        <ScrollView style={styles.body} contentContainerStyle={styles.bodyContent} keyboardShouldPersistTaps="handled">
-          {maintenance ? (
-            <View style={styles.summary}>
-              <Text style={styles.summaryTitle}>{maintenance.description || maintenance.type}</Text>
-              <Text style={styles.summaryMeta}>
-                {maintenance.predicted_km
-                  ? `KM previsto: ${maintenance.predicted_km.toLocaleString('pt-BR')}`
-                  : 'Sem KM previsto'}
-              </Text>
-            </View>
-          ) : null}
-
-          <FieldLabel text="KM atual da moto *" styles={styles} />
-          <TextInput
-            value={actualKm}
-            onChangeText={setActualKm}
-            keyboardType="numeric"
-            placeholder="Ex.: 45200"
-            placeholderTextColor={theme.textMute}
-            style={styles.input}
-          />
-
-          <FieldLabel text="Oficina (opcional)" styles={styles} />
-          <TextInput
-            value={workshop}
-            onChangeText={setWorkshop}
-            placeholder="Nome da oficina"
-            placeholderTextColor={theme.textMute}
-            style={styles.input}
-          />
-
-          <FieldLabel text="Custo total em R$ (opcional)" styles={styles} />
-          <TextInput
-            value={cost}
-            onChangeText={setCost}
-            keyboardType="decimal-pad"
-            placeholder="Ex.: 250,00"
-            placeholderTextColor={theme.textMute}
-            style={styles.input}
-          />
-
-          <FieldLabel text="Observações (opcional)" styles={styles} />
-          <TextInput
-            value={notes}
-            onChangeText={setNotes}
-            multiline
-            numberOfLines={3}
-            placeholder="Peças trocadas, observações da oficina..."
-            placeholderTextColor={theme.textMute}
-            style={[styles.input, styles.inputMultiline]}
-          />
-
-          <FieldLabel text="Foto do hodômetro *" styles={styles} />
-          <PhotoSlot
-            photo={odometerPhoto}
-            onPress={() => pickPhoto('odometer')}
-            onClear={() => setOdometerPhoto(null)}
-            styles={styles}
-          />
-
-          <FieldLabel text="Foto da nota fiscal (opcional)" styles={styles} />
-          <PhotoSlot
-            photo={invoicePhoto}
-            onPress={() => pickPhoto('invoice')}
-            onClear={() => setInvoicePhoto(null)}
-            styles={styles}
-          />
-        </ScrollView>
-        <View style={styles.footer}>
-          <Pressable
-            style={({ pressed }) => [styles.submitBtn, pressed && styles.submitBtnPressed, submitting && styles.submitBtnDisabled]}
-            onPress={handleSubmit}
+      <SafeAreaView style={styles.flex} edges={['top', 'bottom']}>
+        <KeyboardAvoidingView
+          style={styles.flex}
+          behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+        >
+          <ModalHeader
+            title="Registrar conclusão"
+            subtitle={maintenance ? maintenance.description || maintenance.type : undefined}
+            onClose={handleClose}
             disabled={submitting}
-          >
-            {submitting ? (
-              <ActivityIndicator color={theme.primaryContrast} />
-            ) : (
-              <Text style={styles.submitText}>Enviar pra aprovação</Text>
-            )}
-          </Pressable>
-        </View>
-      </KeyboardAvoidingView>
+          />
+          <ScrollView style={styles.body} contentContainerStyle={styles.bodyContent} keyboardShouldPersistTaps="handled">
+            <Notice
+              tone="info"
+              text="Informe os dados do serviço. A locadora revisa e confirma — você acompanha pelo histórico."
+            />
+
+            <TextField
+              label="KM atual da moto"
+              icon="speedometer-outline"
+              value={actualKm}
+              onChangeText={setActualKm}
+              keyboardType="numeric"
+              placeholder="Ex.: 45200"
+              hint={predicted}
+            />
+
+            <PhotoSlot
+              label="Foto do hodômetro"
+              hint="Foto do painel mostrando a quilometragem"
+              photo={odometerPhoto}
+              onPress={() => pickPhoto('odometer')}
+              onClear={() => setOdometerPhoto(null)}
+              styles={styles}
+              theme={theme}
+            />
+
+            <TextField
+              label="Oficina"
+              optional
+              icon="storefront-outline"
+              value={workshop}
+              onChangeText={setWorkshop}
+              placeholder="Nome da oficina"
+            />
+
+            <TextField
+              label="Custo total (R$)"
+              optional
+              icon="cash-outline"
+              value={cost}
+              onChangeText={setCost}
+              keyboardType="decimal-pad"
+              placeholder="Ex.: 250,00"
+            />
+
+            <TextField
+              label="Observações"
+              optional
+              value={notes}
+              onChangeText={setNotes}
+              multiline
+              numberOfLines={3}
+              placeholder="Peças trocadas, observações da oficina..."
+            />
+
+            <PhotoSlot
+              label="Foto da nota fiscal"
+              optional
+              hint="Comprovante do serviço"
+              photo={invoicePhoto}
+              onPress={() => pickPhoto('invoice')}
+              onClear={() => setInvoicePhoto(null)}
+              styles={styles}
+              theme={theme}
+            />
+          </ScrollView>
+          <View style={styles.footer}>
+            <Button
+              label="Enviar para aprovação"
+              icon="paper-plane-outline"
+              onPress={handleSubmit}
+              loading={submitting}
+            />
+          </View>
+        </KeyboardAvoidingView>
+      </SafeAreaView>
     </Modal>
   )
 }
 
-function FieldLabel({ text, styles }: { text: string; styles: Styles }) {
-  return <Text style={styles.label}>{text}</Text>
-}
-
 function PhotoSlot({
+  label,
+  hint,
+  optional,
   photo,
   onPress,
   onClear,
   styles,
+  theme,
 }: {
+  label: string
+  hint: string
+  optional?: boolean
   photo: PickedPhoto | null
   onPress: () => void
   onClear: () => void
   styles: Styles
+  theme: ThemeTokens
 }) {
-  if (photo) {
-    return (
-      <View style={styles.photoFilled}>
-        <Image source={{ uri: photo.uri }} style={styles.photoThumb} />
-        <View style={styles.photoActions}>
-          <Pressable onPress={onPress}>
-            <Text style={styles.photoActionText}>Trocar</Text>
-          </Pressable>
-          <Pressable onPress={onClear}>
-            <Text style={[styles.photoActionText, styles.photoRemove]}>Remover</Text>
-          </Pressable>
-        </View>
-      </View>
-    )
-  }
   return (
-    <Pressable style={styles.photoEmpty} onPress={onPress}>
-      <Text style={styles.photoEmptyText}>Toque para escolher uma foto</Text>
-    </Pressable>
+    <View style={styles.slotWrap}>
+      <Text style={styles.slotLabel}>
+        {label}
+        {optional ? <Text style={styles.slotOptional}> (opcional)</Text> : null}
+      </Text>
+      {photo ? (
+        <View style={styles.photoFilled}>
+          <Image source={{ uri: photo.uri }} style={styles.photoThumb} />
+          <View style={styles.photoInfo}>
+            <View style={styles.photoOk}>
+              <Icon name="checkmark-circle" size={16} color={theme.success} />
+              <Text style={[styles.photoOkText, { color: theme.success }]}>Foto anexada</Text>
+            </View>
+            <View style={styles.photoActions}>
+              <Pressable onPress={onPress} hitSlop={8}>
+                <Text style={styles.photoActionText}>Trocar</Text>
+              </Pressable>
+              <Pressable onPress={onClear} hitSlop={8}>
+                <Text style={[styles.photoActionText, styles.photoRemove]}>Remover</Text>
+              </Pressable>
+            </View>
+          </View>
+        </View>
+      ) : (
+        <Pressable
+          style={({ pressed }) => [styles.photoEmpty, pressed && styles.pressed]}
+          onPress={onPress}
+          accessibilityRole="button"
+          accessibilityLabel={`Adicionar ${label}`}
+        >
+          <IconCircle name="camera-outline" tone="primary" size={44} />
+          <View style={styles.photoEmptyTexts}>
+            <Text style={styles.photoEmptyTitle}>Adicionar foto</Text>
+            <Text style={styles.photoEmptyHint}>{hint}</Text>
+          </View>
+        </Pressable>
+      )}
+    </View>
   )
 }
 
@@ -282,78 +305,49 @@ function guessTypeFromUri(uri: string): string {
 
 const createStyles = (theme: ThemeTokens) => StyleSheet.create({
   flex: { flex: 1, backgroundColor: theme.bg },
-  header: {
-    paddingHorizontal: 20,
-    paddingTop: 18,
-    paddingBottom: 14,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    borderBottomColor: theme.surfaceAlt,
-    borderBottomWidth: 1,
-  },
-  title: { color: theme.text, fontSize: 18, fontWeight: '700' },
-  closeText: { color: theme.primary, fontSize: 14, fontWeight: '600' },
   body: { flex: 1 },
-  bodyContent: { padding: 20, paddingBottom: 40, gap: 6 },
-  summary: {
-    backgroundColor: theme.surface,
-    borderColor: theme.surfaceAlt,
-    borderWidth: 1,
-    borderRadius: 12,
-    padding: 14,
-    marginBottom: 16,
-  },
-  summaryTitle: { color: theme.text, fontSize: 14, fontWeight: '600' },
-  summaryMeta: { color: theme.textMute, fontSize: 12, marginTop: 4 },
-  label: { color: theme.textMute, fontSize: 12, marginTop: 14, marginBottom: 6 },
-  input: {
-    backgroundColor: theme.surface,
-    borderColor: theme.surfaceAlt,
-    borderWidth: 1,
-    borderRadius: 10,
-    paddingHorizontal: 12,
-    paddingVertical: 10,
-    color: theme.text,
-    fontSize: 14,
-  },
-  inputMultiline: { minHeight: 80, textAlignVertical: 'top' },
+  bodyContent: { padding: 16, paddingTop: 4, paddingBottom: 32, gap: 18 },
+  pressed: { opacity: 0.8 },
+  slotWrap: { gap: 6 },
+  slotLabel: { color: theme.text, fontSize: 14, fontWeight: '600' },
+  slotOptional: { color: theme.textMute, fontWeight: '400' },
   photoEmpty: {
-    backgroundColor: theme.surface,
-    borderColor: theme.surfaceAlt,
-    borderStyle: 'dashed',
-    borderWidth: 1,
-    borderRadius: 10,
-    padding: 18,
-    alignItems: 'center',
-  },
-  photoEmptyText: { color: theme.textMute, fontSize: 13 },
-  photoFilled: {
-    backgroundColor: theme.surface,
-    borderColor: theme.surfaceAlt,
-    borderWidth: 1,
-    borderRadius: 10,
-    padding: 10,
     flexDirection: 'row',
     alignItems: 'center',
     gap: 12,
+    backgroundColor: theme.surface,
+    borderColor: theme.border,
+    borderStyle: 'dashed',
+    borderWidth: 1.5,
+    borderRadius: radius.md,
+    padding: 14,
   },
-  photoThumb: { width: 72, height: 72, borderRadius: 8, backgroundColor: theme.surfaceAlt },
-  photoActions: { flex: 1, gap: 6 },
-  photoActionText: { color: theme.primary, fontSize: 13, fontWeight: '600' },
+  photoEmptyTexts: { flex: 1, gap: 2 },
+  photoEmptyTitle: { color: theme.primary, fontSize: 15, fontWeight: '600' },
+  photoEmptyHint: { color: theme.textSoft, fontSize: 13 },
+  photoFilled: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    backgroundColor: theme.surface,
+    borderColor: theme.border,
+    borderWidth: 1,
+    borderRadius: radius.md,
+    padding: 10,
+  },
+  photoThumb: { width: 64, height: 64, borderRadius: radius.sm, backgroundColor: theme.surfaceAlt },
+  photoInfo: { flex: 1, gap: 8 },
+  photoOk: { flexDirection: 'row', alignItems: 'center', gap: 6 },
+  photoOkText: { fontSize: 14, fontWeight: '600' },
+  photoActions: { flexDirection: 'row', gap: 20 },
+  photoActionText: { color: theme.primary, fontSize: 14, fontWeight: '600' },
   photoRemove: { color: theme.danger },
   footer: {
-    padding: 20,
-    borderTopColor: theme.surfaceAlt,
-    borderTopWidth: 1,
+    paddingHorizontal: 16,
+    paddingTop: 12,
+    paddingBottom: 8,
+    borderTopColor: theme.border,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    backgroundColor: theme.surface,
   },
-  submitBtn: {
-    backgroundColor: theme.primary,
-    paddingVertical: 14,
-    borderRadius: 10,
-    alignItems: 'center',
-  },
-  submitBtnPressed: { opacity: 0.85 },
-  submitBtnDisabled: { opacity: 0.5 },
-  submitText: { color: theme.primaryContrast, fontSize: 14, fontWeight: '700' },
 })
