@@ -11,17 +11,29 @@ import {
   ScrollView,
   StyleSheet,
   Text,
-  TouchableOpacity,
   View,
 } from 'react-native'
 import { SafeAreaView } from 'react-native-safe-area-context'
 import { useFocusEffect } from 'expo-router'
-import { useMyCharges, usePaymentIntentStatus } from '@gomoto/data'
+import { useChargeDetail, useMyCharges, usePaymentIntentStatus } from '@gomoto/data'
 import type { MyChargeRow } from '@gomoto/data'
-import {
-} from '@gomoto/core'
 import { supabase } from '../lib/supabase'
 import { useTheme, type ThemeTokens } from '../theme'
+import {
+  Badge,
+  Button,
+  Card,
+  EmptyState,
+  Icon,
+  ModalHeader,
+  Notice,
+  ScreenHeader,
+  SectionHeader,
+  SegmentedControl,
+  radius,
+  toneColors,
+  type Tone,
+} from '../components/ui'
 
 // ---------------------------------------------------------------------------
 // Types
@@ -66,6 +78,9 @@ type PaymentIntent = {
   is_reused: boolean
 }
 
+type Styles = ReturnType<typeof createStyles>
+type Tab = 'open' | 'paid'
+
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
@@ -74,48 +89,19 @@ type PaymentIntent = {
 const STATUS_LABEL: Record<string, string> = {
   open:        'Em aberto',
   overdue:     'Vencida',
-  paid:        'Pago',
+  paid:        'Paga',
   cancelled:   'Cancelada',
   written_off: 'Baixada',
 }
 
-function getStatusTone(theme: ThemeTokens): Record<string, { color: string; bg: string }> {
-  return {
-    open:        { color: theme.pending, bg: theme.pendingBg },
-    overdue:     { color: theme.warning, bg: theme.warningBg },
-    paid:        { color: theme.success, bg: theme.successBg },
-    cancelled:   { color: theme.textMute, bg: theme.surfaceAlt },
-    written_off: { color: theme.danger, bg: theme.dangerBg },
-  }
-}
+const MONTH_SHORT = ['JAN', 'FEV', 'MAR', 'ABR', 'MAI', 'JUN', 'JUL', 'AGO', 'SET', 'OUT', 'NOV', 'DEZ']
+const MONTH_LONG = [
+  'Janeiro', 'Fevereiro', 'Março', 'Abril', 'Maio', 'Junho',
+  'Julho', 'Agosto', 'Setembro', 'Outubro', 'Novembro', 'Dezembro',
+]
 
-const BILLING_TYPE_LABEL: Record<string, string> = {
-  cycle:         'Ciclo',
-  one_time:      'Avulsa',
-  complementary: 'Complementar',
-  fine:          'Multa',
-}
-
-function getBillingTypeTone(theme: ThemeTokens): Record<string, { bg: string; fg: string }> {
-  return {
-    cycle:         { bg: theme.successBg, fg: theme.success },
-    one_time:      { bg: theme.indigoBg, fg: theme.indigo },
-    complementary: { bg: theme.violetBg, fg: theme.violet },
-    fine:          { bg: theme.dangerBg, fg: theme.danger },
-  }
-}
-
-type StatusTone = ReturnType<typeof getStatusTone>
-type TypeTone = ReturnType<typeof getBillingTypeTone>
-type Styles = ReturnType<typeof createStyles>
-
-const PAYMENT_METHOD_LABEL: Record<string, string> = {
-  pix:           'Pix',
-  cash:          'Dinheiro',
-  credit_card:   'Cartão de crédito',
-  debit_card:    'Cartão de débito',
-  bank_transfer: 'Transferência',
-}
+/** "Vence em breve" — a partir daqui a linha ganha destaque de atenção. */
+const SOON_DAYS = 3
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -128,8 +114,19 @@ function formatCurrency(value: number | null | undefined): string {
 
 function formatDate(iso: string | null | undefined): string {
   if (!iso) return '—'
-  const [y, m, d] = iso.split('-')
+  const [y, m, d] = iso.slice(0, 10).split('-')
   return `${d}/${m}/${y}`
+}
+
+/**
+ * Hoje no fuso do APARELHO. `toISOString()` devolve UTC: depois das 21h no
+ * Brasil já é "amanhã", e a cobrança que vence hoje aparecia como vencida.
+ */
+function localTodayIso(): string {
+  const d = new Date()
+  const mm = String(d.getMonth() + 1).padStart(2, '0')
+  const dd = String(d.getDate()).padStart(2, '0')
+  return `${d.getFullYear()}-${mm}-${dd}`
 }
 
 function daysUntil(isoDate: string): number {
@@ -139,8 +136,46 @@ function daysUntil(isoDate: string): number {
   return Math.round((due.getTime() - today.getTime()) / 86_400_000)
 }
 
-function vehicleLabel(billing: MyChargeRow): string | null {
-  return billing.vehicle_plate
+function plural(n: number, one: string, many: string): string {
+  return `${n} ${n === 1 ? one : many}`
+}
+
+/** Origem da cobrança, em linguagem do cliente (não "ciclo"/"avulsa"). */
+function kindLabel(billing: MyChargeRow): string {
+  return billing.rental_id ? 'Aluguel' : 'Avulsa'
+}
+
+function isOverdue(billing: MyChargeRow, todayIso: string): boolean {
+  return billing.is_overdue || (billing.status === 'open' && billing.due_date < todayIso)
+}
+
+/**
+ * Tom visual de uma cobrança, derivado de status + vencimento: vencida
+ * (danger), vence hoje (warning), em até SOON_DAYS (pending), futura
+ * (primary), paga (success), cancelada/baixada (neutral).
+ */
+function toneOf(billing: MyChargeRow, todayIso: string): Tone {
+  if (billing.status === 'paid') return 'success'
+  if (billing.status !== 'open') return 'neutral'
+  if (isOverdue(billing, todayIso)) return 'danger'
+  const days = daysUntil(billing.due_date)
+  if (days === 0) return 'warning'
+  if (days <= SOON_DAYS) return 'pending'
+  return 'primary'
+}
+
+/** Frase curta de vencimento: o que o cliente precisa saber de relance. */
+function dueLabel(billing: MyChargeRow, todayIso: string): string {
+  if (billing.status === 'paid') return `Venceu em ${formatDate(billing.due_date)}`
+  if (billing.status !== 'open') return STATUS_LABEL[billing.status] ?? billing.status
+  if (isOverdue(billing, todayIso)) {
+    const days = billing.days_overdue || Math.max(0, -daysUntil(billing.due_date))
+    return days === 0 ? 'Venceu hoje' : `${plural(days, 'dia', 'dias')} de atraso`
+  }
+  const days = daysUntil(billing.due_date)
+  if (days === 0) return 'Vence hoje'
+  if (days === 1) return 'Vence amanhã'
+  return `Vence em ${days} dias`
 }
 
 async function createPaymentIntent(billingId: string): Promise<PaymentIntent> {
@@ -183,152 +218,157 @@ async function openCheckout(url: string): Promise<void> {
   }
 }
 
-
 // ---------------------------------------------------------------------------
-// SectionHeader
+// SummaryCard — "quanto devo e o que pagar primeiro", na superfície de marca
 // ---------------------------------------------------------------------------
 
-function SectionHeader({ title, count, danger, styles }: { title: string; count: number; danger?: boolean; styles: Styles }) {
+function SummaryCard({
+  total,
+  overdueCount,
+  overdueTotal,
+  urgent,
+  todayIso,
+  onOpenUrgent,
+  styles,
+  theme,
+}: {
+  total: number
+  overdueCount: number
+  overdueTotal: number
+  urgent: MyChargeRow | null
+  todayIso: string
+  onOpenUrgent: () => void
+  styles: Styles
+  theme: ThemeTokens
+}) {
+  const hasOverdue = overdueCount > 0
+  const statusColor = hasOverdue ? theme.brandNegative : theme.brandPositive
+
   return (
-    <View style={styles.sectionHeader}>
-      {danger && <View style={styles.sectionDangerDot} />}
-      <Text style={[styles.sectionTitle, danger && styles.sectionTitleDanger]}>
-        {title}
+    <Card variant="brand" style={styles.summary}>
+      <View style={styles.summaryTop}>
+        <Text style={styles.summaryLabel}>Total a pagar</Text>
+        <Icon name="wallet-outline" size={20} color={theme.brandAccent} />
+      </View>
+      <Text style={styles.summaryAmount} adjustsFontSizeToFit numberOfLines={1}>
+        {formatCurrency(total)}
       </Text>
-      <View style={[styles.sectionCount, danger && styles.sectionCountDanger]}>
-        <Text style={[styles.sectionCountText, danger && styles.sectionCountTextDanger]}>
-          {count}
+
+      <View style={styles.summaryStatus}>
+        <Icon
+          name={hasOverdue ? 'alert-circle' : 'checkmark-circle'}
+          size={15}
+          color={statusColor}
+        />
+        <Text style={[styles.summaryStatusText, { color: statusColor }]}>
+          {hasOverdue
+            ? `${plural(overdueCount, 'cobrança vencida', 'cobranças vencidas')} · ${formatCurrency(overdueTotal)}`
+            : total > 0 ? 'Tudo em dia' : 'Nenhuma cobrança em aberto'}
         </Text>
       </View>
-    </View>
+
+      {urgent && (
+        <>
+          <View style={styles.summaryDivider} />
+          <View style={styles.summaryNext}>
+            <View style={styles.summaryNextBody}>
+              <Text style={styles.summaryNextLabel}>
+                {hasOverdue ? 'Mais antiga em atraso' : 'Próximo vencimento'}
+              </Text>
+              <Text style={styles.summaryNextTitle} numberOfLines={1}>{urgent.description}</Text>
+              <Text style={styles.summaryNextMeta} numberOfLines={1}>
+                {dueLabel(urgent, todayIso)} · {formatCurrency(urgent.amount_due)}
+              </Text>
+            </View>
+            <Button
+              label={hasOverdue ? 'Regularizar' : 'Pagar'}
+              variant={hasOverdue ? 'danger' : 'onBrand'}
+              size="md"
+              onPress={onOpenUrgent}
+            />
+          </View>
+        </>
+      )}
+    </Card>
   )
 }
 
 // ---------------------------------------------------------------------------
-// TypeBadge
+// DateBadge — dia/mês do vencimento, padrão de extrato bancário
 // ---------------------------------------------------------------------------
 
-function TypeBadge({ type, styles, typeTone }: { type: string | null | undefined; styles: Styles; typeTone: TypeTone }) {
-  if (type === 'one_time') return null
-  const label = BILLING_TYPE_LABEL[type ?? ''] ?? null
-  if (!label) return null
-  // fallback inalcançável na prática: os 4 tipos em BILLING_TYPE_LABEL são os
-  // mesmos 4 de getBillingTypeTone — mantido só por segurança de tipos.
-  const tone = typeTone[type ?? ''] ?? typeTone.one_time
+function DateBadge({ iso, tone, styles, theme }: { iso: string; tone: Tone; styles: Styles; theme: ThemeTokens }) {
+  const [, m, d] = iso.split('-')
+  const { fg, bg } = toneColors(theme, tone)
   return (
-    <View style={[styles.typeBadge, { backgroundColor: tone.bg }]}>
-      <Text style={[styles.typeBadgeText, { color: tone.fg }]}>{label}</Text>
+    <View style={[styles.dateBadge, { backgroundColor: bg }]}>
+      <Text style={[styles.dateBadgeDay, { color: fg }]}>{d}</Text>
+      <Text style={[styles.dateBadgeMonth, { color: fg }]}>{MONTH_SHORT[Number(m) - 1]}</Text>
     </View>
   )
 }
 
 // ---------------------------------------------------------------------------
-// BillingRow — used in overdue + upcoming sections
+// ChargeRow — linha única para "a pagar" e "pagas"
 // ---------------------------------------------------------------------------
 
-function BillingRow({
+function ChargeRow({
   billing,
+  todayIso,
   onPress,
   styles,
-  typeTone,
+  theme,
+  last,
 }: {
   billing: MyChargeRow
+  todayIso: string
   onPress: () => void
   styles: Styles
-  typeTone: TypeTone
+  theme: ThemeTokens
+  last?: boolean
 }) {
-  const today = new Date()
-  const overdue = billing.is_overdue
-  const days = overdue
-    ? billing.days_overdue
-    : daysUntil(billing.due_date)
-
-  // F-05: o valor devido vem pronto do servidor, já com encargo e crédito.
-  const finalAmount = billing.amount_due
-  const plate = vehicleLabel(billing)
-
-  let dueMeta: string
-  if (overdue) {
-    dueMeta = days === 0
-      ? `Venceu hoje · ${formatDate(billing.due_date)}`
-      : `${days} dia${days !== 1 ? 's' : ''} de atraso · venceu ${formatDate(billing.due_date)}`
-  } else {
-    dueMeta = days === 0
-      ? `Vence hoje`
-      : days === 1
-        ? `Vence amanhã · ${formatDate(billing.due_date)}`
-        : `Vence em ${days} dias · ${formatDate(billing.due_date)}`
-  }
+  const tone = toneOf(billing, todayIso)
+  const { fg } = toneColors(theme, tone)
+  const isPaid = billing.status === 'paid'
+  const partial = !isPaid && billing.paid_amount > 0
+  const meta = [kindLabel(billing), billing.vehicle_plate].filter(Boolean).join(' · ')
+  const amount = isPaid ? billing.paid_amount : billing.amount_due
 
   return (
     <Pressable
-      style={({ pressed }) => [styles.billingRow, overdue && styles.billingRowOverdue, pressed && styles.billingRowPressed]}
+      style={({ pressed }) => [styles.row, !last && styles.rowDivider, pressed && styles.rowPressed]}
       onPress={onPress}
+      accessibilityRole="button"
+      accessibilityLabel={`${billing.description}, ${formatCurrency(amount)}, ${dueLabel(billing, todayIso)}`}
     >
-      <View style={styles.billingRowTop}>
-        <TypeBadge type={billing.rental_id ? 'cycle' : 'one_time'} styles={styles} typeTone={typeTone} />
-        <Text style={[styles.billingRowMeta, overdue ? styles.billingRowMetaDanger : styles.billingRowMetaMuted]}>
-          {dueMeta}
-        </Text>
-      </View>
-      <View style={styles.billingRowMain}>
-        <View style={styles.billingRowLeft}>
-          <Text style={styles.billingRowDesc} numberOfLines={2}>{billing.description ?? '—'}</Text>
-          {plate && <Text style={styles.billingRowPlate}>{plate}</Text>}
-        </View>
-        <View style={styles.billingRowRight}>
-          {billing.paid_amount > 0 ? (
-            <>
-              <Text style={styles.billingRowAmountStrike}>{formatCurrency(billing.total_amount)}</Text>
-              <Text style={[styles.billingRowAmount, overdue && styles.billingRowAmountDanger]}>
-                {formatCurrency(finalAmount)}
-              </Text>
-            </>
-          ) : (
-            <Text style={[styles.billingRowAmount, overdue && styles.billingRowAmountDanger]}>
-              {formatCurrency(finalAmount)}
-            </Text>
-          )}
-          <Text style={styles.billingRowChevron}>›</Text>
-        </View>
-      </View>
-    </Pressable>
-  )
-}
+      <DateBadge iso={billing.due_date} tone={tone} styles={styles} theme={theme} />
 
-// ---------------------------------------------------------------------------
-// HistoryRow — compact row for paid billings
-// ---------------------------------------------------------------------------
-
-function HistoryRow({ billing, onPress, styles }: { billing: MyChargeRow; onPress: () => void; styles: Styles }) {
-  // F-05: o valor devido vem pronto do servidor, já com encargo e crédito.
-  const finalAmount = billing.amount_due
-  // Data e forma de pagamento vivem em `payments`, não na cobrança —
-  // um documento pode ter vários recebimentos.
-  const paidDate = billing.status === 'paid' ? billing.due_date : null
-  const method = null
-
-  return (
-    <Pressable
-      style={({ pressed }) => [styles.historyRow, pressed && styles.billingRowPressed]}
-      onPress={onPress}
-    >
-      <View style={styles.historyRowLeft}>
-        <View style={styles.historyCheckCircle}>
-          <Text style={styles.historyCheckText}>✓</Text>
-        </View>
-        <View style={styles.historyRowInfo}>
-          <Text style={styles.historyRowDesc} numberOfLines={1}>{billing.description ?? '—'}</Text>
-          <Text style={styles.historyRowMeta}>
-            {paidDate ? `Pago em ${formatDate(paidDate)}` : formatDate(billing.due_date)}
-            {method ? ` · ${method}` : ''}
+      <View style={styles.rowBody}>
+        <Text style={styles.rowTitle} numberOfLines={1}>{billing.description}</Text>
+        <Text style={styles.rowMeta} numberOfLines={1}>{meta}</Text>
+        {!isPaid && (
+          <Text style={[styles.rowDue, { color: tone === 'primary' ? theme.textSoft : fg }]}>
+            {dueLabel(billing, todayIso)}
           </Text>
-        </View>
+        )}
       </View>
-      <View style={styles.historyRowRight}>
-        <Text style={styles.historyRowAmount}>{formatCurrency(finalAmount)}</Text>
-        <Text style={styles.billingRowChevron}>›</Text>
+
+      <View style={styles.rowRight}>
+        <Text
+          style={[
+            styles.rowAmount,
+            tone === 'danger' && { color: theme.danger },
+          ]}
+        >
+          {formatCurrency(amount)}
+        </Text>
+        {isPaid ? (
+          <Badge label="Paga" tone="success" icon="checkmark" size="sm" />
+        ) : partial ? (
+          <Text style={styles.rowAmountSub}>de {formatCurrency(billing.total_amount)}</Text>
+        ) : null}
       </View>
+      <Icon name="chevron-forward" size={18} color={theme.textMute} />
     </Pressable>
   )
 }
@@ -350,110 +390,166 @@ function PaymentModal({
   paid,
   onClose,
   styles,
+  theme,
 }: {
   billing: MyChargeRow
   intent: PaymentIntent
   paid: boolean
   onClose: () => void
   styles: Styles
+  theme: ThemeTokens
 }) {
+  const [copied, setCopied] = useState(false)
   const isLink  = intent.method === 'payment_link'
   const isPix   = intent.method === 'pix'
   const pixCode = pixCodeOf(intent)
   const qrImage = intent.payload?.qr_code_base64
   const url     = intent.payload?.checkout_url
+  // O valor da tentativa, não o da lista: é o que o código cobra.
+  const amount  = intent.amount ?? billing.amount_due
+
+  useEffect(() => {
+    if (!copied) return
+    const t = setTimeout(() => setCopied(false), 2500)
+    return () => clearTimeout(t)
+  }, [copied])
 
   function copyCode() {
     if (!pixCode) return
     void Clipboard.setStringAsync(pixCode)
-    Alert.alert('Copiado!', 'Código Pix copiado para a área de transferência.')
+    setCopied(true)
   }
-
-  const title = isPix ? 'Pagar com Pix' : `Pagar com ${intent.provider_label}`
 
   return (
     <Modal visible animationType="slide" presentationStyle="pageSheet" onRequestClose={onClose}>
-      <SafeAreaView style={styles.modalSafe}>
-        <View style={styles.modalHeader}>
-          <Text style={styles.modalTitle}>{title}</Text>
-          <Pressable onPress={onClose} hitSlop={12}>
-            <Text style={styles.modalClose}>Fechar</Text>
-          </Pressable>
-        </View>
-        <ScrollView contentContainerStyle={styles.modalBody}>
-          {paid && (
-            <View style={styles.pixPaidConfirm}>
-              <Text style={styles.pixPaidConfirmText}>Pagamento confirmado!</Text>
-            </View>
-          )}
-          {intent.is_reused && (
-            <View style={styles.reuseNote}>
-              <Text style={styles.reuseNoteText}>
-                {isLink
-                  ? 'Link de pagamento ativo reutilizado — o mesmo gerado anteriormente.'
-                  : 'Pix ativo reutilizado — mesmo código gerado anteriormente.'}
-              </Text>
-            </View>
-          )}
+      <SafeAreaView style={styles.modalSafe} edges={['top', 'bottom']}>
+        <ModalHeader title={isPix ? 'Pagar com Pix' : 'Pagamento'} onClose={onClose} />
 
-          {isPix && qrImage ? (
-            <View style={styles.pixQrContainer}>
-              <Image
-                source={{ uri: `data:image/png;base64,${qrImage}` }}
-                style={styles.pixQrImage}
-                resizeMode="contain"
-              />
+        {paid ? (
+          <View style={styles.successWrap}>
+            <View style={styles.successIcon}>
+              <Icon name="checkmark" size={48} color={theme.success} />
             </View>
-          ) : null}
-
-          <View style={styles.pixInfo}>
-            {/* O valor da tentativa, não o da lista: é o que o código cobra. */}
-            <Text style={styles.pixAmount}>{formatCurrency(intent.amount ?? billing.amount_due)}</Text>
-            {intent.expires_at ? (
-              <Text style={styles.pixExpiry}>Vence em {formatDate(intent.expires_at.slice(0, 10))}</Text>
-            ) : null}
+            <Text style={styles.successTitle}>Pagamento confirmado</Text>
+            <Text style={styles.successAmount}>{formatCurrency(amount)}</Text>
+            <Text style={styles.successText}>{billing.description}</Text>
           </View>
-
-          {isPix && pixCode ? (
-            <>
-              <View style={styles.pixCodeBlock}>
-                <Text style={styles.pixCodeLabel}>Copia e Cola</Text>
-                <Text style={styles.pixCode} selectable>{pixCode}</Text>
-              </View>
-              <TouchableOpacity style={styles.copyBtn} onPress={copyCode}>
-                <Text style={styles.copyBtnText}>Copiar Código Pix</Text>
-              </TouchableOpacity>
-            </>
-          ) : null}
-
-          {isLink && url ? (
-            <>
-              <View style={styles.pixCodeBlock}>
-                <Text style={styles.linkNoteText}>
-                  O pagamento é feito na página segura da {intent.provider_label}, onde você
-                  escolhe Pix ou cartão. Ao terminar, feche a página e volte para cá — a
-                  confirmação aparece automaticamente.
-                </Text>
-              </View>
-              <TouchableOpacity style={styles.payBtn} onPress={() => void openCheckout(url)}>
-                <Text style={styles.payBtnText}>Abrir página de pagamento</Text>
-              </TouchableOpacity>
-            </>
-          ) : null}
-
-          {/* Gateway novo que esta versão do app ainda não sabe desenhar, ou
-              payload incompleto: dizer isso em vez de mostrar um QR vazio. */}
-          {!(isPix && pixCode) && !(isLink && url) && (
-            <View style={styles.reuseNote}>
-              <Text style={styles.reuseNoteText}>
-                Esta forma de pagamento ainda não é suportada nesta versão do app.
-                Atualize o aplicativo ou fale com a locadora.
+        ) : (
+          <ScrollView contentContainerStyle={styles.modalBody}>
+            {/* Valor + estado da espera — o polling roda enquanto o detalhe estiver aberto */}
+            <View style={styles.payHero}>
+              <Text style={styles.heroLabel}>Valor</Text>
+              <Text style={styles.heroAmount}>{formatCurrency(amount)}</Text>
+              <Text style={styles.payHeroSub} numberOfLines={1}>
+                {billing.description} · via {intent.provider_label}
               </Text>
+              <View style={styles.waiting}>
+                <ActivityIndicator size="small" color={theme.primary} />
+                <Text style={styles.waitingText}>Aguardando pagamento</Text>
+              </View>
             </View>
-          )}
-        </ScrollView>
+
+            {intent.is_reused && (
+              <Notice
+                icon="information-circle"
+                tone="info"
+                text={isLink
+                  ? 'Este é o mesmo link de pagamento gerado anteriormente — continua válido.'
+                  : 'Este é o mesmo código Pix gerado anteriormente — continua válido.'}
+              />
+            )}
+
+            {isPix && pixCode ? (
+              <>
+                {qrImage ? (
+                  <View style={styles.qrWrap}>
+                    <Image
+                      source={{ uri: `data:image/png;base64,${qrImage}` }}
+                      style={styles.qrImage}
+                      resizeMode="contain"
+                    />
+                  </View>
+                ) : null}
+
+                <Button
+                  label={copied ? 'Código copiado' : 'Copiar código Pix'}
+                  icon={copied ? 'checkmark' : 'copy-outline'}
+                  variant={copied ? 'success' : 'primary'}
+                  onPress={copyCode}
+                />
+
+                <View style={styles.codeBox}>
+                  <Text style={styles.codeLabel}>Pix copia e cola</Text>
+                  <Text style={styles.code} selectable numberOfLines={3}>{pixCode}</Text>
+                </View>
+
+                <Card>
+                  <Text style={styles.cardTitle}>Como pagar</Text>
+                  <View style={styles.steps}>
+                    {[
+                      'Copie o código acima ou leia o QR Code.',
+                      'No app do seu banco, escolha Pix › Pix copia e cola.',
+                      'Cole o código e confirme. A confirmação aparece aqui sozinha.',
+                    ].map((step, i) => (
+                      <View key={i} style={styles.step}>
+                        <View style={styles.stepNum}>
+                          <Text style={styles.stepNumText}>{i + 1}</Text>
+                        </View>
+                        <Text style={styles.stepText}>{step}</Text>
+                      </View>
+                    ))}
+                  </View>
+                </Card>
+
+                {intent.expires_at ? (
+                  <Text style={styles.footnote}>
+                    Código válido até {formatDate(intent.expires_at)}
+                  </Text>
+                ) : null}
+              </>
+            ) : null}
+
+            {isLink && url ? (
+              <>
+                <Notice
+                  icon="lock-closed"
+                  tone="primary"
+                  text={`O pagamento é feito na página segura da ${intent.provider_label}, onde você escolhe Pix ou cartão. Ao terminar, feche a página e volte para cá — a confirmação aparece automaticamente.`}
+                />
+                <Button
+                  label="Abrir página de pagamento"
+                  icon="open-outline"
+                  onPress={() => void openCheckout(url)}
+                />
+              </>
+            ) : null}
+
+            {/* Gateway novo que esta versão do app ainda não sabe desenhar, ou
+                payload incompleto: dizer isso em vez de mostrar um QR vazio. */}
+            {!(isPix && pixCode) && !(isLink && url) && (
+              <Notice
+                icon="warning"
+                tone="warning"
+                text="Esta forma de pagamento ainda não é suportada nesta versão do app. Atualize o aplicativo ou fale com a locadora."
+              />
+            )}
+          </ScrollView>
+        )}
       </SafeAreaView>
     </Modal>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Peças do modal
+// ---------------------------------------------------------------------------
+
+function InfoRow({ label, value, styles, last }: { label: string; value: string; styles: Styles; last?: boolean }) {
+  return (
+    <View style={[styles.infoRow, !last && styles.infoRowDivider]}>
+      <Text style={styles.infoLabel}>{label}</Text>
+      <Text style={styles.infoValue} numberOfLines={2}>{value}</Text>
+    </View>
   )
 }
 
@@ -463,19 +559,19 @@ function PaymentModal({
 
 function BillingDetailModal({
   billing,
+  todayIso,
   onClose,
   onPaid,
   styles,
-  typeTone,
-  statusTone,
+  theme,
 }: {
   billing: MyChargeRow
+  todayIso: string
   onClose: () => void
   /** Pagamento confirmado pelo gateway — a tela recarrega a lista e fecha. */
   onPaid?: () => void
   styles: Styles
-  typeTone: TypeTone
-  statusTone: StatusTone
+  theme: ThemeTokens
 }) {
   const [generating, setGenerating] = useState(false)
   const [intent, setIntent]         = useState<PaymentIntent | null>(null)
@@ -483,6 +579,11 @@ function BillingDetailModal({
   // Fechar o modal de pagamento NÃO encerra a tentativa: o Pix pode compensar
   // depois, e o polling segue enquanto o detalhe estiver aberto.
   const [showPayment, setShowPayment] = useState(false)
+
+  // Itens do documento (a lista só traz o principal). A política
+  // `customer_read_own_charge_items` deixa o cliente ler os próprios.
+  const detail = useChargeDetail(billing.charge_id)
+  const items = detail.data?.items ?? []
 
   // Confirmação: o MESMO mecanismo do cockpit (`BillingActions.tsx`) — lê o
   // status da tentativa a cada 5s até virar `paid`. O pagamento chega por
@@ -514,14 +615,13 @@ function BillingDetailModal({
     return () => clearTimeout(t)
   }, [paid, onPaid])
 
-  const original  = billing.total_amount
-  const discount  = 0
-  const finalAmt  = billing.amount_due
-  const canPay    = billing.status === 'open' || billing.is_overdue
-  const today     = new Date()
-  const overdue   = billing.is_overdue
-  const daysOver  = overdue ? billing.days_overdue : 0
-  const plate     = vehicleLabel(billing)
+  const isPaid  = billing.status === 'paid'
+  const canPay  = billing.status === 'open'
+  const tone    = toneOf(billing, todayIso)
+  const colors  = toneColors(theme, tone)
+  // Atraso não é status armazenado (Princípio 4): vem de `is_overdue`.
+  const statusKey = tone === 'danger' ? 'overdue' : billing.status
+  const overdueDays = billing.days_overdue
 
   async function handlePay() {
     setGenerating(true)
@@ -540,125 +640,143 @@ function BillingDetailModal({
     }
   }
 
-  // Atraso não é status armazenado (Princípio 4): vem de `is_overdue`.
-  const statusKey   = billing.is_overdue ? 'overdue' : billing.status
-  const statusColor = statusTone[statusKey]?.color ?? statusTone.open.color
-  const statusBg    = statusTone[statusKey]?.bg ?? statusTone.open.bg
-
   return (
     <>
-      <Modal
-        visible
-        animationType="slide"
-        presentationStyle="pageSheet"
-        onRequestClose={onClose}
-      >
-        <SafeAreaView style={styles.modalSafe}>
-          {/* Header */}
-          <View style={styles.modalHeader}>
-            <Text style={styles.modalTitle}>Cobrança</Text>
-            <Pressable onPress={onClose} hitSlop={12}>
-              <Text style={styles.modalClose}>Fechar</Text>
-            </Pressable>
-          </View>
+      <Modal visible animationType="slide" presentationStyle="pageSheet" onRequestClose={onClose}>
+        <SafeAreaView style={styles.modalSafe} edges={['top', 'bottom']}>
+          <ModalHeader title={`Cobrança nº ${billing.charge_number}`} onClose={onClose} />
 
           <ScrollView contentContainerStyle={styles.modalBody}>
-            {/* Identity block */}
-            <View style={styles.detailIdentity}>
-              <View style={styles.detailIdentityBadges}>
-                <TypeBadge type={billing.rental_id ? 'cycle' : 'one_time'} styles={styles} typeTone={typeTone} />
-                <View style={[styles.statusPill, { backgroundColor: statusBg }]}>
-                  <Text style={[styles.statusPillText, { color: statusColor }]}>
-                    {STATUS_LABEL[statusKey] ?? statusKey}
-                  </Text>
-                </View>
-              </View>
-              <Text style={styles.detailDesc}>{billing.description ?? '—'}</Text>
-              {plate && <Text style={styles.detailPlate}>{plate}</Text>}
-              {overdue && daysOver > 0 ? (
-                <Text style={styles.detailOverdueMeta}>
-                  {daysOver} dia{daysOver !== 1 ? 's' : ''} de atraso · venceu {formatDate(billing.due_date)}
-                </Text>
-              ) : (
-                <Text style={styles.detailDueMeta}>
-                  Vencimento: {formatDate(billing.due_date)}
-                </Text>
-              )}
+            {/* Hero: status + valor + vencimento */}
+            <View style={styles.detailHero}>
+              <Badge label={STATUS_LABEL[statusKey] ?? statusKey} tone={tone} dot />
+              <Text style={[styles.heroLabel, styles.heroLabelSpaced]}>
+                {isPaid ? 'Valor pago' : 'Valor a pagar'}
+              </Text>
+              <Text style={[styles.heroAmount, tone === 'danger' && { color: theme.danger }]}>
+                {formatCurrency(isPaid ? billing.paid_amount : billing.amount_due)}
+              </Text>
+              <Text style={[styles.detailHeroDue, { color: tone === 'primary' || isPaid ? theme.textSoft : colors.fg }]}>
+                {isPaid
+                  ? `Vencimento ${formatDate(billing.due_date)}`
+                  : `${dueLabel(billing, todayIso)} · ${formatDate(billing.due_date)}`}
+              </Text>
             </View>
 
-            {/* Composição — total, o que já foi pago e o encargo acumulado */}
-            <View style={styles.detailSection}>
-              <Text style={styles.detailSectionTitle}>Composição</Text>
-              <View style={styles.compositionBlock}>
-                <View style={styles.compositionRow}>
-                  <Text style={styles.compositionLabel}>
-                    {billing.item_count > 1 ? `Total (${billing.item_count} itens)` : 'Valor'}
-                  </Text>
-                  <Text style={styles.compositionValue}>{formatCurrency(billing.total_amount)}</Text>
-                </View>
+            {tone === 'danger' && (
+              <Notice
+                icon="alert-circle"
+                tone="danger"
+                title="Cobrança vencida"
+                text={billing.accrued_total > 0
+                  ? `Foram acrescidos ${formatCurrency(billing.accrued_total)} de encargos por ${plural(overdueDays, 'dia', 'dias')} de atraso. Pague o quanto antes para evitar novos acréscimos.`
+                  : 'Pague o quanto antes para evitar encargos por atraso.'}
+              />
+            )}
 
-                {billing.paid_amount > 0 && (
-                  <View style={styles.compositionRow}>
-                    <View style={styles.compositionLabelGroup}>
-                      <Text style={styles.compositionLabel}>Já pago</Text>
-                      <Text style={styles.compositionSub}>Pagamento parcial registrado</Text>
+            {isPaid && (
+              <Notice
+                icon="checkmark-circle"
+                tone="success"
+                title="Cobrança quitada"
+                text={`Total recebido: ${formatCurrency(billing.paid_amount)}`}
+              />
+            )}
+
+            {/* Composição: itens do documento + ajustes */}
+            <Card>
+              <Text style={styles.cardTitle}>Composição</Text>
+              <View style={styles.lines}>
+                {detail.isLoading ? (
+                  <ActivityIndicator size="small" color={theme.primary} style={styles.inlineLoading} />
+                ) : items.length > 0 ? (
+                  items.map((item) => (
+                    <View key={item.id} style={styles.lineRow}>
+                      <Text style={styles.lineLabel} numberOfLines={2}>
+                        {item.quantity > 1 ? `${item.quantity}× ` : ''}{item.description}
+                      </Text>
+                      <Text style={[styles.lineValue, item.amount < 0 && { color: theme.success }]}>
+                        {item.amount < 0 ? `− ${formatCurrency(-item.amount)}` : formatCurrency(item.amount)}
+                      </Text>
                     </View>
-                    <Text style={[styles.compositionValue, { color: statusTone.paid.color }]}>
+                  ))
+                ) : (
+                  <View style={styles.lineRow}>
+                    <Text style={styles.lineLabel}>{billing.description}</Text>
+                    <Text style={styles.lineValue}>{formatCurrency(billing.total_amount)}</Text>
+                  </View>
+                )}
+
+                {(billing.paid_amount > 0 && !isPaid) || billing.accrued_total > 0 ? (
+                  <>
+                    <View style={styles.lineDivider} />
+                    <View style={styles.lineRow}>
+                      <Text style={styles.lineLabelMuted}>Subtotal</Text>
+                      <Text style={styles.lineValue}>{formatCurrency(billing.total_amount)}</Text>
+                    </View>
+                  </>
+                ) : null}
+
+                {billing.paid_amount > 0 && !isPaid && (
+                  <View style={styles.lineRow}>
+                    <Text style={styles.lineLabelMuted}>Já pago</Text>
+                    <Text style={[styles.lineValue, { color: theme.success }]}>
                       − {formatCurrency(billing.paid_amount)}
                     </Text>
                   </View>
                 )}
 
                 {billing.accrued_total > 0 && (
-                  <View style={styles.compositionRow}>
-                    <View style={styles.compositionLabelGroup}>
-                      <Text style={styles.compositionLabel}>Encargo por atraso</Text>
-                      <Text style={styles.compositionSub}>{billing.days_overdue} dias</Text>
-                    </View>
-                    <Text style={styles.compositionValue}>
+                  <View style={styles.lineRow}>
+                    <Text style={styles.lineLabelMuted}>
+                      Encargos ({plural(overdueDays, 'dia', 'dias')} de atraso)
+                    </Text>
+                    <Text style={[styles.lineValue, { color: theme.danger }]}>
                       + {formatCurrency(billing.accrued_total)}
                     </Text>
                   </View>
                 )}
 
-                <View style={styles.compositionDivider} />
-
-                <View style={styles.compositionRow}>
-                  <Text style={[styles.compositionLabel, styles.compositionLabelTotal]}>A pagar</Text>
-                  <Text style={[styles.compositionValue, styles.compositionValueTotal]}>
-                    {formatCurrency(billing.amount_due)}
+                <View style={styles.lineDivider} />
+                <View style={styles.lineRow}>
+                  <Text style={styles.lineTotalLabel}>{isPaid ? 'Total pago' : 'Total a pagar'}</Text>
+                  <Text style={styles.lineTotalValue}>
+                    {formatCurrency(isPaid ? billing.paid_amount : billing.amount_due)}
                   </Text>
                 </View>
               </View>
+            </Card>
+
+            {/* Dados do documento */}
+            <Card>
+              <Text style={styles.cardTitle}>Detalhes</Text>
+              <View style={styles.lines}>
+                <InfoRow label="Origem" value={kindLabel(billing)} styles={styles} />
+                {billing.vehicle_plate ? <InfoRow label="Veículo" value={billing.vehicle_plate} styles={styles} /> : null}
+                <InfoRow label="Emissão" value={formatDate(billing.issue_date)} styles={styles} />
+                <InfoRow label="Vencimento" value={formatDate(billing.due_date)} styles={styles} />
+                <InfoRow label="Número" value={`#${billing.charge_number}`} styles={styles} last />
+              </View>
+            </Card>
+
+            <View style={styles.secureRow}>
+              <Icon name="shield-checkmark-outline" size={14} color={theme.textMute} />
+              <Text style={styles.secureText}>Pagamento processado com segurança pela locadora</Text>
             </View>
-
-            {/* Pagamento */}
-            {canPay && (
-              <View style={styles.detailSection}>
-                <Text style={styles.detailSectionTitle}>Pagamento</Text>
-                <TouchableOpacity
-                  style={[styles.payBtn, generating && styles.payBtnDisabled]}
-                  onPress={handlePay}
-                  disabled={generating}
-                >
-                  <Text style={styles.payBtnText}>
-                    {generating ? 'Gerando pagamento…' : `Pagar ${formatCurrency(billing.amount_due)}`}
-                  </Text>
-                </TouchableOpacity>
-              </View>
-            )}
-
-            {billing.status === 'paid' && (
-              <View style={styles.paidBlock}>
-                <Text style={styles.paidTitle}>Cobrança quitada</Text>
-                <CompositionRow
-                  label="Total recebido"
-                  value={formatCurrency(billing.paid_amount)}
-                  styles={styles}
-                />
-              </View>
-            )}
           </ScrollView>
+
+          {/* Ação principal fixa no rodapé — sempre ao alcance do polegar */}
+          {canPay && (
+            <View style={styles.footer}>
+              <Button
+                label={intent ? 'Ver pagamento em andamento' : `Pagar ${formatCurrency(billing.amount_due)}`}
+                icon={intent ? 'time-outline' : undefined}
+                variant={tone === 'danger' && !intent ? 'danger' : 'primary'}
+                loading={generating}
+                onPress={intent ? () => setShowPayment(true) : handlePay}
+              />
+            </View>
+          )}
         </SafeAreaView>
       </Modal>
 
@@ -669,18 +787,10 @@ function BillingDetailModal({
           paid={paid}
           onClose={() => setShowPayment(false)}
           styles={styles}
+          theme={theme}
         />
       )}
     </>
-  )
-}
-
-function CompositionRow({ label, value, styles }: { label: string; value: string; styles: Styles }) {
-  return (
-    <View style={styles.compositionRow}>
-      <Text style={styles.compositionLabel}>{label}</Text>
-      <Text style={styles.compositionValue}>{value}</Text>
-    </View>
   )
 }
 
@@ -689,13 +799,11 @@ function CompositionRow({ label, value, styles }: { label: string; value: string
 // ---------------------------------------------------------------------------
 
 export function BillingsScreen() {
-  const [selected, setSelected]         = useState<MyChargeRow | null>(null)
-  const [refreshing, setRefreshing]     = useState(false)
-  const [historyOpen, setHistoryOpen]   = useState(false)
+  const [selected, setSelected]     = useState<MyChargeRow | null>(null)
+  const [refreshing, setRefreshing] = useState(false)
+  const [tab, setTab]               = useState<Tab>('open')
   const theme = useTheme()
   const styles = useMemo(() => createStyles(theme), [theme])
-  const typeTone = useMemo(() => getBillingTypeTone(theme), [theme])
-  const statusTone = useMemo(() => getStatusTone(theme), [theme])
 
   const query        = useMyCharges(true)
   const historyQuery = useMyCharges(false)
@@ -706,8 +814,8 @@ export function BillingsScreen() {
     }, [query.refetch]),
   )
 
-  // Paga, a cobrança sai de "em aberto" e entra no histórico: recarrega as
-  // duas listas e fecha o detalhe.
+  // Paga, a cobrança sai de "a pagar" e entra em "pagas": recarrega as duas
+  // listas e fecha o detalhe.
   const handlePaid = useCallback(() => {
     setSelected(null)
     void query.refetch()
@@ -718,69 +826,89 @@ export function BillingsScreen() {
     setRefreshing(true)
     await Promise.all([
       query.refetch(),
-      historyOpen ? historyQuery.refetch() : Promise.resolve(),
+      tab === 'paid' ? historyQuery.refetch() : Promise.resolve(),
     ])
     setRefreshing(false)
   }
 
-  const today = new Date()
-  const todayIso = today.toISOString().slice(0, 10)
+  const todayIso = localTodayIso()
 
   // O backend gera todas as cobranças de ciclo antecipadamente (pode ser anos).
   // Regras de exibição:
   //   • Em atraso  — todas vencidas, qualquer tipo
   //   • Próxima    — única próxima cobrança de ciclo (due_date >= hoje)
   //   • Outras     — multas, avulsas e complementares pendentes não vencidas
-  //   • Histórico  — buscado sob demanda via useHistoryBillingsForCustomer
   const { overdue, nextCycle, others } = useMemo(() => {
     const all = query.data ?? []
 
     const overdue = all
-      .filter((b) =>
-        b.is_overdue ||
-        (b.status === 'open' && b.due_date < todayIso),
-      )
+      .filter((b) => isOverdue(b, todayIso))
       .sort((a, b) => a.due_date.localeCompare(b.due_date))
 
     const overdueIds = new Set(overdue.map((b) => b.charge_id))
-
-    const nextCycle = all
-      .filter(
-        (b) =>
-          b.rental_id !== null &&
-          b.status === 'open' &&
-          b.due_date >= todayIso &&
-          !overdueIds.has(b.charge_id),
-      )
-      .sort((a, b) => a.due_date.localeCompare(b.due_date))[0] ?? null
-
-    const others = all
-      .filter(
-        (b) =>
-          b.rental_id === null &&
-          b.status === 'open' &&
-          b.due_date >= todayIso &&
-          !overdueIds.has(b.charge_id),
-      )
+    const upcoming = all
+      .filter((b) => b.status === 'open' && !overdueIds.has(b.charge_id))
       .sort((a, b) => a.due_date.localeCompare(b.due_date))
+
+    const nextCycle = upcoming.find((b) => b.rental_id !== null) ?? null
+    const others = upcoming.filter((b) => b.rental_id === null)
 
     return { overdue, nextCycle, others }
   }, [query.data, todayIso])
 
-  const hasContent = overdue.length > 0 || nextCycle !== null || others.length > 0
+  // "Pagas": `useMyCharges(false)` devolve TODAS as cobranças, inclusive o
+  // cronograma futuro em aberto — o histórico antigo listava essas com ✓.
+  const paidByMonth = useMemo(() => {
+    const paid = (historyQuery.data ?? [])
+      .filter((b) => b.status === 'paid')
+      .sort((a, b) => b.due_date.localeCompare(a.due_date))
+
+    const groups: { key: string; title: string; total: number; rows: MyChargeRow[] }[] = []
+    for (const b of paid) {
+      const key = b.due_date.slice(0, 7)
+      let g = groups[groups.length - 1]
+      if (!g || g.key !== key) {
+        const [y, m] = key.split('-')
+        g = { key, title: `${MONTH_LONG[Number(m) - 1]} ${y}`, total: 0, rows: [] }
+        groups.push(g)
+      }
+      g.rows.push(b)
+      g.total += b.paid_amount
+    }
+    return groups
+  }, [historyQuery.data])
+
+  const visibleOpen = [...overdue, ...(nextCycle ? [nextCycle] : []), ...others]
+  const total = visibleOpen.reduce((sum, b) => sum + b.amount_due, 0)
+  const overdueTotal = overdue.reduce((sum, b) => sum + b.amount_due, 0)
+  const urgent = visibleOpen[0] ?? null
+
+  function renderRows(rows: MyChargeRow[]) {
+    return (
+      <Card padded={false}>
+        {rows.map((b, i) => (
+          <ChargeRow
+            key={b.charge_id}
+            billing={b}
+            todayIso={todayIso}
+            onPress={() => setSelected(b)}
+            styles={styles}
+            theme={theme}
+            last={i === rows.length - 1}
+          />
+        ))}
+      </Card>
+    )
+  }
 
   return (
     <SafeAreaView style={styles.safe} edges={['top']}>
-      {/* Header */}
-      <View style={styles.header}>
-        <Text style={styles.headerTitle}>Cobranças</Text>
-        <Text style={styles.headerSubtitle}>Sua situação financeira</Text>
-      </View>
+      <ScreenHeader title="Cobranças" />
 
-      {/* Offline banner */}
       {query.isError && !query.isFetching && (
         <View style={styles.offlineBanner}>
-          <Text style={styles.offlineBannerText}>Sem conexão — exibindo dados salvos localmente</Text>
+          <Icon name="cloud-offline-outline" size={16} color={theme.warning} />
+          <Text style={styles.offlineBannerText}>Sem conexão — exibindo dados salvos</Text>
         </View>
       )}
 
@@ -795,77 +923,78 @@ export function BillingsScreen() {
             <RefreshControl refreshing={refreshing} onRefresh={handleRefresh} tintColor={theme.primary} />
           }
         >
-          {!hasContent ? (
-            <View style={styles.emptyCard}>
-              <Text style={styles.emptyTitle}>Nenhuma cobrança</Text>
-              <Text style={styles.emptyText}>Suas cobranças aparecerão aqui quando forem geradas.</Text>
-            </View>
-          ) : (
-            <>
-              {/* Em atraso */}
-              {overdue.length > 0 && (
-                <View style={styles.section}>
-                  <SectionHeader title="Em atraso" count={overdue.length} danger styles={styles} />
-                  <View style={styles.sectionBody}>
-                    {overdue.map((b) => (
-                      <BillingRow key={b.charge_id} billing={b} onPress={() => setSelected(b)} styles={styles} typeTone={typeTone} />
-                    ))}
-                  </View>
-                </View>
-              )}
+          <SummaryCard
+            total={total}
+            overdueCount={overdue.length}
+            overdueTotal={overdueTotal}
+            urgent={urgent}
+            todayIso={todayIso}
+            onOpenUrgent={() => urgent && setSelected(urgent)}
+            styles={styles}
+            theme={theme}
+          />
 
-              {/* Próxima cobrança de ciclo */}
-              {nextCycle && (
-                <View style={styles.section}>
-                  <SectionHeader title="Próxima cobrança" count={1} styles={styles} />
-                  <View style={styles.sectionBody}>
-                    <BillingRow billing={nextCycle} onPress={() => setSelected(nextCycle)} styles={styles} typeTone={typeTone} />
-                  </View>
-                </View>
-              )}
+          <SegmentedControl
+            value={tab}
+            onChange={setTab}
+            options={[
+              { value: 'open', label: 'A pagar', count: visibleOpen.length },
+              { value: 'paid', label: 'Pagas' },
+            ]}
+          />
 
-              {/* Outras cobranças pendentes (multas, avulsas, complementares) */}
-              {others.length > 0 && (
-                <View style={styles.section}>
-                  <SectionHeader title="Outras" count={others.length} styles={styles} />
-                  <View style={styles.sectionBody}>
-                    {others.map((b) => (
-                      <BillingRow key={b.charge_id} billing={b} onPress={() => setSelected(b)} styles={styles} typeTone={typeTone} />
-                    ))}
+          {tab === 'open' ? (
+            visibleOpen.length === 0 ? (
+              <EmptyState
+                icon="checkmark-done"
+                tone="success"
+                title="Tudo em dia"
+                text="Você não tem cobranças em aberto. As próximas aparecem aqui assim que forem geradas."
+              />
+            ) : (
+              <>
+                {overdue.length > 0 && (
+                  <View style={styles.section}>
+                    <SectionHeader title="Em atraso" trailing={formatCurrency(overdueTotal)} color={theme.danger} />
+                    {renderRows(overdue)}
                   </View>
-                </View>
-              )}
-
-              {/* Histórico de pagamentos — lazy, só busca ao abrir */}
-              <View style={styles.section}>
-                <Pressable
-                  style={styles.historyToggle}
-                  onPress={() => setHistoryOpen((v) => !v)}
-                >
-                  <Text style={styles.historyToggleText}>
-                    {historyOpen ? 'Ocultar histórico' : 'Ver histórico de pagamentos'}
-                  </Text>
-                  <Text style={styles.historyToggleChevron}>{historyOpen ? '▲' : '▼'}</Text>
-                </Pressable>
-                {historyOpen && (
-                  historyQuery.isLoading ? (
-                    <View style={styles.historyLoading}>
-                      <ActivityIndicator color={theme.primary} size="small" />
-                    </View>
-                  ) : (historyQuery.data ?? []).length === 0 ? (
-                    <View style={styles.historyEmpty}>
-                      <Text style={styles.historyEmptyText}>Nenhum pagamento registrado.</Text>
-                    </View>
-                  ) : (
-                    <View style={styles.sectionBody}>
-                      {(historyQuery.data ?? []).map((b) => (
-                        <HistoryRow key={b.charge_id} billing={b} onPress={() => setSelected(b)} styles={styles} />
-                      ))}
-                    </View>
-                  )
                 )}
+
+                {nextCycle && (
+                  <View style={styles.section}>
+                    <SectionHeader title="Próximo aluguel" />
+                    {renderRows([nextCycle])}
+                  </View>
+                )}
+
+                {others.length > 0 && (
+                  <View style={styles.section}>
+                    <SectionHeader
+                      title="Outras cobranças"
+                      trailing={formatCurrency(others.reduce((s, b) => s + b.amount_due, 0))}
+                    />
+                    {renderRows(others)}
+                  </View>
+                )}
+              </>
+            )
+          ) : historyQuery.isLoading ? (
+            <View style={styles.inlineLoadingBlock}>
+              <ActivityIndicator color={theme.primary} />
+            </View>
+          ) : paidByMonth.length === 0 ? (
+            <EmptyState
+              icon="receipt-outline"
+              title="Nenhum pagamento ainda"
+              text="As cobranças que você pagar ficam registradas aqui."
+            />
+          ) : (
+            paidByMonth.map((g) => (
+              <View key={g.key} style={styles.section}>
+                <SectionHeader title={g.title} trailing={formatCurrency(g.total)} />
+                {renderRows(g.rows)}
               </View>
-            </>
+            ))
           )}
         </ScrollView>
       )}
@@ -873,11 +1002,11 @@ export function BillingsScreen() {
       {selected && (
         <BillingDetailModal
           billing={selected}
+          todayIso={todayIso}
           onClose={() => setSelected(null)}
           onPaid={handlePaid}
           styles={styles}
-          typeTone={typeTone}
-          statusTone={statusTone}
+          theme={theme}
         />
       )}
     </SafeAreaView>
@@ -893,34 +1022,19 @@ const createStyles = (theme: ThemeTokens) => StyleSheet.create({
     flex: 1,
     backgroundColor: theme.bg,
   },
-  header: {
-    paddingHorizontal: 20,
-    paddingTop: 12,
-    paddingBottom: 12,
-    borderBottomColor: theme.surfaceAlt,
-    borderBottomWidth: 1,
-  },
-  headerTitle: {
-    color: theme.text,
-    fontSize: 22,
-    fontWeight: '700',
-  },
-  headerSubtitle: {
-    color: theme.textMute,
-    fontSize: 13,
-    marginTop: 2,
-  },
   offlineBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
     backgroundColor: theme.warningBg,
-    borderBottomColor: theme.warning,
-    borderBottomWidth: 1,
     paddingVertical: 8,
     paddingHorizontal: 16,
   },
   offlineBannerText: {
     color: theme.warning,
     fontSize: 13,
-    textAlign: 'center',
+    fontWeight: '500',
   },
   centered: {
     flex: 1,
@@ -929,279 +1043,152 @@ const createStyles = (theme: ThemeTokens) => StyleSheet.create({
     paddingTop: 60,
   },
   scrollContent: {
-    padding: 16,
+    paddingHorizontal: 16,
+    paddingTop: 4,
     paddingBottom: 40,
-    gap: 8,
+    gap: 20,
   },
-
-  // Section
+  pressed: {
+    opacity: 0.7,
+  },
   section: {
-    gap: 6,
-    marginTop: 8,
-  },
-  sectionHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-    paddingHorizontal: 2,
-  },
-  sectionDangerDot: {
-    width: 6,
-    height: 6,
-    borderRadius: 3,
-    backgroundColor: theme.warning,
-  },
-  sectionTitle: {
-    color: theme.textMute,
-    fontSize: 11,
-    fontWeight: '700',
-    textTransform: 'uppercase',
-    letterSpacing: 0.6,
-    flex: 1,
-  },
-  sectionTitleDanger: {
-    color: theme.warning,
-  },
-  sectionCount: {
-    backgroundColor: theme.border,
-    borderRadius: 999,
-    paddingHorizontal: 7,
-    paddingVertical: 2,
-  },
-  sectionCountDanger: {
-    backgroundColor: theme.warningBg,
-  },
-  sectionCountText: {
-    color: theme.textMute,
-    fontSize: 11,
-    fontWeight: '700',
-  },
-  sectionCountTextDanger: {
-    color: theme.warning,
-  },
-  sectionBody: {
-    gap: 6,
+    gap: 10,
   },
 
-  // Type badge
-  typeBadge: {
-    alignSelf: 'flex-start',
-    paddingHorizontal: 8,
-    paddingVertical: 2,
-    borderRadius: 4,
+  // Summary (superfície de marca)
+  summary: {
+    padding: 20,
+    gap: 4,
   },
-  typeBadgeText: {
-    fontSize: 10,
-    fontWeight: '700',
-    letterSpacing: 0.4,
-    textTransform: 'uppercase',
-  },
-
-  // MyChargeRow row
-  billingRow: {
-    backgroundColor: theme.surface,
-    borderColor: theme.surfaceAlt,
-    borderWidth: 1,
-    borderRadius: 12,
-    padding: 12,
-    gap: 8,
-  },
-  billingRowOverdue: {
-    borderColor: theme.warning,
-    backgroundColor: theme.warningBg,
-  },
-  billingRowPressed: {
-    opacity: 0.8,
-  },
-  billingRowTop: {
+  summaryTop: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    gap: 8,
   },
-  billingRowMeta: {
-    fontSize: 12,
-    fontWeight: '500',
-    flex: 1,
-    textAlign: 'right',
-  },
-  billingRowMetaDanger: {
-    color: theme.warning,
-  },
-  billingRowMetaMuted: {
-    color: theme.textMute,
-  },
-  billingRowMain: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-  },
-  billingRowLeft: {
-    flex: 1,
-    gap: 3,
-  },
-  billingRowDesc: {
-    color: theme.text,
+  summaryLabel: {
+    color: theme.brandTextSoft,
     fontSize: 14,
     fontWeight: '500',
-    lineHeight: 20,
   },
-  billingRowPlate: {
-    color: theme.textMute,
-    fontSize: 12,
+  summaryAmount: {
+    color: theme.brandText,
+    fontSize: 38,
+    fontWeight: '800',
+    letterSpacing: -1.2,
+    fontVariant: ['tabular-nums'],
   },
-  billingRowRight: {
-    alignItems: 'flex-end',
-    gap: 2,
-  },
-  billingRowAmount: {
-    color: theme.primary,
-    fontSize: 15,
-    fontWeight: '700',
-  },
-  billingRowAmountDanger: {
-    color: theme.danger,
-  },
-  billingRowAmountStrike: {
-    color: theme.textMute,
-    fontSize: 12,
-    textDecorationLine: 'line-through',
-  },
-  billingRowChevron: {
-    color: theme.border,
-    fontSize: 18,
-    lineHeight: 20,
-  },
-
-  // History row
-  historyRow: {
-    backgroundColor: theme.surface,
-    borderColor: theme.border,
-    borderWidth: 1,
-    borderRadius: 10,
-    paddingHorizontal: 12,
-    paddingVertical: 10,
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 10,
-  },
-  historyRowLeft: {
-    flex: 1,
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 10,
-  },
-  historyCheckCircle: {
-    width: 24,
-    height: 24,
-    borderRadius: 12,
-    backgroundColor: theme.successBg,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  historyCheckText: {
-    color: theme.success,
-    fontSize: 12,
-    fontWeight: '700',
-  },
-  historyRowInfo: {
-    flex: 1,
-    gap: 2,
-  },
-  historyRowDesc: {
-    color: theme.textSoft,
-    fontSize: 13,
-    fontWeight: '500',
-  },
-  historyRowMeta: {
-    color: theme.textMute,
-    fontSize: 11,
-  },
-  historyRowRight: {
+  summaryStatus: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 6,
   },
-  historyRowAmount: {
-    color: theme.textMute,
+  summaryStatusText: {
     fontSize: 13,
     fontWeight: '600',
   },
-
-  // History loading / empty
-  historyLoading: {
-    paddingVertical: 20,
-    alignItems: 'center',
+  summaryDivider: {
+    height: 1,
+    backgroundColor: theme.brandBorder,
+    marginVertical: 14,
   },
-  historyEmpty: {
-    paddingVertical: 16,
-    alignItems: 'center',
-  },
-  historyEmptyText: {
-    color: theme.textMute,
-    fontSize: 13,
-  },
-
-  // History toggle button
-  historyToggle: {
+  summaryNext: {
     flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'center',
-    gap: 8,
-    paddingVertical: 12,
-    paddingHorizontal: 16,
-    backgroundColor: theme.surface,
-    borderColor: theme.surfaceAlt,
-    borderWidth: 1,
-    borderRadius: 10,
+    gap: 12,
   },
-  historyToggleText: {
-    color: theme.textMute,
-    fontSize: 13,
+  summaryNextBody: {
+    flex: 1,
+    gap: 2,
+  },
+  summaryNextLabel: {
+    color: theme.brandTextSoft,
+    fontSize: 12,
+    fontWeight: '500',
+  },
+  summaryNextTitle: {
+    color: theme.brandText,
+    fontSize: 15,
     fontWeight: '600',
   },
-  historyToggleChevron: {
-    color: theme.textMute,
-    fontSize: 10,
+  summaryNextMeta: {
+    color: theme.brandAccent,
+    fontSize: 12,
+    fontWeight: '500',
   },
 
-  // Empty state
-  emptyCard: {
-    backgroundColor: theme.surface,
-    borderColor: theme.surfaceAlt,
-    borderWidth: 1,
-    borderRadius: 14,
-    padding: 24,
+  // Row
+  row: {
+    flexDirection: 'row',
     alignItems: 'center',
-    gap: 8,
-    marginTop: 32,
-  },
-  emptyTitle: {
-    color: theme.text,
-    fontSize: 16,
-    fontWeight: '700',
-  },
-  emptyText: {
-    color: theme.textMute,
-    fontSize: 13,
-    textAlign: 'center',
-    lineHeight: 20,
-  },
-
-  // Pay button
-  payBtn: {
-    backgroundColor: theme.primary,
-    borderRadius: 12,
+    gap: 12,
     paddingVertical: 14,
+    paddingHorizontal: 14,
+  },
+  rowDivider: {
+    borderBottomColor: theme.border,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+  },
+  rowPressed: {
+    backgroundColor: theme.surfaceAlt,
+  },
+  dateBadge: {
+    width: 46,
+    height: 50,
+    borderRadius: radius.md,
     alignItems: 'center',
+    justifyContent: 'center',
   },
-  payBtnDisabled: {
-    opacity: 0.6,
+  dateBadgeDay: {
+    fontSize: 18,
+    fontWeight: '800',
+    lineHeight: 21,
+    fontVariant: ['tabular-nums'],
   },
-  payBtnText: {
-    color: theme.primaryContrast,
+  dateBadgeMonth: {
+    fontSize: 10,
+    fontWeight: '700',
+    letterSpacing: 0.6,
+  },
+  rowBody: {
+    flex: 1,
+    gap: 2,
+  },
+  rowTitle: {
+    color: theme.text,
+    fontSize: 15,
+    fontWeight: '600',
+  },
+  rowMeta: {
+    color: theme.textMute,
+    fontSize: 12.5,
+  },
+  rowDue: {
+    fontSize: 12.5,
+    fontWeight: '600',
+    marginTop: 1,
+  },
+  rowRight: {
+    alignItems: 'flex-end',
+    gap: 4,
+  },
+  rowAmount: {
+    color: theme.text,
     fontSize: 15,
     fontWeight: '700',
+    fontVariant: ['tabular-nums'],
+  },
+  rowAmountSub: {
+    color: theme.textMute,
+    fontSize: 11,
+    fontVariant: ['tabular-nums'],
+  },
+
+  inlineLoading: {
+    paddingVertical: 8,
+  },
+  inlineLoadingBlock: {
+    paddingVertical: 32,
+    alignItems: 'center',
   },
 
   // Modal base
@@ -1209,231 +1196,244 @@ const createStyles = (theme: ThemeTokens) => StyleSheet.create({
     flex: 1,
     backgroundColor: theme.bg,
   },
-  modalHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    padding: 16,
-    borderBottomColor: theme.surfaceAlt,
-    borderBottomWidth: 1,
-  },
-  modalTitle: {
-    color: theme.text,
-    fontSize: 18,
-    fontWeight: '700',
-  },
-  modalClose: {
-    color: theme.primary,
-    fontSize: 15,
-  },
   modalBody: {
-    padding: 20,
-    gap: 20,
+    padding: 16,
+    paddingTop: 4,
+    paddingBottom: 32,
+    gap: 16,
+  },
+  footer: {
+    paddingHorizontal: 16,
+    paddingTop: 12,
+    paddingBottom: 8,
+    borderTopColor: theme.border,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    backgroundColor: theme.surface,
   },
 
-  // Detail modal — identity block
-  detailIdentity: {
+  // Hero (detalhe e pagamento)
+  detailHero: {
+    alignItems: 'center',
+    paddingVertical: 16,
+    gap: 2,
+  },
+  heroLabel: {
+    color: theme.textSoft,
+    fontSize: 14,
+  },
+  heroLabelSpaced: {
+    marginTop: 12,
+  },
+  heroAmount: {
+    color: theme.text,
+    fontSize: 40,
+    fontWeight: '800',
+    letterSpacing: -1.4,
+    fontVariant: ['tabular-nums'],
+  },
+  detailHeroDue: {
+    fontSize: 14,
+    fontWeight: '600',
+  },
+
+  // Card content
+  cardTitle: {
+    color: theme.text,
+    fontSize: 15,
+    fontWeight: '700',
+    marginBottom: 12,
+  },
+  lines: {
+    gap: 12,
+  },
+  lineRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'flex-start',
+    gap: 12,
+  },
+  lineLabel: {
+    flex: 1,
+    color: theme.text,
+    fontSize: 14,
+  },
+  lineLabelMuted: {
+    flex: 1,
+    color: theme.textSoft,
+    fontSize: 14,
+  },
+  lineValue: {
+    color: theme.text,
+    fontSize: 14,
+    fontWeight: '500',
+    fontVariant: ['tabular-nums'],
+  },
+  lineDivider: {
+    height: StyleSheet.hairlineWidth,
+    backgroundColor: theme.border,
+  },
+  lineTotalLabel: {
+    color: theme.text,
+    fontSize: 15,
+    fontWeight: '700',
+  },
+  lineTotalValue: {
+    color: theme.text,
+    fontSize: 18,
+    fontWeight: '800',
+    fontVariant: ['tabular-nums'],
+  },
+  infoRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    gap: 12,
+  },
+  infoRowDivider: {
+    borderBottomColor: theme.border,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    paddingBottom: 12,
+  },
+  infoLabel: {
+    color: theme.textSoft,
+    fontSize: 14,
+  },
+  infoValue: {
+    flexShrink: 1,
+    color: theme.text,
+    fontSize: 14,
+    fontWeight: '600',
+    textAlign: 'right',
+  },
+  secureRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
     gap: 6,
   },
-  detailIdentityBadges: {
-    flexDirection: 'row',
-    gap: 8,
-    alignItems: 'center',
-    marginBottom: 4,
-  },
-  detailDesc: {
-    color: theme.text,
-    fontSize: 18,
-    fontWeight: '700',
-    lineHeight: 24,
-  },
-  detailPlate: {
+  secureText: {
     color: theme.textMute,
-    fontSize: 13,
-  },
-  detailOverdueMeta: {
-    color: theme.warning,
-    fontSize: 13,
-    fontWeight: '500',
-  },
-  detailDueMeta: {
-    color: theme.textMute,
-    fontSize: 13,
+    fontSize: 12,
   },
 
-  // Detail modal — sections
-  detailSection: {
-    gap: 10,
+  // Payment modal
+  payHero: {
+    alignItems: 'center',
+    gap: 2,
+    paddingVertical: 8,
   },
-  detailSectionTitle: {
+  payHeroSub: {
+    color: theme.textMute,
+    fontSize: 13,
+  },
+  waiting: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    backgroundColor: theme.primaryTint,
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: radius.pill,
+    marginTop: 10,
+  },
+  waitingText: {
+    color: theme.primary,
+    fontSize: 12.5,
+    fontWeight: '600',
+  },
+  qrWrap: {
+    // QR code precisa de fundo branco sólido pra ler bem — não segue o tema.
+    alignSelf: 'center',
+    backgroundColor: 'white',
+    borderRadius: radius.xl,
+    borderWidth: 1,
+    borderColor: theme.border,
+    padding: 16,
+  },
+  qrImage: {
+    width: 220,
+    height: 220,
+  },
+  codeBox: {
+    backgroundColor: theme.surfaceAlt,
+    borderRadius: radius.md,
+    padding: 12,
+    gap: 4,
+  },
+  codeLabel: {
     color: theme.textMute,
     fontSize: 11,
     fontWeight: '700',
     textTransform: 'uppercase',
     letterSpacing: 0.5,
   },
-
-  // Composition block
-  compositionBlock: {
-    backgroundColor: theme.surface,
-    borderColor: theme.border,
-    borderWidth: 1,
-    borderRadius: 12,
-    padding: 14,
-    gap: 10,
-  },
-  compositionRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'flex-start',
-    gap: 8,
-  },
-  compositionLabelGroup: {
-    flex: 1,
-    gap: 2,
-  },
-  compositionLabel: {
-    color: theme.textMute,
-    fontSize: 14,
-  },
-  compositionLabelTotal: {
-    color: theme.text,
-    fontWeight: '600',
-  },
-  compositionSub: {
-    color: theme.border,
-    fontSize: 12,
-  },
-  compositionValue: {
-    color: theme.text,
-    fontSize: 14,
-    fontWeight: '500',
-  },
-  compositionValueTotal: {
-    fontSize: 16,
-    fontWeight: '700',
-    color: theme.primary,
-  },
-  compositionDivider: {
-    height: 1,
-    backgroundColor: theme.surfaceAlt,
-  },
-
-  // Status pill
-  statusPill: {
-    alignSelf: 'flex-start',
-    paddingHorizontal: 10,
-    paddingVertical: 3,
-    borderRadius: 999,
-  },
-  statusPillText: {
-    fontSize: 12,
-    fontWeight: '600',
-  },
-
-  // Paid block
-  paidBlock: {
-    backgroundColor: theme.successBg,
-    borderColor: theme.success,
-    borderWidth: 1,
-    borderRadius: 12,
-    padding: 14,
-    gap: 10,
-  },
-  paidTitle: {
-    color: theme.success,
-    fontSize: 13,
-    fontWeight: '700',
-    marginBottom: 2,
-  },
-  paidConfirmedTag: {
-    color: theme.success,
-    fontSize: 12,
-    opacity: 0.8,
-  },
-
-  // Pix modal
-  pixPaidConfirm: {
-    backgroundColor: theme.successBg,
-    borderColor: theme.success,
-    borderWidth: 1,
-    borderRadius: 12,
-    padding: 16,
-    alignItems: 'center',
-  },
-  pixPaidConfirmText: {
-    color: theme.success,
-    fontSize: 17,
-    fontWeight: '700',
-  },
-  reuseNote: {
-    backgroundColor: theme.indigoBg,
-    borderRadius: 8,
-    padding: 10,
-  },
-  reuseNoteText: {
-    color: theme.textMute,
-    fontSize: 12,
-    textAlign: 'center',
-  },
-  pixQrContainer: {
-    // QR code precisa de fundo branco sólido pra ler bem — não segue o tema.
-    alignItems: 'center',
-    backgroundColor: 'white',
-    borderRadius: 16,
-    padding: 16,
-  },
-  pixQrImage: {
-    width: 200,
-    height: 200,
-  },
-  pixInfo: {
-    alignItems: 'center',
-    gap: 4,
-  },
-  pixAmount: {
-    color: theme.text,
-    fontSize: 22,
-    fontWeight: '700',
-  },
-  pixExpiry: {
-    color: theme.textMute,
-    fontSize: 13,
-  },
-  pixCodeBlock: {
-    backgroundColor: theme.surface,
-    borderColor: theme.surfaceAlt,
-    borderWidth: 1,
-    borderRadius: 12,
-    padding: 14,
-    gap: 6,
-  },
-  pixCodeLabel: {
-    color: theme.textMute,
-    fontSize: 12,
-  },
-  pixCode: {
-    color: theme.text,
+  code: {
+    color: theme.textSoft,
     fontSize: 11,
     fontFamily: 'monospace',
     lineHeight: 16,
   },
-  copyBtn: {
-    backgroundColor: theme.surface,
-    borderColor: theme.border,
-    borderWidth: 1,
-    borderRadius: 12,
-    paddingVertical: 13,
-    alignItems: 'center',
+  steps: {
+    gap: 12,
   },
-  copyBtnText: {
+  step: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 12,
+  },
+  stepNum: {
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+    backgroundColor: theme.primaryTint,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  stepNumText: {
+    color: theme.primary,
+    fontSize: 12,
+    fontWeight: '800',
+  },
+  stepText: {
+    flex: 1,
     color: theme.text,
     fontSize: 14,
-    fontWeight: '600',
+    lineHeight: 21,
   },
-  linkNoteText: {
+  footnote: {
     color: theme.textMute,
-    fontSize: 13,
-    lineHeight: 19,
+    fontSize: 12,
+    textAlign: 'center',
+  },
+  successWrap: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: 24,
+    gap: 6,
+  },
+  successIcon: {
+    width: 96,
+    height: 96,
+    borderRadius: 48,
+    backgroundColor: theme.successBg,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 16,
+  },
+  successTitle: {
+    color: theme.text,
+    fontSize: 22,
+    fontWeight: '800',
+  },
+  successAmount: {
+    color: theme.success,
+    fontSize: 30,
+    fontWeight: '800',
+    fontVariant: ['tabular-nums'],
+  },
+  successText: {
+    color: theme.textSoft,
+    fontSize: 14,
+    textAlign: 'center',
   },
 })

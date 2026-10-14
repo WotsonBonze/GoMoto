@@ -88,6 +88,36 @@ quebraria a cobrança assim que um gateway de checkout fosse eleito.
 
 ### App do cliente (mobile — `apps/mobile/src/screens/BillingsScreen.tsx`)
 
+**Layout (redesenho 2026-10-14)**, no padrão de apps bancários e com o kit de
+componentes da [[decisions/0040-identidade-visual-app-mobile-v2|ADR 0040]]:
+
+- **Card de resumo** no topo, na superfície de marca (azul-marinho): *Total a pagar* (vencidas + próximo aluguel +
+  outras em aberto; o cronograma futuro fica de fora), selo *N cobranças vencidas
+  · R$ X* ou *Tudo em dia*, e um atalho para a cobrança mais urgente
+  (*Regularizar agora* / *Pagar próxima cobrança*).
+- **Abas A pagar / Pagas** no lugar do antigo botão "Ver histórico".
+  - *A pagar*: seções *Em atraso* (com subtotal), *Próximo aluguel*, *Outras
+    cobranças*.
+  - *Pagas*: só `status = 'paid'`, agrupadas por mês do vencimento com total do
+    mês. Antes o histórico listava **todas** as linhas de `useMyCharges(false)`
+    — inclusive o cronograma futuro em aberto — com ✓, e rotulava o vencimento
+    como "Pago em".
+- **Linha**: selo de data (dia/mês) colorido pelo tom — vencida (danger), vence
+  hoje (warning), até 3 dias (pending), futura (primary), paga (success);
+  descrição, *Aluguel/Avulsa · placa*, frase de vencimento e valor.
+- **Detalhe**: valor em destaque com status, alerta de atraso explicando o
+  encargo, **composição item a item** (`useChargeDetail`, política
+  `customer_read_own_charge_items`) com subtotal / já pago / encargos, bloco de
+  detalhes (origem, veículo, emissão, vencimento, número) e botão **Pagar**
+  fixo no rodapé. Com tentativa já gerada, o botão vira *Ver pagamento em
+  andamento* em vez de gerar outra.
+- **Pagamento**: selo *Aguardando pagamento…* enquanto o polling roda, botão
+  *Copiar código Pix* que confirma no próprio botão (sem `Alert`), passo a
+  passo de como pagar e tela de sucesso dedicada quando o webhook confirma.
+
+"Hoje" é a data **local** do aparelho: `toISOString()` (UTC) fazia a cobrança
+que vence hoje aparecer como vencida depois das 21h.
+
 O detalhe da cobrança tem um único botão **Pagar R$ X**, que chama
 `POST /api/charges/[id]/payment-intent` **sem `method`** — o meio é o do
 gateway eleito, como no cockpit. O antigo seletor *Pix / Boleto (em breve) /
