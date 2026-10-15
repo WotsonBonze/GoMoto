@@ -3,7 +3,6 @@ import {
   Image,
   KeyboardAvoidingView,
   Platform,
-  ScrollView,
   StyleSheet,
   Text,
   View,
@@ -43,11 +42,10 @@ function AuthShellBody({ title, subtitle, children }: { title: string; subtitle?
       <StatusBar style="light" />
       <SafeAreaView style={styles.flex} edges={['top']}>
         <KeyboardAvoidingView style={styles.flex} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
-          <ScrollView
-            contentContainerStyle={styles.scroll}
-            keyboardShouldPersistTaps="handled"
-            bounces={false}
-          >
+          {/* View, não ScrollView: no Android (Expo Go, adjustResize) o
+              ScrollView com flexGrow fazia o teclado abrir e fechar na hora
+              ao tocar no campo. */}
+          <View style={styles.flex}>
             <View style={styles.brandArea}>
               <Image source={require('../../assets/icon.png')} style={styles.logo} />
               <Text style={[styles.brandName, { color: theme.brandText }]}>GoMoto</Text>
@@ -67,7 +65,7 @@ function AuthShellBody({ title, subtitle, children }: { title: string; subtitle?
                 <Text style={[styles.secureText, { color: theme.textMute }]}>Conexão segura e criptografada</Text>
               </View>
             </View>
-          </ScrollView>
+          </View>
         </KeyboardAvoidingView>
       </SafeAreaView>
     </View>
@@ -77,7 +75,6 @@ function AuthShellBody({ title, subtitle, children }: { title: string; subtitle?
 const styles = StyleSheet.create({
   root: { flex: 1 },
   flex: { flex: 1 },
-  scroll: { flexGrow: 1 },
   brandArea: {
     alignItems: 'center',
     paddingTop: 40,

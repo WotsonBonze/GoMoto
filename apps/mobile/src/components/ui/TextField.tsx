@@ -40,7 +40,6 @@ export const TextField = forwardRef<TextInput, Props>(function TextField(
           styles.box,
           multiline && styles.boxMultiline,
           { backgroundColor: theme.surface, borderColor },
-          focused && !error && { shadowColor: theme.primary, shadowOpacity: 0.15, shadowRadius: 6, shadowOffset: { width: 0, height: 0 } },
         ]}
       >
         {icon ? <Icon name={icon} size={18} color={focused ? theme.primary : theme.textMute} /> : null}
