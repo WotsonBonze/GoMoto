@@ -40,6 +40,18 @@ Depois de gravar, um modal mostra o link e pede conferência, com *Não é minha
 
 Escrita: as três operações passam por RPC `SECURITY DEFINER` (`fn_connect_provider_account`, `fn_set_default_provider_account`, `fn_disconnect_provider_account`), que checam Owner **e** tenant dentro do banco. `authenticated` não tem `INSERT`/`UPDATE` em `payment_provider_accounts` — a linha aponta para uma credencial no Vault, e o guard de dinheiro não pode viver só na aplicação.
 
+### Contatos para o cliente (Owner/Admin)
+
+Lista de contatos que aparece no **app do cliente**, aba Conta → *Fale com a locadora*, na ordem definida aqui (setas subir/descer). Cada contato tem **nome livre** ("Financeiro", "Manutenção"), **número e/ou e-mail** — ao menos um —, o **tipo do número** (Telefone ou WhatsApp) e um **horário de atendimento** opcional em texto livre ("Seg a sex, 8h às 18h").
+
+- Tabela `tenant_contacts` (`label`, `phone` só dígitos 10–11, `phone_kind` `phone|whatsapp`, `email`, `business_hours`, `sort_order`).
+- Validação: `TenantContactInputSchema` (`@gomoto/core`) — aceita telefone mascarado e normaliza para dígitos.
+- Escrita: `createTenantContactAction`, `updateTenantContactAction`, `deleteTenantContactAction`, `reorderTenantContactsAction` em `configuracoes/actions.ts`; todas com `requireTenantOwnerOrAdmin` + `logAction`.
+- RLS: membros leem, **clientes do tenant leem** (`get_customer_tenants()`), só Owner/Admin escrevem (`get_user_admin_tenant_memberships()`); `anon` sem grant.
+- Leitura: `useTenantContacts()` (`@gomoto/data`), filtrando pelo tenant do `SupabaseProvider` — um cliente de duas locadoras enxerga as duas pela RLS.
+
+No app, o ícone segue o tipo (WhatsApp verde ou telefone; envelope quando só há e-mail) e o horário aparece abaixo do número. Tocar abre direto o WhatsApp ou a ligação; se o contato também tem e-mail, o app pergunta qual canal usar. O cliente vê **somente** os contatos cadastrados aqui: sem nenhum, a seção "Fale com a locadora" não aparece no app. O telefone e o e-mail gerais da empresa (`tenants.contact_phone/contact_email`) não são exibidos ao cliente.
+
 ### Encargo por atraso (Owner apenas) — ADR 0024
 
 A única forma de configurar multa e juros. Antes desta seção, `late_charge_policies` só recebia escrita por migration: mudar a política exigia SQL direto no banco.

@@ -9,6 +9,8 @@ import {
 } from 'react-native'
 import { SafeAreaView } from 'react-native-safe-area-context'
 import Constants from 'expo-constants'
+import { applyPhoneMask, type TenantContact } from '@gomoto/core'
+import { useTenantContacts } from '@gomoto/data'
 import { useAuth } from '../../src/contexts/auth'
 import { supabase } from '../../src/lib/supabase'
 import { useTheme, useThemePreference, type ThemeTokens, type ThemePreference } from '../../src/theme'
@@ -19,6 +21,8 @@ import {
   SectionHeader,
   SegmentedControl,
   type SegmentOption,
+  type IconName,
+  type Tone,
 } from '../../src/components/ui'
 
 const THEME_OPTIONS: SegmentOption<ThemePreference>[] = [
@@ -31,11 +35,6 @@ const THEME_OPTIONS: SegmentOption<ThemePreference>[] = [
 // Helpers
 // ---------------------------------------------------------------------------
 
-function formatPhone(raw: string | null | undefined): string | null {
-  if (!raw) return null
-  return raw.replace(/\D/g, '').length >= 10 ? raw : null
-}
-
 function openWhatsApp(phone: string) {
   const digits = phone.replace(/\D/g, '')
   const number = digits.startsWith('55') ? digits : `55${digits}`
@@ -44,6 +43,41 @@ function openWhatsApp(phone: string) {
 
 function openMail(email: string) {
   void Linking.openURL(`mailto:${email}`)
+}
+
+function callPhone(phone: string) {
+  void Linking.openURL(`tel:${phone.replace(/\D/g, '')}`)
+}
+
+/**
+ * Número sozinho abre direto pelo tipo que a locadora definiu (WhatsApp ou
+ * ligação). Com e-mail junto, pergunta qual canal usar.
+ */
+function openContact(contact: TenantContact) {
+  const { phone, email } = contact
+  const openPhone = phone
+    ? () => (contact.phone_kind === 'whatsapp' ? openWhatsApp(phone) : callPhone(phone))
+    : null
+
+  if (openPhone && !email) return openPhone()
+  if (email && !openPhone) return openMail(email)
+
+  Alert.alert(contact.label, contactSummary(contact), [
+    { text: contact.phone_kind === 'whatsapp' ? 'WhatsApp' : 'Ligar', onPress: openPhone! },
+    { text: 'E-mail', onPress: () => openMail(email!) },
+    { text: 'Cancelar', style: 'cancel' },
+  ])
+}
+
+function contactSummary(contact: TenantContact): string {
+  return [contact.phone ? applyPhoneMask(contact.phone) : null, contact.email].filter(Boolean).join(' · ')
+}
+
+function contactIcon(contact: TenantContact): { icon: IconName; tone: Tone } {
+  if (!contact.phone) return { icon: 'mail-outline', tone: 'primary' }
+  return contact.phone_kind === 'whatsapp'
+    ? { icon: 'logo-whatsapp', tone: 'success' }
+    : { icon: 'call-outline', tone: 'primary' }
 }
 
 function initials(name: string | null): string {
@@ -94,8 +128,10 @@ export default function ContaTab() {
     ])
   }
 
-  const tenantPhone = formatPhone(activeTenant?.contact_phone)
-  const tenantEmail = activeTenant?.contact_email ?? null
+  // Só o que a locadora cadastrou em Configurações (tenant_contacts). Sem
+  // contato cadastrado, a seção inteira some — o telefone/e-mail gerais da
+  // empresa (tenants.contact_*) não são exibidos ao cliente.
+  const contacts = useTenantContacts().data ?? []
 
   return (
     <SafeAreaView style={styles.safe} edges={['top']}>
@@ -111,7 +147,7 @@ export default function ContaTab() {
             <Text style={styles.profileName} numberOfLines={1}>{profile.name ?? '—'}</Text>
             {profile.phone ? <Text style={styles.profileMeta}>{profile.phone}</Text> : null}
             {activeTenant ? (
-              <Text style={styles.profileMeta} numberOfLines={1}>Cliente {activeTenant.name}</Text>
+              <Text style={styles.profileMeta} numberOfLines={1}>{activeTenant.name}</Text>
             ) : null}
           </View>
         </Card>
@@ -122,40 +158,24 @@ export default function ContaTab() {
           <SegmentedControl value={preference} options={THEME_OPTIONS} onChange={setPreference} />
         </View>
 
-        {/* Minha locadora */}
-        {activeTenant ? (
+        {/* Fale com a locadora — só aparece se a locadora cadastrou contatos */}
+        {contacts.length > 0 ? (
           <View style={styles.section}>
             <SectionHeader title="Fale com a locadora" />
             <Card padded={false}>
-              <ListItem
-                icon="business-outline"
-                label="Empresa"
-                value={activeTenant.name}
-                last={!tenantPhone && !tenantEmail}
-              />
-              {tenantPhone ? (
+              {contacts.map((contact, index) => (
                 <ListItem
-                  icon="logo-whatsapp"
-                  iconTone="success"
-                  label="WhatsApp"
-                  sublabel={tenantPhone}
-                  onPress={() => openWhatsApp(tenantPhone)}
-                  last={!tenantEmail}
+                  key={contact.id}
+                  icon={contactIcon(contact).icon}
+                  iconTone={contactIcon(contact).tone}
+                  label={contact.label}
+                  sublabel={contactSummary(contact)}
+                  caption={contact.business_hours ? `Atendimento: ${contact.business_hours}` : undefined}
+                  onPress={() => openContact(contact)}
+                  last={index === contacts.length - 1}
                 />
-              ) : null}
-              {tenantEmail ? (
-                <ListItem
-                  icon="mail-outline"
-                  label="E-mail"
-                  sublabel={tenantEmail}
-                  onPress={() => openMail(tenantEmail)}
-                  last
-                />
-              ) : null}
+              ))}
             </Card>
-            {!tenantPhone && !tenantEmail ? (
-              <Text style={styles.footnote}>A locadora ainda não informou um contato.</Text>
-            ) : null}
           </View>
         ) : null}
 
@@ -223,10 +243,5 @@ const createStyles = (theme: ThemeTokens) => StyleSheet.create({
   profileMeta: {
     color: theme.textSoft,
     fontSize: 13.5,
-  },
-  footnote: {
-    color: theme.textMute,
-    fontSize: 13,
-    paddingHorizontal: 4,
   },
 })

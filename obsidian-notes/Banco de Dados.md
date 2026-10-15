@@ -18,6 +18,7 @@ Exceções deliberadas — catálogos globais sem `tenant_id`: `permission_modul
 |---|---|
 | `tenants` | Empresas (locadoras) |
 | `tenant_members` | Vínculo usuário ↔ tenant, com papel e ciclo de vida |
+| `tenant_contacts` | Contatos por área que a locadora publica no app do cliente ("Fale com a locadora"); clientes leem, Owner/Admin escrevem |
 | `platform_admins` | Administradores da plataforma (control plane) |
 | `platform_audit_logs` | Auditoria de ações do control plane |
 

@@ -19,11 +19,12 @@ import { Card } from '@/components/ui/Card'
 import { Input } from '@/components/ui/Input'
 import { cn } from '@/lib/utils'
 import { createClient } from '@/lib/supabase/client'
-import { useProviderAccounts, useThemePreference, useLateChargePolicies } from '@gomoto/data'
+import { useProviderAccounts, useThemePreference, useLateChargePolicies, useTenantContacts } from '@gomoto/data'
 import type { ThemeBrand, ColorMode } from '@gomoto/core'
 import { updateThemePreferenceAction } from './actions'
 import { LateChargePolicySection, type PolicyVersion } from './_components/LateChargePolicySection'
 import { PaymentGatewaySection, type GatewayFeedback } from './_components/PaymentGatewaySection'
+import { TenantContactsSection } from './_components/TenantContactsSection'
 
 const THEME_BRANDS: { value: ThemeBrand; label: string; description: string; swatch: string[] }[] = [
   { value: 'frota-confiavel', label: 'Frota Confiável', description: 'Azul, neutros frios — recomendado', swatch: ['#F8FAFC', '#2563EB', '#0F172A'] },
@@ -112,6 +113,7 @@ export default function SettingsPage() {
 
   const paymentConnectionQuery = useProviderAccounts()
   const policiesQuery = useLateChargePolicies()
+  const contactsQuery = useTenantContacts()
   const [paymentFeedback, setPaymentFeedback] = useState<GatewayFeedback | null>(null)
 
   // --- ESTADOS: Aparência (ADR 0019) ---
@@ -513,6 +515,16 @@ export default function SettingsPage() {
           <LateChargePolicySection
             versions={(policiesQuery.data ?? []) as PolicyVersion[]}
             onSaved={() => { void policiesQuery.refetch() }}
+          />
+        ) : null}
+
+        {/* SEÇÃO 3-c: Contatos exibidos no app do cliente — Owner/Admin, mesma
+            régua da RLS de tenant_contacts. */}
+        {canManageUsers ? (
+          <TenantContactsSection
+            contacts={contactsQuery.data ?? []}
+            isLoading={contactsQuery.isLoading}
+            onChanged={() => { void contactsQuery.refetch() }}
           />
         ) : null}
 
