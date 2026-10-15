@@ -17,7 +17,7 @@ import { assertMethodSupported, getProvider, PROVIDER_REGISTRY, type ProviderReg
 import { resolveCredentials } from './credentials'
 import { cancelChargeIntents } from './cancel'
 import { ensureQrImage } from './qr'
-import { tenantToday } from './business-time'
+import { fetchTenantTimezone, tenantToday } from './business-time'
 import { representsDebt } from './intent-reuse'
 import { codedError, ProviderAuthError } from './types'
 
@@ -83,7 +83,7 @@ export async function getOrCreateIntent(
   // "Hoje" da LOCADORA: o servidor roda em UTC e às 22h de Brasília já estaria
   // no dia seguinte — um dia de encargo a mais aqui, um dia de juros a menos
   // no vencimento mandado ao provedor.
-  const timezone = await resolveTimezone(supabase, tenantId)
+  const timezone = await fetchTenantTimezone(supabase, tenantId)
   const asOf = tenantToday(timezone)
   const due = calculateAmountDue(b, policy, asOf)
   const { amount_due } = due
@@ -343,12 +343,6 @@ function reuse(row: PendingIntentRow, registry: ProviderRegistry, amountDue: num
     payload: row.payload,
     is_reused: true,
   }
-}
-
-/** Fuso da locadora (`tenants.timezone`); ausente cai no default do banco. */
-async function resolveTimezone(supabase: SupabaseClient, tenantId: string): Promise<string | null> {
-  const { data } = await supabase.from('tenants').select('timezone').eq('id', tenantId).maybeSingle()
-  return (data as { timezone: string | null } | null)?.timezone ?? null
 }
 
 /** Política fixada na emissão da cobrança — não a vigente hoje (R-08). */

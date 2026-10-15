@@ -96,3 +96,40 @@ describe('asaasProvider.createIntent — trava de ambiente', () => {
     expect(fetchSpy).not.toHaveBeenCalled()
   })
 })
+
+describe('asaasProvider.createIntent — multa fixa maior que o valor', () => {
+  // Caso de produção (2026-10-14): R$ 10 no prazo, política com multa fixa de
+  // R$ 35. O Asaas responde 400; aqui sai antes da rede, com código próprio.
+  const policy = {
+    fee_type: 'fixed', fee_value: 35, daily_interest_rate: 0.000333,
+    grace_period_days: 0, min_amount: 0, version: 1, effective_from: '2026-10-13',
+  } as never
+
+  async function gerar(open_amount: number, due_date: string) {
+    const { asaasProvider } = await import('./index')
+    const { embeddedLateChargeTerms } = await import('@gomoto/core')
+    vi.stubEnv('ASAAS_ENVIRONMENT', 'sandbox')
+    const lateCharge = embeddedLateChargeTerms(
+      { open_amount, paid_amount: 0, late_charge_amount: 0, due_date }, policy, new Date(2026, 9, 14),
+    )
+    return asaasProvider.createIntent({
+      amount: lateCharge.value, chargeId: crypto.randomUUID(), method: 'pix', lateCharge,
+      credentials: { api_key: conn.apiKey, environment: 'sandbox', webhook_id: null },
+      customer: { name: 'X', email: null, document: '24971563792' },
+    })
+  }
+
+  it('no prazo, multa fixa >= valor é recusada sem falar com o Asaas', async () => {
+    const fetchSpy = vi.fn()
+    vi.stubGlobal('fetch', fetchSpy)
+    await expect(gerar(10, '2026-10-14')).rejects.toMatchObject({ code: 'FINE_EXCEEDS_AMOUNT' })
+    await expect(gerar(35, '2026-10-14')).rejects.toMatchObject({ code: 'FINE_EXCEEDS_AMOUNT' })
+    expect(fetchSpy).not.toHaveBeenCalled()
+  })
+
+  it('vencida, a multa já está no valor e a guarda não se aplica', async () => {
+    respond(500, {})
+    await expect(gerar(10, '2026-10-13')).rejects.not.toMatchObject({ code: 'FINE_EXCEEDS_AMOUNT' })
+  })
+})
+

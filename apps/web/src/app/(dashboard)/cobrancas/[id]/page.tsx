@@ -8,6 +8,7 @@ import {
   type LateChargePolicy, type AccruedCharges,
 } from '@gomoto/core'
 import { formatCurrency } from '@/lib/utils'
+import { fetchTenantTimezone, tenantToday } from '@/lib/payment/business-time'
 import { BillingActions } from './_components/BillingActions'
 import { ReversePaymentButton } from './_components/ReversePaymentButton'
 
@@ -71,13 +72,14 @@ function rateioDoEncargoRealizado(
   principalEmitido: number,
   totalGravado: number,
   recebimentos: { paid_at: string; amount: number }[],
+  timezone: string | null,
 ): AccruedCharges | null {
   let abatido = 0
 
   for (const r of [...recebimentos].sort((a, b) => (a.paid_at < b.paid_at ? -1 : 1))) {
     const principal = round2(principalEmitido - abatido)
     if (principal > 0) {
-      const tentativa = calculateAccruedCharges(policy, principal, dueDate, new Date(r.paid_at))
+      const tentativa = calculateAccruedCharges(policy, principal, dueDate, tenantToday(timezone, new Date(r.paid_at)))
       if (round2(tentativa.total) === totalGravado) return tentativa
     }
     abatido = round2(abatido + r.amount)
@@ -171,7 +173,7 @@ export default async function BillingDetailPage({
   // do documento são os ITENS — `late_charges` e `credit_applications` deixaram
   // de existir: encargo é calculado até ser realizado (R-06), e aplicação de
   // crédito é transação no ledger.
-  const [balanceResult, itemsResult, allocationsResult, gatewayResult, membrosResult] = await Promise.all([
+  const [balanceResult, itemsResult, allocationsResult, gatewayResult, membrosResult, timezone] = await Promise.all([
     supabase
       .from('charge_balances')
       .select('*')
@@ -216,6 +218,10 @@ export default async function BillingDetailPage({
     // continua dizendo que o recebimento foi manual; só não diz por quem. É
     // degradação honesta: melhor omitir o nome do que inventar um.
     supabase.rpc('list_tenant_members', { p_search: null }),
+    // "Hoje" do encargo é o da LOCADORA. A página roda no servidor (UTC na
+    // Vercel): com `new Date()`, a partir das 21h de Brasília a cobrança que
+    // vence hoje aparecia com multa e juros de um dia.
+    fetchTenantTimezone(supabase, tenantId),
   ])
 
   if (balanceResult.error || !balanceResult.data) notFound()
@@ -391,7 +397,7 @@ export default async function BillingDetailPage({
   const {
     accrued, amount_due: amountDue,
     principal: principalEmAberto, late_charge_realized: jaLancado, accrued_pending: aAcrescentar,
-  } = calculateAmountDue(balance, policy)
+  } = calculateAmountDue(balance, policy, tenantToday(timezone))
   const statusCfg = STATUS_CONFIG[balance.is_overdue ? 'overdue' : balance.status] ?? STATUS_CONFIG.open
 
   // A REGRA em números que o operador reconhece: percentual ao mês como ele
@@ -427,6 +433,7 @@ export default async function BillingDetailPage({
     ? rateioDoEncargoRealizado(
         policy, balance.due_date, principalEmitido, encargoRealizado,
         payments.filter((p) => !p.reversed).map((p) => ({ paid_at: p.paid_at, amount: p.amount })),
+        timezone,
       )
     : null
 

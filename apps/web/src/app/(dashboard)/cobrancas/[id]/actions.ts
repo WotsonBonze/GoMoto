@@ -20,6 +20,7 @@ import {
 } from '@gomoto/core'
 import { postTransaction, dimensionsOf, realizeAccruedBefore } from '@/lib/financial'
 import { getOrCreateIntent, type PaymentIntentResult } from '@/lib/payment/intents'
+import { fetchTenantTimezone, tenantToday } from '@/lib/payment/business-time'
 
 type Failure = { ok: false; error: { code: ErrorCode; message: string } }
 
@@ -97,7 +98,11 @@ export async function applyCustomerCredits(
     const openAmount = round2(Number((balanceRow as { open_amount: number } | null)?.open_amount ?? 0))
 
     if (amount > openAmount) {
-      await realizeAccruedBefore(ctx.supabase, ctx.tenantId, [input.charge_id], new Date())
+      // Hoje da LOCADORA: com `new Date()` o servidor (UTC) já está no dia
+      // seguinte a partir das 21h de Brasília e lançaria multa na cobrança que
+      // vence hoje.
+      const timezone = await fetchTenantTimezone(ctx.supabase, ctx.tenantId)
+      await realizeAccruedBefore(ctx.supabase, ctx.tenantId, [input.charge_id], tenantToday(timezone))
     }
 
     const { error } = await ctx.supabase.rpc('fn_apply_customer_credit', {
@@ -217,6 +222,7 @@ export async function generateChargePixAction(rawChargeId: unknown): Promise<Act
     }
     if (e.code === 'NOT_FOUND')  return fail('NOT_FOUND', e.message)
     if (e.code === 'CONFLICT')   return fail('CONFLICT', e.message)
+    if (e.code === 'FINE_EXCEEDS_AMOUNT') return fail('CONFLICT', e.message)
 
     console.error('[generateChargePixAction]', e)
     return fail('INTERNAL', 'Não foi possível gerar o Pix. Tente novamente.')

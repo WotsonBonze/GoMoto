@@ -8,7 +8,18 @@
  * `fn_business_today`; isto é o mesmo do lado da aplicação.
  */
 
+import type { SupabaseClient } from '@supabase/supabase-js'
+
 const DEFAULT_TZ = 'America/Sao_Paulo'
+
+/** `tenants.timezone`; `null` quando não lido — `tenantToday` cai no padrão. */
+export async function fetchTenantTimezone(
+  supabase: SupabaseClient,
+  tenantId: string,
+): Promise<string | null> {
+  const { data } = await supabase.from('tenants').select('timezone').eq('id', tenantId).maybeSingle()
+  return (data as { timezone: string | null } | null)?.timezone ?? null
+}
 
 function datePartsIn(tz: string, at: Date): { y: number; m: number; d: number } {
   const parts = new Intl.DateTimeFormat('en-CA', {

@@ -119,6 +119,15 @@ export async function POST(req: NextRequest, ctx: RouteContext) {
         message: 'Pagamento online indisponível no momento. Fale com a locadora.',
       } }, 503)
     }
+    // A mensagem do provedor é para o operador; o cliente não tem o que
+    // ajustar e precisa saber a quem recorrer.
+    if (e.code === 'FINE_EXCEEDS_AMOUNT') {
+      log('warn', 'intent.fine_exceeds_amount', { charge_id: chargeId, tenant_id: c.tenant_id })
+      return json({ ok: false, error: {
+        code: 'FINE_EXCEEDS_AMOUNT',
+        message: 'Não é possível pagar esta cobrança pelo app. Entre em contato com a locadora para realizar o pagamento.',
+      } }, 409)
+    }
     if (e.code === 'NOT_FOUND') {
       return json({ ok: false, error: { code: 'NOT_FOUND', message: e.message } }, 404)
     }

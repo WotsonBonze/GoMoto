@@ -109,6 +109,20 @@ export const asaasProvider: PaymentProvider = {
       throw new Error(`Asaas: valor ${amount} diverge dos termos (${lateCharge.value})`)
     }
 
+    // O Asaas recusa multa fixa que não seja MENOR que o valor da cobrança
+    // ("O valor da multa (R$ 35,00) deve ser menor que o valor da cobrança
+    // (R$ 10,00)", visto em produção em 2026-10-14). Só acontece no prazo:
+    // vencida, a multa já vai dentro do valor e `fine` é nulo. Conferido aqui
+    // para não gastar a chamada e para o erro sair com código próprio — cada
+    // tela diz a quem lê o que fazer (operador ≠ cliente).
+    if (lateCharge.fine?.kind === 'fixed' && lateCharge.fine.value >= lateCharge.value) {
+      throw codedError(
+        'FINE_EXCEEDS_AMOUNT',
+        `Não é possível gerar cobrança no Asaas com valor (${brl(lateCharge.value)}) `
+        + `inferior ao da multa (${brl(lateCharge.fine.value)}).`,
+      )
+    }
+
     // O Asaas exige pagador com documento.
     if (!customer.document) {
       throw codedError(
@@ -169,4 +183,8 @@ export const asaasProvider: PaymentProvider = {
   async cancelIntent({ providerIntentId, credentials }) {
     await authed(() => deleteCharge(connOf(credentials), providerIntentId))
   },
+}
+
+function brl(n: number): string {
+  return n.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' })
 }

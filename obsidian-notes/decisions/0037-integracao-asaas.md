@@ -324,3 +324,13 @@ Todas respondidas em 2026-10-09:
 2. **Multa e juros**: Pix-only na v1, com a política da locadora embutida no `cobv` (decisão 3). A primeira escolha ("QR do dia") foi revista porque não garante a cobrança.
 3. **Sandbox**: duas contas, chaves em `apps/web/.env.local` (`ASAAS_SANDBOX_API_KEY`, recebedora sem saque; `ASAAS_SANDBOX_PAYER_API_KEY`, pagadora com saque, só para teste e nunca no GoMoto).
 4. **Defeito 3b**: corrigir no mesmo PR, mais a expiração do MP à meia-noite. A garantia universal para MP/Cora/InfinitePay fica para uma ADR própria.
+
+## Adendo 2026-10-15 — multa fixa maior que o valor, e fuso no servidor
+
+**Multa fixa ≥ valor.** O Asaas recusa a emissão no prazo quando a multa fixa não é menor que o valor (*"O valor da multa (R$ 35,00) deve ser menor que o valor da cobrança (R$ 10,00)"*, produção, 2026-10-14). O provedor confere antes de chamar a API e lança `FINE_EXCEEDS_AMOUNT`:
+- cockpit (`generateChargePixAction`): o operador lê que não é possível gerar cobrança com valor inferior ao da multa;
+- app (`/api/charges/[id]/payment-intent`, 409): o cliente lê que deve entrar em contato com a locadora para pagar.
+
+Vencida, a multa já está dentro do valor (`fine` nulo) e a guarda não se aplica — o Pix sai normalmente.
+
+**Fuso.** A página de detalhe da cobrança e a aplicação de crédito calculavam o encargo com `new Date()` no servidor (UTC): das 21h à meia-noite de Brasília a cobrança que vence hoje aparecia com multa e juros, e aplicar crédito lançava o encargo no razão um dia antes. Ambas passam a usar `tenantToday(fetchTenantTimezone(...))`, como `getOrCreateIntent` já fazia.
