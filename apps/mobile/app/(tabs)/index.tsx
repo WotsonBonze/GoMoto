@@ -542,7 +542,7 @@ const createStyles = (theme: ThemeTokens) => StyleSheet.create({
   },
   heroStats: {
     flexDirection: 'row',
-    backgroundColor: 'rgba(255,255,255,0.06)',
+    backgroundColor: theme.brandInset,
     borderRadius: radius.md,
     paddingVertical: 12,
   },

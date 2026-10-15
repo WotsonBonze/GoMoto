@@ -21,7 +21,7 @@ O stakeholder achou o app "feio" e pediu um visual **moderno, confiável e profi
 
 - **Neutros frios de alto contraste:** fundo `#F3F5F9` / `#080C15`, texto `#0C1424` / `#EEF2F8`.
 - **Azul royal mais denso** como cor de ação: `#2251D1` no claro, `#4D76F5` no escuro. Continua da família "Frota Confiável" (mesma marca do cockpit), só que menos "Tailwind padrão".
-- **Superfície de marca** (`brand`, azul-marinho `#0E1A36`) com `brandText`, `brandTextSoft`, `brandAccent`, `brandPositive` e `brandNegative`: o "cartão" do app. No máximo uma por tela, para o dado mais importante (resumo financeiro, veículo locado).
+- **Superfície de marca** (`brand`) com `brandText`, `brandTextSoft`, `brandAccent`, `brandPositive`, `brandNegative`, `brandInset` (bandeja de dados) e `brandButton`/`brandButtonText` (botão `onBrand`): o "cartão" do app. No máximo uma por tela, para o dado mais importante (resumo financeiro, veículo locado). **Segue o tema:** azul claro `#E3EBFD` com texto escuro no claro, azul-marinho `#14213F` no escuro. A primeira versão era azul-marinho nos dois temas, e o stakeholder leu os cartões escuros no tema claro como "tema errado" (2026-10-14). A faixa do `AuthShell` continua azul-marinho e usa os tokens de `darkTheme`.
 - **Status com saturação contida.** `critical` não muda (ADR 0020).
 - **Sombra só no claro** (`shadowColor`/`shadowOpacity`). No escuro, a profundidade vem da borda.
 

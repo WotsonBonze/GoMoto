@@ -32,7 +32,7 @@ export function Button({
     danger:    { bg: theme.danger, fg: '#FFFFFF', border: theme.danger },
     success:   { bg: theme.success, fg: '#FFFFFF', border: theme.success },
     ghost:     { bg: 'transparent', fg: theme.primary, border: 'transparent' },
-    onBrand:   { bg: '#FFFFFF', fg: theme.brand, border: '#FFFFFF' },
+    onBrand:   { bg: theme.brandButton, fg: theme.brandButtonText, border: theme.brandButton },
   }
   const c = palette[variant]
   const inactive = disabled || loading

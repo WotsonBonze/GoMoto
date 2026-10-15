@@ -9,7 +9,7 @@ import {
 } from 'react-native'
 import { StatusBar } from 'expo-status-bar'
 import { SafeAreaView } from 'react-native-safe-area-context'
-import { LightThemeScope, useTheme } from '../theme'
+import { darkTheme, LightThemeScope, useTheme } from '../theme'
 import { Icon } from './ui'
 
 /**
@@ -35,10 +35,13 @@ export function AuthShell({
   )
 }
 
+/** A faixa do topo é sempre azul-marinho (a `brand` do claro é azul claro). */
+const band = darkTheme
+
 function AuthShellBody({ title, subtitle, children }: { title: string; subtitle?: string; children: ReactNode }) {
   const theme = useTheme()
   return (
-    <View style={[styles.root, { backgroundColor: theme.brand }]}>
+    <View style={[styles.root, { backgroundColor: band.brand }]}>
       <StatusBar style="light" />
       <SafeAreaView style={styles.flex} edges={['top']}>
         <KeyboardAvoidingView style={styles.flex} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
@@ -48,8 +51,8 @@ function AuthShellBody({ title, subtitle, children }: { title: string; subtitle?
           <View style={styles.flex}>
             <View style={styles.brandArea}>
               <Image source={require('../../assets/icon.png')} style={styles.logo} />
-              <Text style={[styles.brandName, { color: theme.brandText }]}>GoMoto</Text>
-              <Text style={[styles.brandTagline, { color: theme.brandTextSoft }]}>
+              <Text style={[styles.brandName, { color: band.brandText }]}>GoMoto</Text>
+              <Text style={[styles.brandTagline, { color: band.brandTextSoft }]}>
                 Sua locação na palma da mão
               </Text>
             </View>

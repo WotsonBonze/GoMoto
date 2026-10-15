@@ -4,7 +4,7 @@ import { useTheme } from '../../theme'
 import { elevation, radius, space } from './tokens'
 
 /**
- * Cartão base. `variant="brand"` é a superfície azul-marinho de destaque —
+ * Cartão base. `variant="brand"` é a superfície de marca de destaque —
  * no máximo uma por tela, para o dado mais importante.
  */
 export function Card({
