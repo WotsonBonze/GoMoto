@@ -91,20 +91,27 @@ quebraria a cobrança assim que um gateway de checkout fosse eleito.
 **Layout (redesenho 2026-10-14)**, no padrão de apps bancários e com o kit de
 componentes da [[decisions/0040-identidade-visual-app-mobile-v2|ADR 0040]]:
 
-- **Card de resumo** no topo, na superfície de marca (azul-marinho): *Total a pagar* (vencidas + próximo aluguel +
-  outras em aberto; o cronograma futuro fica de fora), selo *N cobranças vencidas
+- **Card de resumo** no topo, na superfície de marca (azul-marinho): *Total a pagar* (todas
+  as cobranças emitidas em aberto — vencidas + a vencer), selo *N cobranças vencidas
   · R$ X* ou *Tudo em dia*, e um atalho para a cobrança mais urgente
   (*Regularizar agora* / *Pagar próxima cobrança*).
 - **Abas A pagar / Pagas** no lugar do antigo botão "Ver histórico".
-  - *A pagar*: seções *Em atraso* (com subtotal), *Próximo aluguel*, *Outras
-    cobranças*.
-  - *Pagas*: só `status = 'paid'`, agrupadas por mês do vencimento com total do
-    mês. Antes o histórico listava **todas** as linhas de `useMyCharges(false)`
-    — inclusive o cronograma futuro em aberto — com ✓, e rotulava o vencimento
-    como "Pago em".
+  - *A pagar*: **todas** as cobranças em aberto, em duas seções com subtotal —
+    *Vencidas* e *A vencer* — ordenadas por vencimento. (2026-10-16) Antes eram
+    *Em atraso*, *Próximo aluguel* e *Outras cobranças*: "Próximo aluguel"
+    mostrava só **uma** cobrança de locação, regra herdada da geração upfront
+    ([[decisions/0009-geracao-cobracas-upfront-vs-cron|ADR 0009]], substituída).
+    Desde a ADR 0024 só existe o que foi emitido, e o recorte escondia
+    cobranças reais (ex.: duas semanas emitidas e não vencidas → uma sumia).
+  - *Pagas*: só `status = 'paid'`, **paginadas** (`useMyPaidCharges`, 30 por
+    página, `due_date desc, charge_id desc`, botão *Carregar mais*), agrupadas
+    por mês do vencimento com total do mês. Antes vinha de `useMyCharges(false)`,
+    que baixava **todas** as cobranças e filtrava no aparelho: crescia sem
+    limite, mandava `.in()` com centenas de ids na URL e esbarrava no
+    `max_rows = 1000` do PostgREST, que corta a resposta em silêncio.
 - **Linha**: selo de data (dia/mês) colorido pelo tom — vencida (danger), vence
   hoje (warning), até 3 dias (pending), futura (primary), paga (success);
-  descrição, *Aluguel/Avulsa · placa*, frase de vencimento e valor.
+  descrição, *Locação/Avulsa · placa*, frase de vencimento e valor.
 - **Detalhe**: valor em destaque com status, alerta de atraso explicando o
   encargo, **composição item a item** (`useChargeDetail`, política
   `customer_read_own_charge_items`) com subtotal / já pago / encargos, bloco de

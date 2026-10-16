@@ -15,7 +15,7 @@ import {
 } from 'react-native'
 import { SafeAreaView } from 'react-native-safe-area-context'
 import { useFocusEffect } from 'expo-router'
-import { useChargeDetail, useMyCharges, usePaymentIntentStatus } from '@gomoto/data'
+import { useChargeDetail, useMyCharges, useMyPaidCharges, usePaymentIntentStatus } from '@gomoto/data'
 import type { MyChargeRow } from '@gomoto/data'
 import { isAuthRetryableFetchError } from '@supabase/supabase-js'
 import { supabase } from '../lib/supabase'
@@ -143,7 +143,7 @@ function plural(n: number, one: string, many: string): string {
 
 /** Origem da cobrança, em linguagem do cliente (não "ciclo"/"avulsa"). */
 function kindLabel(billing: MyChargeRow): string {
-  return billing.rental_id ? 'Aluguel' : 'Avulsa'
+  return billing.rental_id ? 'Locação' : 'Avulsa'
 }
 
 function isOverdue(billing: MyChargeRow, todayIso: string): boolean {
@@ -841,7 +841,7 @@ export function BillingsScreen() {
   const styles = useMemo(() => createStyles(theme), [theme])
 
   const query        = useMyCharges(true)
-  const historyQuery = useMyCharges(false)
+  const historyQuery = useMyPaidCharges()
 
   useFocusEffect(
     useCallback(() => {
@@ -868,35 +868,23 @@ export function BillingsScreen() {
 
   const todayIso = localTodayIso()
 
-  // O backend gera todas as cobranças de ciclo antecipadamente (pode ser anos).
-  // Regras de exibição:
-  //   • Em atraso  — todas vencidas, qualquer tipo
-  //   • Próxima    — única próxima cobrança de ciclo (due_date >= hoje)
-  //   • Outras     — multas, avulsas e complementares pendentes não vencidas
-  const { overdue, nextCycle, others } = useMemo(() => {
-    const all = query.data ?? []
-
-    const overdue = all
-      .filter((b) => isOverdue(b, todayIso))
-      .sort((a, b) => a.due_date.localeCompare(b.due_date))
-
-    const overdueIds = new Set(overdue.map((b) => b.charge_id))
-    const upcoming = all
-      .filter((b) => b.status === 'open' && !overdueIds.has(b.charge_id))
-      .sort((a, b) => a.due_date.localeCompare(b.due_date))
-
-    const nextCycle = upcoming.find((b) => b.rental_id !== null) ?? null
-    const others = upcoming.filter((b) => b.rental_id === null)
-
-    return { overdue, nextCycle, others }
+  // Todas as cobranças em aberto, divididas só por vencimento. Antes a tela
+  // mostrava apenas a PRÓXIMA cobrança de locação ("Próximo aluguel"), regra
+  // da época em que o contrato inteiro era gerado de uma vez (ADR 0009). Desde
+  // a ADR 0024 só existe o que já foi emitido, e esse recorte escondia
+  // cobranças reais — a segunda semana emitida, por exemplo, nunca aparecia.
+  const { overdue, upcoming } = useMemo(() => {
+    const open = [...(query.data ?? [])].sort((a, b) => a.due_date.localeCompare(b.due_date))
+    return {
+      overdue:  open.filter((b) => isOverdue(b, todayIso)),
+      upcoming: open.filter((b) => b.status === 'open' && !isOverdue(b, todayIso)),
+    }
   }, [query.data, todayIso])
 
-  // "Pagas": `useMyCharges(false)` devolve TODAS as cobranças, inclusive o
-  // cronograma futuro em aberto — o histórico antigo listava essas com ✓.
+  // "Pagas": paginado (`useMyPaidCharges`), mais recentes primeiro. Os grupos
+  // por mês são montados sobre as páginas já carregadas.
   const paidByMonth = useMemo(() => {
-    const paid = (historyQuery.data ?? [])
-      .filter((b) => b.status === 'paid')
-      .sort((a, b) => b.due_date.localeCompare(a.due_date))
+    const paid = historyQuery.data?.pages.flat() ?? []
 
     const groups: { key: string; title: string; total: number; rows: MyChargeRow[] }[] = []
     for (const b of paid) {
@@ -913,9 +901,10 @@ export function BillingsScreen() {
     return groups
   }, [historyQuery.data])
 
-  const visibleOpen = [...overdue, ...(nextCycle ? [nextCycle] : []), ...others]
+  const visibleOpen = [...overdue, ...upcoming]
   const total = visibleOpen.reduce((sum, b) => sum + b.amount_due, 0)
   const overdueTotal = overdue.reduce((sum, b) => sum + b.amount_due, 0)
+  const upcomingTotal = upcoming.reduce((sum, b) => sum + b.amount_due, 0)
   const urgent = visibleOpen[0] ?? null
 
   function renderRows(rows: MyChargeRow[]) {
@@ -990,25 +979,15 @@ export function BillingsScreen() {
               <>
                 {overdue.length > 0 && (
                   <View style={styles.section}>
-                    <SectionHeader title="Em atraso" trailing={formatCurrency(overdueTotal)} color={theme.danger} />
+                    <SectionHeader title="Vencidas" trailing={formatCurrency(overdueTotal)} color={theme.danger} />
                     {renderRows(overdue)}
                   </View>
                 )}
 
-                {nextCycle && (
+                {upcoming.length > 0 && (
                   <View style={styles.section}>
-                    <SectionHeader title="Próximo aluguel" />
-                    {renderRows([nextCycle])}
-                  </View>
-                )}
-
-                {others.length > 0 && (
-                  <View style={styles.section}>
-                    <SectionHeader
-                      title="Outras cobranças"
-                      trailing={formatCurrency(others.reduce((s, b) => s + b.amount_due, 0))}
-                    />
-                    {renderRows(others)}
+                    <SectionHeader title="A vencer" trailing={formatCurrency(upcomingTotal)} />
+                    {renderRows(upcoming)}
                   </View>
                 )}
               </>
@@ -1024,12 +1003,23 @@ export function BillingsScreen() {
               text="As cobranças que você pagar ficam registradas aqui."
             />
           ) : (
-            paidByMonth.map((g) => (
-              <View key={g.key} style={styles.section}>
-                <SectionHeader title={g.title} trailing={formatCurrency(g.total)} />
-                {renderRows(g.rows)}
-              </View>
-            ))
+            <>
+              {paidByMonth.map((g) => (
+                <View key={g.key} style={styles.section}>
+                  <SectionHeader title={g.title} trailing={formatCurrency(g.total)} />
+                  {renderRows(g.rows)}
+                </View>
+              ))}
+              {historyQuery.hasNextPage && (
+                <Button
+                  label="Carregar mais"
+                  variant="secondary"
+                  size="md"
+                  loading={historyQuery.isFetchingNextPage}
+                  onPress={() => void historyQuery.fetchNextPage()}
+                />
+              )}
+            </>
           )}
         </ScrollView>
       )}

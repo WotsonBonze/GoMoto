@@ -7,7 +7,7 @@
  * que a mesma cobrança tinha três valores devidos diferentes.
  */
 
-import { useQuery } from '@tanstack/react-query'
+import { useInfiniteQuery, useQuery } from '@tanstack/react-query'
 import { useSupabaseContext, useRequiredTenantId, useTenantId } from '../context'
 import {
   calculateAmountDue,
@@ -609,57 +609,108 @@ export function useMyCharges(onlyOpen = true) {
       ])
 
       if (error) throw error
+      return enrichMyCharges(supabase, (data ?? []) as ChargeBalanceRow[], index)
+    },
+  })
+}
 
-      const rows = (data ?? []) as ChargeBalanceRow[]
-      if (rows.length === 0) return []
+/** Tamanho da página do histórico de pagas no app do cliente. */
+export const MY_PAID_CHARGES_PAGE_SIZE = 30
 
-      // Descrição e placa: o app precisa disso para exibir, e `charge_balances`
-      // só agrega valores. Consultas separadas, nunca join na view — juntar
-      // itens ali dentro reintroduziria o fan-out de F-01.
-      const [itemsRes, rentalsRes] = await Promise.all([
+/**
+ * Histórico de cobranças PAGAS do cliente, paginado.
+ *
+ * Antes o app usava `useMyCharges(false)`, que baixava todas as cobranças de
+ * uma vez e filtrava as pagas no aparelho. Com histórico longo isso crescia sem
+ * limite, mandava um `.in()` com centenas de ids na URL e esbarrava no
+ * `max_rows` do PostgREST (1000), que corta a resposta em silêncio — as pagas
+ * mais antigas simplesmente sumiam.
+ *
+ * Paginação por `range` sobre `due_date desc, charge_id desc`: o desempate por
+ * id mantém a ordem estável entre páginas quando várias vencem no mesmo dia.
+ */
+export function useMyPaidCharges(pageSize = MY_PAID_CHARGES_PAGE_SIZE) {
+  const supabase = useSupabaseContext()
+
+  return useInfiniteQuery({
+    queryKey: [KEY.charges, 'mine', 'paid', pageSize],
+    initialPageParam: 0,
+    queryFn: async ({ pageParam }): Promise<MyChargeRow[]> => {
+      const from = pageParam * pageSize
+      const [{ data, error }, index] = await Promise.all([
         supabase
-          .from('charge_items')
-          .select('charge_id, description, amount')
-          .in('charge_id', rows.map((r) => r.charge_id)),
-        supabase
-          .from('rentals')
-          .select('id, vehicles(license_plate)')
-          .in('id', [...new Set(rows.map((r) => r.rental_id).filter(Boolean))] as string[]),
+          .from('charge_balances')
+          .select('*')
+          .eq('status', 'paid')
+          .order('due_date', { ascending: false })
+          .order('charge_id', { ascending: false })
+          .range(from, from + pageSize - 1),
+        policyIndex(supabase),
       ])
 
-      const itemsByCharge = new Map<string, { description: string; amount: number }[]>()
-      for (const i of (itemsRes.data ?? []) as { charge_id: string; description: string; amount: number }[]) {
-        const list = itemsByCharge.get(i.charge_id) ?? []
-        list.push(i)
-        itemsByCharge.set(i.charge_id, list)
-      }
-
-      type RentalVehicle = {
-        id: string
-        vehicles: { license_plate: string } | { license_plate: string }[] | null
-      }
-      const plateByRental = new Map(
-        ((rentalsRes.data ?? []) as unknown as RentalVehicle[]).map((r) => {
-          const v = Array.isArray(r.vehicles) ? r.vehicles[0] : r.vehicles
-          return [r.id, v?.license_plate ?? null] as const
-        }),
-      )
-
-      return rows.map((c) => {
-        const { accrued, amount_due } = calculateAmountDue(c, policyOf(index, c))
-        const items = itemsByCharge.get(c.charge_id) ?? []
-        const principal = [...items].sort((a, b) => b.amount - a.amount)[0]
-
-        return {
-          ...c,
-          accrued_total: accrued.total,
-          amount_due,
-          description: principal?.description ?? 'Cobrança',
-          item_count: items.length,
-          vehicle_plate: c.rental_id ? plateByRental.get(c.rental_id) ?? null : null,
-        }
-      })
+      if (error) throw error
+      return enrichMyCharges(supabase, (data ?? []) as ChargeBalanceRow[], index)
     },
+    // Página incompleta = acabou. Evita uma ida extra só para descobrir o fim.
+    getNextPageParam: (lastPage, allPages) =>
+      lastPage.length < pageSize ? undefined : allPages.length,
+  })
+}
+
+/**
+ * Descrição e placa: o app precisa disso para exibir, e `charge_balances` só
+ * agrega valores. Consultas separadas, nunca join na view — juntar itens ali
+ * dentro reintroduziria o fan-out de F-01.
+ */
+async function enrichMyCharges(
+  supabase: ReturnType<typeof useSupabaseContext>,
+  rows: ChargeBalanceRow[],
+  index: Map<string, LateChargePolicy>,
+): Promise<MyChargeRow[]> {
+  if (rows.length === 0) return []
+
+  const [itemsRes, rentalsRes] = await Promise.all([
+    supabase
+      .from('charge_items')
+      .select('charge_id, description, amount')
+      .in('charge_id', rows.map((r) => r.charge_id)),
+    supabase
+      .from('rentals')
+      .select('id, vehicles(license_plate)')
+      .in('id', [...new Set(rows.map((r) => r.rental_id).filter(Boolean))] as string[]),
+  ])
+
+  const itemsByCharge = new Map<string, { description: string; amount: number }[]>()
+  for (const i of (itemsRes.data ?? []) as { charge_id: string; description: string; amount: number }[]) {
+    const list = itemsByCharge.get(i.charge_id) ?? []
+    list.push(i)
+    itemsByCharge.set(i.charge_id, list)
+  }
+
+  type RentalVehicle = {
+    id: string
+    vehicles: { license_plate: string } | { license_plate: string }[] | null
+  }
+  const plateByRental = new Map(
+    ((rentalsRes.data ?? []) as unknown as RentalVehicle[]).map((r) => {
+      const v = Array.isArray(r.vehicles) ? r.vehicles[0] : r.vehicles
+      return [r.id, v?.license_plate ?? null] as const
+    }),
+  )
+
+  return rows.map((c) => {
+    const { accrued, amount_due } = calculateAmountDue(c, policyOf(index, c))
+    const items = itemsByCharge.get(c.charge_id) ?? []
+    const principal = [...items].sort((a, b) => b.amount - a.amount)[0]
+
+    return {
+      ...c,
+      accrued_total: accrued.total,
+      amount_due,
+      description: principal?.description ?? 'Cobrança',
+      item_count: items.length,
+      vehicle_plate: c.rental_id ? plateByRental.get(c.rental_id) ?? null : null,
+    }
   })
 }
 
