@@ -1,12 +1,18 @@
 import { Stack, useRouter, useSegments } from 'expo-router'
-import { useEffect, useMemo, type ReactNode } from 'react'
-import { ActivityIndicator, StyleSheet, View } from 'react-native'
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react'
+import { StyleSheet, View } from 'react-native'
+import * as SplashScreen from 'expo-splash-screen'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { SupabaseProvider, useMaintenanceRecordsRealtime } from '@gomoto/data'
 
+import { AnimatedSplash } from '../src/components/AnimatedSplash'
 import { AuthProvider, useAuth } from '../src/contexts/auth'
 import { supabase } from '../src/lib/supabase'
 import { ThemeProvider, useTheme, type ThemeTokens } from '../src/theme'
+
+// Segura a splash nativa até o AnimatedSplash assumir a tela (ele chama
+// hideAsync no primeiro layout) — sem isso ela some sozinha no 1º render.
+void SplashScreen.preventAutoHideAsync()
 
 // QueryClient é estável durante o ciclo do app. Defaults conservadores: dados
 // considerados frescos por 30 s (mobile alterna foreground/background bastante).
@@ -37,6 +43,8 @@ function RootGate() {
   const segments = useSegments()
   const theme = useTheme()
   const styles = useMemo(() => createStyles(theme), [theme])
+  const [splashDone, setSplashDone] = useState(false)
+  const handleSplashFinish = useCallback(() => setSplashDone(true), [])
 
   useEffect(() => {
     if (loading) return
@@ -66,15 +74,14 @@ function RootGate() {
     }
   }, [session, loading, needsPasswordSetup, needsTenantSelection, segments, router])
 
-  if (loading) {
-    return (
-      <View style={styles.loadingContainer}>
-        <ActivityIndicator color={theme.primary} size="large" />
-      </View>
-    )
-  }
-
-  return <Stack screenOptions={{ headerShown: false }} />
+  // Enquanto a sessão carrega, a logo pulsa no AnimatedSplash por cima; ao
+  // terminar, o Stack monta por baixo e a splash sai revelando-o.
+  return (
+    <View style={styles.root}>
+      {!loading && <Stack screenOptions={{ headerShown: false }} />}
+      {!splashDone && <AnimatedSplash ready={!loading} onFinish={handleSplashFinish} />}
+    </View>
+  )
 }
 
 export default function RootLayout() {
@@ -92,10 +99,8 @@ export default function RootLayout() {
 }
 
 const createStyles = (theme: ThemeTokens) => StyleSheet.create({
-  loadingContainer: {
+  root: {
     flex: 1,
     backgroundColor: theme.bg,
-    alignItems: 'center',
-    justifyContent: 'center',
   },
 })
