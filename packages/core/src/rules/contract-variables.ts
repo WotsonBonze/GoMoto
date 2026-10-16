@@ -59,7 +59,7 @@ export const TEMPLATE_VARIABLES = [
   { key: 'data_fim',          label: 'Data de fim por extenso',    category: 'Datas',      sample: '30 de setembro de 2026' },
   { key: 'data_hoje',         label: 'Data atual por extenso',     category: 'Datas',      sample: '6 de julho de 2026' },
   // Empresa
-  { key: 'nome_empresa',      label: 'Nome da empresa',            category: 'Empresa',    sample: 'GoMoto Locações LTDA' },
+  { key: 'nome_empresa',      label: 'Nome da empresa',            category: 'Empresa',    sample: 'Locaw Locações LTDA' },
 ] as const satisfies readonly TemplateVariable[]
 
 // Deriva as chaves reais do catálogo — usado para forçar em tempo de

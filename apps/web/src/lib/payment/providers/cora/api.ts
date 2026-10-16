@@ -227,7 +227,7 @@ export async function createPixInvoice(params: CreatePixParams): Promise<CoraInv
     },
     services: [{
       name: 'Locação',
-      description: `Cobrança GoMoto ${params.chargeId}`,
+      description: `Cobrança Locaw ${params.chargeId}`,
       amount: toCents(params.amount),
     }],
     payment_terms: { due_date: params.dueDate },

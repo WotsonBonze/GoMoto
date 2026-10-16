@@ -249,7 +249,7 @@ export async function ensureWebhook(conn: Conn, accountEmail: string | null): Pr
   const email = process.env.ASAAS_WEBHOOK_EMAIL || accountEmail
   if (!email) throw codedError('INTERNAL', 'Sem e-mail para os alertas do webhook do Asaas (ASAAS_WEBHOOK_EMAIL)')
   const config = {
-    name: 'GoMoto',
+    name: 'Locaw',
     url,
     email,
     enabled: true,

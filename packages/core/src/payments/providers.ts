@@ -122,7 +122,7 @@ export const PAYMENT_PROVIDERS: PaymentProviderDescriptor[] = [
   {
     id: 'cora',
     label: 'Cora',
-    description: 'Conta PJ com Pix e boleto. Você autoriza o GoMoto entrando na sua conta Cora.',
+    description: 'Conta PJ com Pix e boleto. Você autoriza o Locaw entrando na sua conta Cora.',
     // Modalidade PARCERIA: OAuth2 authorization_code, sem certificado. O mTLS
     // da Cora é da "Integração Direta", modalidade em que a empresa gerencia a
     // própria conta — não é a nossa. Isto foi corrigido depois de ler a doc:

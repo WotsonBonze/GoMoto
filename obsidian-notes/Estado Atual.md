@@ -2,6 +2,8 @@
 
 Snapshot em **2026-06-25**.
 
+> **Marca (2026-10-15):** o sistema web exibe **Locaw** em todo texto visível — login, sidebar, títulos de página, landing `/home`, PWA de vistoria, descrições de cobrança enviadas aos gateways e nome do webhook no Asaas. "GoMoto" continua como nome **interno** do projeto: pacotes `@gomoto/*`, comentários, prefixo `gomoto:` do `externalReference` do Asaas (a Edge Function reconhece cobranças por ele — não trocar), scheme `gomoto://` do app mobile, chave de localStorage e domínios de e-mail de fallback.
+
 ## ✅ Funcionando end-to-end
 
 - Autenticação (login/logout via Supabase, cookie httpOnly)

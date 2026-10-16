@@ -146,7 +146,7 @@ export async function createPixCharge(params: PixChargeParams): Promise<PixCharg
       transaction_amount: params.amount,
       payment_method_id:  'pix',
       external_reference: params.billingId,
-      description:      'Cobrança GoMoto',
+      description:      'Cobrança Locaw',
       notification_url: process.env.MERCADOPAGO_WEBHOOK_URL ?? undefined,
       payer: {
         email:      params.customerEmail,

@@ -32,7 +32,7 @@ import { getThemePreference } from '@/lib/auth/theme'
  */
 export const metadata: Metadata = {
   // Título da aba do navegador.
-  title: 'GoMoto — Sistema de Gestão',
+  title: 'Locaw — Sistema de Gestão',
   // Descrição para SEO e compartilhamento social.
   description: 'Sistema de gestão para locadora de motos',
 }

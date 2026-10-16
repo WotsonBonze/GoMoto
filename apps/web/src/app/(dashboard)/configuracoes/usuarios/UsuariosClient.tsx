@@ -182,7 +182,7 @@ export function UsuariosClient({ initialRows, loadError, currentUserId, currentR
     <div className="flex flex-col min-h-full">
       <PageTitle
         title="Usuários"
-        subtitle="Convide, gerencie papéis e controle o acesso das pessoas da sua empresa ao GoMoto."
+        subtitle="Convide, gerencie papéis e controle o acesso das pessoas da sua empresa ao Locaw."
       />
 
       <div className="p-6 space-y-4 max-w-5xl">

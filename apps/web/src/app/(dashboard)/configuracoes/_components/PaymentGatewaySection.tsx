@@ -600,7 +600,7 @@ function ApiKeyConnectModal({
       <div className="space-y-4">
         <p className="text-[13px] text-fg-mute">
           No Asaas, abra <span className="text-fg">Integrações → Chaves de API</span> e crie uma chave
-          só para o GoMoto, <span className="text-fg">sem</span> habilitar saque via API. Ela aparece
+          só para o Locaw, <span className="text-fg">sem</span> habilitar saque via API. Ela aparece
           uma única vez: copie e cole aqui.
         </p>
 
@@ -615,11 +615,11 @@ function ApiKeyConnectModal({
           onChange={(e) => setKey(e.target.value)}
           onKeyDown={(e) => { if (e.key === 'Enter') void submeter() }}
           error={erro ?? undefined}
-          hint="Chaves com permissão de saque são recusadas: o GoMoto só precisa gerar e consultar cobranças."
+          hint="Chaves com permissão de saque são recusadas: o Locaw só precisa gerar e consultar cobranças."
         />
 
         <p className="text-[12px] text-fg-mute">
-          Ao conectar, o GoMoto cadastra um webhook na sua conta Asaas para saber quando cada Pix é pago.
+          Ao conectar, o Locaw cadastra um webhook na sua conta Asaas para saber quando cada Pix é pago.
         </p>
 
         <div className="flex justify-end gap-2">

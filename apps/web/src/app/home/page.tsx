@@ -32,7 +32,7 @@ import { Button } from '@/components/ui/Button'
 import { Card } from '@/components/ui/Card'
 
 export const metadata: Metadata = {
-  title: 'GoMoto — Gestão completa para locadoras de motos',
+  title: 'Locaw — Gestão completa para locadoras de motos',
   description:
     'Frota, locações, financeiro, manutenção preventiva e vistorias em um único sistema — com app próprio para o cliente acompanhar tudo.',
 }
@@ -105,7 +105,7 @@ export default function HomePage() {
             <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-primary">
               <Bike className="h-5 w-5 text-primary-contrast" />
             </div>
-            <span className="text-[18px] font-bold text-fg">GoMoto</span>
+            <span className="text-[18px] font-bold text-fg">Locaw</span>
             <Badge variant="warning">Em construção</Badge>
           </div>
 
@@ -195,7 +195,7 @@ export default function HomePage() {
         <section id="contato" className="border-t border-divider bg-surface py-20">
           <div className="mx-auto max-w-3xl px-4 text-center sm:px-6">
             <h2 className="text-[28px] font-bold text-fg">Pronto para profissionalizar sua locadora?</h2>
-            <p className="mt-3 text-[16px] text-fg-soft">Fale com a gente e conheça o GoMoto de perto.</p>
+            <p className="mt-3 text-[16px] text-fg-soft">Fale com a gente e conheça o Locaw de perto.</p>
             <div className="mt-8 flex flex-col items-center justify-center gap-3 sm:flex-row">
               <a href={SALES_WHATSAPP_HREF} target="_blank" rel="noopener noreferrer">
                 <Button size="lg" className="gap-2">
@@ -215,7 +215,7 @@ export default function HomePage() {
 
       <footer className="border-t border-divider py-8">
         <div className="mx-auto flex max-w-6xl flex-col items-center justify-between gap-3 px-4 sm:flex-row sm:px-6">
-          <span className="text-[13px] text-fg-mute">GoMoto © {new Date().getFullYear()}</span>
+          <span className="text-[13px] text-fg-mute">Locaw © {new Date().getFullYear()}</span>
           <span className="text-[13px] text-fg-mute">Sistema de gestão para locadoras de motos</span>
         </div>
       </footer>

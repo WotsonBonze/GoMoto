@@ -318,7 +318,7 @@ export function TenantForm({ mode, initialData, tenantId }: Props) {
               <Field label="Nome fantasia" error={fe('name')} className="col-span-2">
                 <input
                   className={inputCls}
-                  placeholder="GoMoto Norte"
+                  placeholder="Locaw Norte"
                   value={tenant.name}
                   onChange={(e) => handleNameChange(e.target.value)}
                   disabled={isPending}
@@ -331,7 +331,7 @@ export function TenantForm({ mode, initialData, tenantId }: Props) {
               >
                 <input
                   className={inputCls}
-                  placeholder="gomoto-norte"
+                  placeholder="locaw-norte"
                   value={tenant.slug}
                   onChange={(e) => set('slug', e.target.value)}
                   disabled={isPending}
@@ -340,7 +340,7 @@ export function TenantForm({ mode, initialData, tenantId }: Props) {
               <Field label="Razão social" error={fe('legal_name')}>
                 <input
                   className={inputCls}
-                  placeholder="GoMoto Norte Locadora LTDA"
+                  placeholder="Locaw Norte Locadora LTDA"
                   value={tenant.legal_name}
                   onChange={(e) => set('legal_name', e.target.value)}
                   disabled={isPending}

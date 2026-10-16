@@ -112,14 +112,14 @@ export default function LoginPage() {
         
         {/* 
             Seção de Identidade Visual (Logo):
-            Reforça a marca GoMoto com ícone e tipografia em negrito.
+            Reforça a marca Locaw com ícone e tipografia em negrito.
         */}
         <div className="flex flex-col items-center gap-3 mb-8">
           <div className="w-14 h-14 bg-primary rounded-2xl flex items-center justify-center">
             <Bike className="w-7 h-7 text-bg" />
           </div>
           <div className="text-center">
-            <h1 className="text-[28px] font-bold text-fg">GoMoto</h1>
+            <h1 className="text-[28px] font-bold text-fg">Locaw</h1>
             <p className="text-[20px] text-fg-mute mt-1">Sistema de Gestão</p>
           </div>
         </div>
@@ -175,7 +175,7 @@ export default function LoginPage() {
 
         {/* Rodapé com Direitos Autorais e Ano Dinâmico. */}
         <p className="text-center text-[12px] text-fg-mute mt-6">
-          GoMoto © {new Date().getFullYear()}
+          Locaw © {new Date().getFullYear()}
         </p>
       </div>
     </div>

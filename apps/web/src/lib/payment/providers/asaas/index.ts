@@ -81,7 +81,7 @@ export const asaasProvider: PaymentProvider = {
       // (ADR 0037, decisão 1). A chave padrão do Asaas já nasce assim.
       if (await keyCanWithdraw(conn)) {
         throw new AsaasKeyRejectedError(
-          'Esta chave tem permissão de saque/transferência. Por segurança o GoMoto não a aceita: '
+          'Esta chave tem permissão de saque/transferência. Por segurança o Locaw não a aceita: '
           + 'crie uma chave nova no Asaas sem habilitar "saque via API" e cole aqui.',
         )
       }

@@ -174,7 +174,7 @@ export async function verifyHandle(handle: string): Promise<{ checkoutUrl: strin
     // O piso da API é R$ 1,00, então a sonda custa o piso.
     amount: 1,
     orderNsu: `gomoto-verificacao-${Date.now()}`,
-    description: 'Verificação de conta GoMoto',
+    description: 'Verificação de conta Locaw',
   })
   return { checkoutUrl: url }
 }

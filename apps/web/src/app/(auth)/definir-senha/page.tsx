@@ -94,7 +94,7 @@ export default function DefinirSenhaPage() {
             <Bike className="w-7 h-7 text-bg" />
           </div>
           <div className="text-center">
-            <h1 className="text-[28px] font-bold text-fg">GoMoto</h1>
+            <h1 className="text-[28px] font-bold text-fg">Locaw</h1>
             <p className="text-[16px] text-fg-mute mt-1">Defina sua senha de acesso</p>
           </div>
         </div>
