@@ -17,6 +17,7 @@ import { SafeAreaView } from 'react-native-safe-area-context'
 import { useFocusEffect } from 'expo-router'
 import { useChargeDetail, useMyCharges, usePaymentIntentStatus } from '@gomoto/data'
 import type { MyChargeRow } from '@gomoto/data'
+import { isAuthRetryableFetchError } from '@supabase/supabase-js'
 import { supabase } from '../lib/supabase'
 import { useTheme, type ThemeTokens } from '../theme'
 import {
@@ -178,21 +179,65 @@ function dueLabel(billing: MyChargeRow, todayIso: string): string {
   return `Vence em ${days} dias`
 }
 
+const OFFLINE_MESSAGE = 'Sem conexão com o servidor. Verifique a internet e tente de novo.'
+const SESSION_EXPIRED_MESSAGE = 'Sua sessão expirou. Entre novamente.'
+/** Inclui a ida ao gateway, que pode levar alguns segundos. */
+const INTENT_TIMEOUT_MS = 30_000
+
+/**
+ * Token para a API. Falha ao renovar por rede não é sessão inválida: a sessão
+ * continua salva, então a mensagem é de conexão. Quando o refresh token é
+ * recusado, o auth-js já apaga a sessão e emite SIGNED_OUT — o RootGate leva
+ * ao login.
+ */
+async function getAccessToken(forceRefresh: boolean): Promise<string> {
+  const { data, error } = forceRefresh
+    ? await supabase.auth.refreshSession()
+    : await supabase.auth.getSession()
+  if (error) throw new Error(isAuthRetryableFetchError(error) ? OFFLINE_MESSAGE : SESSION_EXPIRED_MESSAGE)
+  if (!data.session) throw new Error(SESSION_EXPIRED_MESSAGE)
+  return data.session.access_token
+}
+
+async function postPaymentIntent(webUrl: string, billingId: string, token: string): Promise<Response> {
+  // AbortController + setTimeout em vez de AbortSignal.timeout, que o Hermes não garante.
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), INTENT_TIMEOUT_MS)
+  try {
+    // Sem `method` no corpo: o default é o meio principal do gateway eleito,
+    // resolvido no servidor. Pedir `pix` aqui quebraria a InfinitePay.
+    return await fetch(`${webUrl}/api/charges/${billingId}/payment-intent`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: '{}',
+      signal: controller.signal,
+    })
+  } catch {
+    throw new Error(OFFLINE_MESSAGE)
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
 async function createPaymentIntent(billingId: string): Promise<PaymentIntent> {
-  const { data: { session } } = await supabase.auth.getSession()
-  if (!session) throw new Error('Não autenticado')
   const webUrl = process.env.EXPO_PUBLIC_WEB_URL ?? ''
   if (!webUrl) throw new Error('EXPO_PUBLIC_WEB_URL não configurado')
-  // Sem `method` no corpo: o default é o meio principal do gateway eleito,
-  // resolvido no servidor. Pedir `pix` aqui quebraria a InfinitePay.
-  const res = await fetch(`${webUrl}/api/charges/${billingId}/payment-intent`, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${session.access_token}`,
-      'Content-Type': 'application/json',
-    },
-    body: '{}',
-  })
+
+  let res = await postPaymentIntent(webUrl, billingId, await getAccessToken(false))
+  // 401 = o servidor recusou o token (vencido pelo relógio real, sessão
+  // revogada). Renova uma vez e repete; se a renovação for recusada, a sessão
+  // cai e o app volta para o login.
+  if (res.status === 401) {
+    res = await postPaymentIntent(webUrl, billingId, await getAccessToken(true))
+    if (res.status === 401) {
+      await supabase.auth.signOut({ scope: 'local' })
+      throw new Error(SESSION_EXPIRED_MESSAGE)
+    }
+  }
+
   const json = await res.json().catch(() => null)
   if (!json?.ok) throw new Error(json?.error?.message ?? 'Falha ao gerar pagamento')
   return json.data as PaymentIntent

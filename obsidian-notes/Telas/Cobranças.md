@@ -161,6 +161,18 @@ na locadora dele. A rota de envio de vistoria periódica
 mesma correção. Teste de regressão: `api-payment-intent.spec.ts`, *"cliente de
 DUAS locadoras alcança a própria cobrança"*.
 
+**Validação da sessão no "Pagar" (2026-10-16).** A rota responde 401 só quando o
+GoTrue *recusa* o token (vencido, revogado, assinatura inválida). Falha do GoTrue
+(rede, timeout de 8s, 5xx, 429) responde **503 `AUTH_UNAVAILABLE`** "Não foi
+possível confirmar sua sessão. Tente novamente." Antes, as duas respondiam 401
+"Não autorizado", e cliente logado com token válido via erro de autenticação toda
+vez que o GoTrue de produção engolia a requisição. No app: falha de rede ao renovar
+o token mostra mensagem de conexão (antes "Não autenticado"); um 401 renova a sessão
+uma vez e repete o pedido (cobre sessão revogada e relógio do aparelho atrasado); um
+segundo 401 desloga o aparelho e manda para o login; o `fetch` tem teto de 30s.
+A rota de vistoria (`/api/inspections/schedules/[id]/submit`) ainda usa o padrão
+antigo.
+
 **Conceder desconto** (só na tela de detalhe, cobrança aberta com saldo em
 aberto — `components/financial/BillingActions.tsx`):
 

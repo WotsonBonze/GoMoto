@@ -15,14 +15,27 @@
  */
 
 import { NextRequest, NextResponse } from 'next/server'
-import { createClient } from '@/lib/supabase/server'
-import { createClient as createAdminClient } from '@supabase/supabase-js'
+import { createClient, isAuthRetryableFetchError } from '@supabase/supabase-js'
 import { getOrCreateIntent } from '@/lib/payment/intents'
 
 type RouteContext = { params: Promise<{ id: string }> }
 
 function json(body: unknown, status = 200) {
   return NextResponse.json(body, { status })
+}
+
+/** Teto para a validação do token no GoTrue — sem ele, um GoTrue travado prende o app no spinner até a função expirar. */
+const AUTH_TIMEOUT_MS = 8000
+
+/**
+ * Falha do GoTrue (rede, timeout, 5xx, rate limit) não diz nada sobre o token.
+ * Responder 401 nesses casos mandava "Não autorizado" a cliente logado com token
+ * válido — o GoTrue de produção perde parte das requisições (2026-08-29).
+ */
+function isTransientAuthError(err: unknown): boolean {
+  if (isAuthRetryableFetchError(err)) return true
+  const status = (err as { status?: number } | null)?.status ?? 0
+  return status === 0 || status === 429 || status >= 500
 }
 
 function log(level: 'info' | 'warn' | 'error', action: string, fields: Record<string, unknown> = {}) {
@@ -37,13 +50,31 @@ export async function POST(req: NextRequest, ctx: RouteContext) {
   const token = authHeader?.replace('Bearer ', '')
   if (!token) return json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'Token não fornecido' } }, 401)
 
-  const supabase = await createClient()
-  const { data: { user }, error: authErr } = await supabase.auth.getUser(token)
-  if (authErr || !user) return json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'Não autorizado' } }, 401)
+  // Cliente sem cookies: o token vem no header, e o fetch com timeout faz um
+  // GoTrue travado virar AuthRetryableFetchError em vez de pendurar a requisição.
+  const authClient = createClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
+    {
+      auth: { persistSession: false, autoRefreshToken: false },
+      global: { fetch: (input, init) => fetch(input, { ...init, signal: AbortSignal.timeout(AUTH_TIMEOUT_MS) }) },
+    },
+  )
+  const { data: { user }, error: authErr } = await authClient.auth.getUser(token)
+  if (authErr && isTransientAuthError(authErr)) {
+    log('warn', 'intent.auth_unavailable', { charge_id: chargeId, status: authErr.status, error: authErr.message })
+    return json({ ok: false, error: {
+      code: 'AUTH_UNAVAILABLE',
+      message: 'Não foi possível confirmar sua sessão. Tente novamente.',
+    } }, 503)
+  }
+  // Daqui em diante é o token que foi recusado (vencido, revogado, assinatura
+  // inválida): o app renova a sessão e tenta de novo uma vez.
+  if (authErr || !user) return json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'Sessão expirada' } }, 401)
 
   // Service role: o token do mobile não chega por cookie, então o cliente SSR
   // roda como anon e a RLS bloqueia as leituras necessárias.
-  const admin = createAdminClient(
+  const admin = createClient(
     process.env.NEXT_PUBLIC_SUPABASE_URL!,
     process.env.SUPABASE_SERVICE_ROLE_KEY!,
   )
