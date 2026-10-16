@@ -494,16 +494,6 @@ function PaymentModal({
               </View>
             </View>
 
-            {intent.is_reused && (
-              <Notice
-                icon="information-circle"
-                tone="info"
-                text={isLink
-                  ? 'Este é o mesmo link de pagamento gerado anteriormente — continua válido.'
-                  : 'Este é o mesmo código Pix gerado anteriormente — continua válido.'}
-              />
-            )}
-
             {isPix && pixCode ? (
               <>
                 {qrImage ? (

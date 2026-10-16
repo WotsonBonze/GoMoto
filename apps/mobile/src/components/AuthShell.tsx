@@ -10,7 +10,6 @@ import {
 import { StatusBar } from 'expo-status-bar'
 import { SafeAreaView } from 'react-native-safe-area-context'
 import { darkTheme, LightThemeScope, useTheme } from '../theme'
-import { Icon } from './ui'
 
 /**
  * Moldura das telas de acesso (login, definir senha, escolher locadora):
@@ -63,7 +62,6 @@ function AuthShellBody({ title, subtitle, children }: { title: string; subtitle?
                 {subtitle ? <Text style={[styles.subtitle, { color: theme.textSoft }]}>{subtitle}</Text> : null}
                 <View style={styles.content}>{children}</View>
               </View>
-            
             </View>
           </View>
         </KeyboardAvoidingView>
@@ -103,6 +101,4 @@ const styles = StyleSheet.create({
   title: { fontSize: 24, fontWeight: '800', letterSpacing: -0.4 },
   subtitle: { fontSize: 15, lineHeight: 21, marginTop: 6 },
   content: { marginTop: 24, gap: 16 },
-  secure: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6 },
-  secureText: { fontSize: 12 },
 })
