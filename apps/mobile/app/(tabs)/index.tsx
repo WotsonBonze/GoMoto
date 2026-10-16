@@ -51,6 +51,12 @@ function greeting(): string {
   return 'Boa noite'
 }
 
+/** Só o primeiro nome: "Boa noite, Maria" cabe no cabeçalho; o nome completo não. */
+function firstName(name: string | null | undefined): string | null {
+  const first = name?.trim().split(/\s+/)[0]
+  return first ? first : null
+}
+
 function formatCurrency(value: number | null | undefined): string {
   if (value == null) return '—'
   return value.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' })
@@ -328,7 +334,7 @@ export default function HomeTab() {
     ])
   }
 
-  // Locadora ativa
+  // Locadora ativa — o nome do cliente vem do cadastro dele nesta locadora
   const activeTenant = tenants.find((t) => t.id === activeTenantId)
 
   // Locação ativa (primeira — clientes normalmente têm uma)
@@ -381,7 +387,7 @@ export default function HomeTab() {
 
   return (
     <SafeAreaView style={styles.safe} edges={['top']}>
-      <ScreenHeader eyebrow={greeting()} title={activeTenant?.name ?? 'GoMoto'} />
+      <ScreenHeader eyebrow={greeting()} title={firstName(activeTenant?.customer_name) ?? 'Bem-vindo'} />
 
       {isLoading ? (
         <View style={styles.centered}>

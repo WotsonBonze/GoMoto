@@ -12,6 +12,8 @@ export type TenantOption = {
   suspended_at: string | null
   contact_phone: string | null
   contact_email: string | null
+  /** Nome do cliente no cadastro DESTA locadora (um cadastro por locadora). */
+  customer_name: string | null
 }
 
 type AuthContextValue = {
@@ -37,7 +39,7 @@ async function fetchCustomerTenants(userId: string): Promise<TenantOption[]> {
   // próprio link garantem que essa query só devolve tenants em que esse user é cliente.
   const { data, error } = await supabase
     .from('customers')
-    .select('tenant_id, tenants:tenant_id ( id, name, suspended_at, contact_phone, contact_email )')
+    .select('tenant_id, name, tenants:tenant_id ( id, name, suspended_at, contact_phone, contact_email )')
     .eq('user_id', userId)
 
   // Erro (rede, 5xx, timeout) precisa subir: devolver [] faria o chamador concluir
@@ -55,6 +57,7 @@ async function fetchCustomerTenants(userId: string): Promise<TenantOption[]> {
         suspended_at: tenant.suspended_at ?? null,
         contact_phone: tenant.contact_phone ?? null,
         contact_email: tenant.contact_email ?? null,
+        customer_name: row.name ?? null,
       })
     }
   }
