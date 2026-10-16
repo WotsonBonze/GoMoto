@@ -109,13 +109,23 @@ componentes da [[decisions/0040-identidade-visual-app-mobile-v2|ADR 0040]]:
     que baixava **todas** as cobranças e filtrava no aparelho: crescia sem
     limite, mandava `.in()` com centenas de ids na URL e esbarrava no
     `max_rows = 1000` do PostgREST, que corta a resposta em silêncio.
+  - **Data de pagamento** (2026-10-16): a linha mostra *Pago em dd/mm/aaaa* e o
+    detalhe ganha a linha *Pagamento*. `paid_at` em `MyChargeRow` vem de
+    `enrichMyCharges`: o `payments.paid_at` mais recente entre os pagamentos
+    **não estornados** alocados à cobrança (`payment_allocations →
+    payments`, políticas `customer_read_own_*`), ou seja, quando ela foi
+    quitada. Só consulta cobranças com `paid_amount > 0`. É instante
+    (timestamptz), formatado no fuso do aparelho (`formatLocalDate`) — cortar a
+    string daria a data UTC e um Pix das 22h apareceria no dia seguinte. A
+    ordem da aba continua por vencimento (a paginação depende dela).
 - **Linha**: selo de data (dia/mês) colorido pelo tom — vencida (danger), vence
   hoje (warning), até 3 dias (pending), futura (primary), paga (success);
   descrição, *Locação/Avulsa · placa*, frase de vencimento e valor.
 - **Detalhe**: valor em destaque com status, alerta de atraso explicando o
   encargo, **composição item a item** (`useChargeDetail`, política
   `customer_read_own_charge_items`) com subtotal / já pago / encargos, bloco de
-  detalhes (origem, veículo, emissão, vencimento, número) e botão **Pagar**
+  detalhes (origem, veículo, emissão, vencimento, pagamento quando paga,
+  número) e botão **Pagar**
   fixo no rodapé. Com tentativa já gerada, o botão vira *Ver pagamento em
   andamento* em vez de gerar outra.
 - **Pagamento**: selo *Aguardando pagamento…* enquanto o polling roda, botão

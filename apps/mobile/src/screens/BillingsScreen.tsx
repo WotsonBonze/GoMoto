@@ -120,6 +120,16 @@ function formatDate(iso: string | null | undefined): string {
 }
 
 /**
+ * Data de um INSTANTE (timestamptz) no fuso do aparelho. `formatDate` corta os
+ * 10 primeiros caracteres, que num instante são a data em UTC: um Pix pago às
+ * 22h apareceria como pago no dia seguinte.
+ */
+function formatLocalDate(iso: string | null | undefined): string {
+  if (!iso) return '—'
+  return new Date(iso).toLocaleDateString('pt-BR')
+}
+
+/**
  * Hoje no fuso do APARELHO. `toISOString()` devolve UTC: depois das 21h no
  * Brasil já é "amanhã", e a cobrança que vence hoje aparecia como vencida.
  */
@@ -167,7 +177,11 @@ function toneOf(billing: MyChargeRow, todayIso: string): Tone {
 
 /** Frase curta de vencimento: o que o cliente precisa saber de relance. */
 function dueLabel(billing: MyChargeRow, todayIso: string): string {
-  if (billing.status === 'paid') return `Venceu em ${formatDate(billing.due_date)}`
+  if (billing.status === 'paid') {
+    return billing.paid_at
+      ? `Pago em ${formatLocalDate(billing.paid_at)}`
+      : `Venceu em ${formatDate(billing.due_date)}`
+  }
   if (billing.status !== 'open') return STATUS_LABEL[billing.status] ?? billing.status
   if (isOverdue(billing, todayIso)) {
     const days = billing.days_overdue || Math.max(0, -daysUntil(billing.due_date))
@@ -391,7 +405,11 @@ function ChargeRow({
       <View style={styles.rowBody}>
         <Text style={styles.rowTitle} numberOfLines={1}>{billing.description}</Text>
         <Text style={styles.rowMeta} numberOfLines={1}>{meta}</Text>
-        {!isPaid && (
+        {isPaid ? (
+          billing.paid_at ? (
+            <Text style={[styles.rowDue, { color: theme.textSoft }]}>{dueLabel(billing, todayIso)}</Text>
+          ) : null
+        ) : (
           <Text style={[styles.rowDue, { color: tone === 'primary' ? theme.textSoft : fg }]}>
             {dueLabel(billing, todayIso)}
           </Text>
@@ -790,6 +808,9 @@ function BillingDetailModal({
                 {billing.vehicle_plate ? <InfoRow label="Veículo" value={billing.vehicle_plate} styles={styles} /> : null}
                 <InfoRow label="Emissão" value={formatDate(billing.issue_date)} styles={styles} />
                 <InfoRow label="Vencimento" value={formatDate(billing.due_date)} styles={styles} />
+                {isPaid && billing.paid_at ? (
+                  <InfoRow label="Pagamento" value={formatLocalDate(billing.paid_at)} styles={styles} />
+                ) : null}
                 <InfoRow label="Número" value={`#${billing.charge_number}`} styles={styles} last />
               </View>
             </Card>

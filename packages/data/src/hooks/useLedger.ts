@@ -79,6 +79,10 @@ export type MyChargeRow = ChargeWithDue & {
   description: string
   item_count: number
   vehicle_plate: string | null
+  /** Quando a cobrança foi quitada: `paid_at` do pagamento mais recente não
+   *  estornado que a abateu. `null` sem pagamento. Instante (timestamptz),
+   *  não data — formatar no fuso local. */
+  paid_at: string | null
 }
 
 export type ChargeWithDue = ChargeBalanceRow & {
@@ -669,7 +673,11 @@ async function enrichMyCharges(
 ): Promise<MyChargeRow[]> {
   if (rows.length === 0) return []
 
-  const [itemsRes, rentalsRes] = await Promise.all([
+  // Só quem já recebeu algo tem data de pagamento; nas em aberto sem abatimento
+  // a consulta seria desperdício.
+  const withPayment = rows.filter((r) => r.paid_amount > 0).map((r) => r.charge_id)
+
+  const [itemsRes, rentalsRes, allocationsRes] = await Promise.all([
     supabase
       .from('charge_items')
       .select('charge_id, description, amount')
@@ -678,6 +686,12 @@ async function enrichMyCharges(
       .from('rentals')
       .select('id, vehicles(license_plate)')
       .in('id', [...new Set(rows.map((r) => r.rental_id).filter(Boolean))] as string[]),
+    withPayment.length > 0
+      ? supabase
+          .from('payment_allocations')
+          .select('charge_id, payments(paid_at, reversed_at)')
+          .in('charge_id', withPayment)
+      : Promise.resolve({ data: [] }),
   ])
 
   const itemsByCharge = new Map<string, { description: string; amount: number }[]>()
@@ -698,6 +712,19 @@ async function enrichMyCharges(
     }),
   )
 
+  // Estornado não quitou nada — a view também o ignora no `paid_amount`.
+  type AllocationPayment = {
+    charge_id: string
+    payments: { paid_at: string; reversed_at: string | null } | { paid_at: string; reversed_at: string | null }[] | null
+  }
+  const paidAtByCharge = new Map<string, string>()
+  for (const a of (allocationsRes.data ?? []) as unknown as AllocationPayment[]) {
+    const p = Array.isArray(a.payments) ? a.payments[0] : a.payments
+    if (!p || p.reversed_at) continue
+    const current = paidAtByCharge.get(a.charge_id)
+    if (!current || new Date(p.paid_at) > new Date(current)) paidAtByCharge.set(a.charge_id, p.paid_at)
+  }
+
   return rows.map((c) => {
     const { accrued, amount_due } = calculateAmountDue(c, policyOf(index, c))
     const items = itemsByCharge.get(c.charge_id) ?? []
@@ -710,6 +737,7 @@ async function enrichMyCharges(
       description: principal?.description ?? 'Cobrança',
       item_count: items.length,
       vehicle_plate: c.rental_id ? plateByRental.get(c.rental_id) ?? null : null,
+      paid_at: paidAtByCharge.get(c.charge_id) ?? null,
     }
   })
 }
