@@ -51,7 +51,7 @@ function AuthShellBody({ title, subtitle, children }: { title: string; subtitle?
           <View style={styles.flex}>
             <View style={styles.brandArea}>
               <Image source={require('../../assets/icon.png')} style={styles.logo} />
-              <Text style={[styles.brandName, { color: band.brandText }]}>GoMoto</Text>
+              <Text style={[styles.brandName, { color: band.brandText }]}>Locaw</Text>
               <Text style={[styles.brandTagline, { color: band.brandTextSoft }]}>
                 Sua locação na palma da mão
               </Text>
@@ -63,10 +63,7 @@ function AuthShellBody({ title, subtitle, children }: { title: string; subtitle?
                 {subtitle ? <Text style={[styles.subtitle, { color: theme.textSoft }]}>{subtitle}</Text> : null}
                 <View style={styles.content}>{children}</View>
               </View>
-              <View style={styles.secure}>
-                <Icon name="shield-checkmark-outline" size={14} color={theme.textMute} />
-                <Text style={[styles.secureText, { color: theme.textMute }]}>Conexão segura e criptografada</Text>
-              </View>
+            
             </View>
           </View>
         </KeyboardAvoidingView>
