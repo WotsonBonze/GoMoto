@@ -35,11 +35,14 @@ const ACTIVE_TENANT_KEY = 'gomoto.activeTenantId'
 async function fetchCustomerTenants(userId: string): Promise<TenantOption[]> {
   // RLS de `customers.user_id = auth.uid()` + read policy nos tenants visíveis pelo
   // próprio link garantem que essa query só devolve tenants em que esse user é cliente.
-  const { data } = await supabase
+  const { data, error } = await supabase
     .from('customers')
     .select('tenant_id, tenants:tenant_id ( id, name, suspended_at, contact_phone, contact_email )')
     .eq('user_id', userId)
 
+  // Erro (rede, 5xx, timeout) precisa subir: devolver [] faria o chamador concluir
+  // "não é cliente" e encerrar a sessão por uma falha que não é do usuário.
+  if (error) throw error
   if (!data) return []
 
   const map = new Map<string, TenantOption>()
@@ -86,10 +89,18 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       await AsyncStorage.removeItem(ACTIVE_TENANT_KEY)
       return []
     }
-    const list = await fetchCustomerTenants(userId)
+    const stored = await AsyncStorage.getItem(ACTIVE_TENANT_KEY)
+    let list: TenantOption[]
+    try {
+      list = await fetchCustomerTenants(userId)
+    } catch (err) {
+      // Falha transitória: mantém a última locadora escolhida neste aparelho para
+      // o app seguir utilizável; o próximo evento de auth tenta sincronizar de novo.
+      if (stored) setActiveTenantId(stored)
+      throw err
+    }
     setTenants(list)
 
-    const stored = await AsyncStorage.getItem(ACTIVE_TENANT_KEY)
     if (list.length === 1) {
       // Único tenant — entra direto. Sobrescreve qualquer escolha antiga inválida.
       setActiveTenantId(list[0].id)
@@ -110,10 +121,17 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       try {
         const { data } = await supabase.auth.getSession()
         if (data.session) {
-          const list = await syncTenantsFor(data.session.user.id)
-          if (list.length === 0) {
-            // Não é cliente em nenhum tenant — encerra a sessão.
-            await supabase.auth.signOut()
+          let list: TenantOption[] | null = null
+          try {
+            list = await syncTenantsFor(data.session.user.id)
+          } catch (err) {
+            // Não deu para confirmar o vínculo — isso não é o mesmo que "não é
+            // cliente". Mantém a sessão em vez de deslogar.
+            console.warn('[auth] falha ao carregar locadoras na abertura', err)
+          }
+          if (list && list.length === 0) {
+            // Confirmado: não é cliente em nenhum tenant — encerra a sessão deste aparelho.
+            await supabase.auth.signOut({ scope: 'local' })
             setSession(null)
           } else {
             setSession(data.session)
@@ -169,9 +187,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     if (error) return { error: 'CPF ou senha incorretos.' }
 
     if (data.user) {
-      const list = await syncTenantsFor(data.user.id)
+      let list: TenantOption[]
+      try {
+        list = await syncTenantsFor(data.user.id)
+      } catch {
+        await supabase.auth.signOut({ scope: 'local' })
+        return { error: 'Não foi possível carregar sua conta. Verifique a conexão e tente de novo.' }
+      }
       if (list.length === 0) {
-        await supabase.auth.signOut()
+        await supabase.auth.signOut({ scope: 'local' })
         return { error: NOT_A_CUSTOMER_ERROR }
       }
     }
@@ -179,8 +203,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     return { error: null }
   }
 
+  // scope 'local': o padrão do auth-js é 'global', que revogaria a sessão do
+  // cliente em todos os aparelhos ao sair de um só.
   async function signOut() {
-    await supabase.auth.signOut()
+    await supabase.auth.signOut({ scope: 'local' })
     await syncTenantsFor(null)
   }
 

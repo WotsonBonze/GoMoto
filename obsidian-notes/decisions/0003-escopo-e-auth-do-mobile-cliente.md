@@ -28,6 +28,8 @@ Cada app olha **apenas a sua tabela de papel** ao autenticar:
 
 - **`apps/web`** considera autenticado quem tem linha em `tenant_members`. Se o `auth.uid()` não está lá, faz `signOut()` e devolve o login com mensagem genérica.
 - **`apps/mobile`** considera autenticado quem tem linha em `customers` com `user_id = auth.uid()`. Caso contrário, `signOut()` + login.
+  - **Sessão por aparelho (2026-10-16):** todo `signOut` do mobile usa `scope: 'local'`. O padrão do auth-js é `'global'` e, antes, sair em um aparelho revogava a sessão do cliente em todos os outros (eles caíam no login na renovação seguinte do token). O mesmo usuário pode estar logado em vários aparelhos ao mesmo tempo.
+  - **Falha ao ler `customers` ≠ "não é cliente":** a query de vínculo lança erro em vez de devolver `[]`. Na abertura do app, um erro mantém a sessão (com a última locadora salva no aparelho); só a lista vazia confirmada desloga. No login, um erro desfaz a sessão local e mostra uma mensagem de conexão.
 
 Não há constraint cruzada no banco. Se um mesmo `auth.users` aparecer nas duas tabelas, cada app simplesmente ignora a presença na outra: o web só enxerga o universo administrativo, o mobile só enxerga o universo cliente. Isso é o suficiente porque (a) nenhum dado vaza — RLS filtra por papel, não por identidade global; (b) a UX "muito bem distinta" exigida pelo stakeholder está garantida pela separação de **apps**, não de **contas**; (c) não acrescentamos trigger nem fail-mode de "email já existe como admin, não pode ser cliente". Reversível se o stakeholder decidir endurecer depois — só adicionar trigger.
 
@@ -98,7 +100,7 @@ O bloqueio "admin não loga no mobile" também roda no client (após login, chec
 | **Cobranças** | Lista (em aberto / pagas), valor, vencimento, histórico |
 | **Manutenções da moto** | Próxima prevista, histórico de concluídas |
 | **Suporte** | Telefone / WhatsApp do operador do tenant (vem de `companies`) |
-| **Sair** | `signOut()` + volta pro login |
+| **Sair** | `signOut({ scope: 'local' })` + volta pro login (só este aparelho) |
 
 Fora do MVP: pagar cobrança no app, abrir chamado, push notifications, edição de dados pessoais.
 
