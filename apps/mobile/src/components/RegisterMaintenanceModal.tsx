@@ -65,12 +65,16 @@ export function RegisterMaintenanceModal({ visible, onClose, customerId, mainten
   }
 
   async function pickPhoto(kind: 'odometer' | 'invoice') {
-    const perm = await ImagePicker.requestMediaLibraryPermissionsAsync()
+    // Só câmera: a foto precisa ser tirada na hora (sem acesso à galeria).
+    const perm = await ImagePicker.requestCameraPermissionsAsync()
     if (!perm.granted) {
-      Alert.alert('Permissão negada', 'Precisamos de acesso às fotos para anexar o comprovante.')
+      Alert.alert(
+        'Câmera não autorizada',
+        'Para tirar a foto, permita o acesso à câmera nos ajustes do aparelho.',
+      )
       return
     }
-    const result = await ImagePicker.launchImageLibraryAsync({
+    const result = await ImagePicker.launchCameraAsync({
       // default já é 'images'; explicitar evita o warn de MediaTypeOptions
       // deprecado e ainda mantém intenção no call site.
       mediaTypes: ['images'],

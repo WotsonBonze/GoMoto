@@ -17,7 +17,7 @@ type AppVariant = {
   projectId: string;
 };
 
-const version = '0.5.0';
+const version = '0.6.0';
 
 const variants = {
   gomoto: {
@@ -68,6 +68,12 @@ const config: ExpoConfig = {
   },
   android: {
     package: variant.package,
+    // O app só usa a câmera (via expo-image-picker) — sem leitura da galeria.
+    // Storage entra por padrão no Expo e daria acesso às fotos no Android ≤ 12.
+    blockedPermissions: [
+      'android.permission.READ_EXTERNAL_STORAGE',
+      'android.permission.WRITE_EXTERNAL_STORAGE',
+    ],
     adaptiveIcon: {
       foregroundImage: './assets/adaptive-icon-foreground.png',
       backgroundColor: '#2563EB',
@@ -92,6 +98,18 @@ const config: ExpoConfig = {
       },
     ],
     'expo-web-browser',
+    [
+      // Só câmera (fotos de vistoria e manutenção tiradas na hora). Galeria e
+      // microfone ficam desligados: `false` remove a chave do Info.plist e
+      // bloqueia a permissão no Android — declarar sem usar reprova na loja.
+      'expo-image-picker',
+      {
+        cameraPermission:
+          'O $(PRODUCT_NAME) usa a câmera para você fotografar o veículo nas vistorias e o hodômetro e a nota fiscal nas manutenções.',
+        photosPermission: false,
+        microphonePermission: false,
+      },
+    ],
   ],
   extra: {
     router: {},

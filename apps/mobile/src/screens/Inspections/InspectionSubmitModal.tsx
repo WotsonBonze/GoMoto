@@ -81,12 +81,16 @@ export function InspectionSubmitModal({ schedule, onClose, onSubmitted }: Props)
   }, [profileQuery.data])
 
   async function pickPhoto(itemId: string) {
-    const perm = await ImagePicker.requestMediaLibraryPermissionsAsync()
+    // Só câmera: a foto da vistoria precisa ser tirada na hora (sem acesso à galeria).
+    const perm = await ImagePicker.requestCameraPermissionsAsync()
     if (!perm.granted) {
-      Alert.alert('Permissão negada', 'Precisamos de acesso às fotos para anexar a vistoria.')
+      Alert.alert(
+        'Câmera não autorizada',
+        'Para tirar a foto, permita o acesso à câmera nos ajustes do aparelho.',
+      )
       return
     }
-    const result = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ['images'], quality: 0.7 })
+    const result = await ImagePicker.launchCameraAsync({ mediaTypes: ['images'], quality: 0.7 })
     if (result.canceled || !result.assets[0]) return
     const asset = result.assets[0]
 
