@@ -793,11 +793,6 @@ function BillingDetailModal({
                 <InfoRow label="Número" value={`#${billing.charge_number}`} styles={styles} last />
               </View>
             </Card>
-
-            <View style={styles.secureRow}>
-              <Icon name="shield-checkmark-outline" size={14} color={theme.textMute} />
-              <Text style={styles.secureText}>Pagamento processado com segurança pela locadora</Text>
-            </View>
           </ScrollView>
 
           {/* Ação principal fixa no rodapé — sempre ao alcance do polegar */}
@@ -1328,16 +1323,6 @@ const createStyles = (theme: ThemeTokens) => StyleSheet.create({
     fontSize: 14,
     fontWeight: '600',
     textAlign: 'right',
-  },
-  secureRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 6,
-  },
-  secureText: {
-    color: theme.textMute,
-    fontSize: 12,
   },
 
   // Payment modal
