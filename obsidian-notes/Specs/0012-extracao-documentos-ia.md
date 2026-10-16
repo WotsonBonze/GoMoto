@@ -378,9 +378,34 @@ Primeira integração com IA externa do projeto — a lógica de dispatch (regis
 
 ### 11.2 Questões abertas
 
-- [ ] Escolher o modelo Gemini específico (ex.: `gemini-2.5-flash` vs `gemini-2.5-pro`) — troca de custo × qualidade, validar empiricamente com documentos reais antes de produção. A Spec já abstrai isso numa string de config — trocar depois não muda arquitetura.
-- [ ] Escrever o texto final dos prompts de extração (`buildCnhPrompt`, `buildFineNoticePrompt`) — detalhe de implementação, iterável sem mudar o contrato/schema já fechado aqui.
+- [x] Escolher o modelo Gemini específico — **`gemini-2.5-flash`**, fixado na rota **Google AI Studio** (`gateway.only: ['google']`). Validado em 2026-10-15 com CNH Digital real: `gemini-2.5-pro` não melhorou nada; o que decidia o acerto era o **provedor**. Ver §11.3.
+- [x] Texto final do prompt de CNH (`buildCnhPrompt`) — reescrito em 2026-10-15, ver §11.3. `buildFineNoticePrompt` segue como estava.
+- [ ] **Avaliar troca de modelo (registrado em 2026-10-15, não testado).** Decisão: primeiro observar em produção a correção da §11.3 com `gemini-2.5-flash`. Se ainda houver erro, sobretudo em foto de cartão físico antigo, inclinada ou com reflexo, comparar com o mesmo conjunto de 3–4 CNHs variadas:
+  - `google/gemini-3.7-flash` (ou `3.6-flash`) — candidato principal: mesma família, duas gerações à frente; a troca é só a string `MODEL`. ~US$ 0,003/CNH.
+  - `anthropic/claude-haiku-5.5` — outro fornecedor, o mais barato, aceita PDF. Exige trocar `gateway.only: ['google']`, que hoje vale para todos os modelos.
+  - `google/gemini-3.1-flash-lite` — se o objetivo for reduzir custo.
+  - `anthropic/claude-sonnet-5.5` — só se fotos ruins virarem problema recorrente.
+  - Antes de adotar um Gemini 3.x, conferir em `providerMetadata.gateway.routing.finalProvider` se ele também é roteado para a Vertex; se for, manter o `only`.
+  - `gemini-2.5-pro` já foi testado e descartado: errou igual ao flash.
 - [x] `CustomerSchema` em `@gomoto/core` não validava `drivers_license_photo_url`/`residency_proof_url` via Zod — resolvido durante a implementação (ver §4.3), pois bloqueava o CA-011 de verdade.
+
+### 11.3 Revisão da extração de CNH (2026-10-15)
+
+Relato do operador: CPF vindo vazio, RG errado e categoria errada. Teste com uma CNH Digital real (PDF do gov.br, modelo 2022), 3+ chamadas por variante:
+
+| Sintoma | Causa | Correção |
+|---|---|---|
+| Nº Registro errado (3/3) | Prompt genérico ("número de registro"); o modelo pegava o **Nº do espelho** impresso na vertical (10 dígitos) | Prompt ancorado no rótulo impresso de cada campo (modelo novo `5 Nº REGISTRO` e antigo), nomeando os vizinhos que confundem (espelho, RENACH, código de segurança, CPF) |
+| Categoria "D" em vez de "B"; CPF trocado pelo registro (~1/3) | O AI Gateway alternava `google/gemini-2.5-flash` entre **Vertex** e **Google AI Studio**. A Vertex rasteriza PDF com menos detalhe (2841 × 1369 tokens na mesma CNH) e lia a letra grande solta ao lado da caixa "ACC" como categoria — **falha intermitente**, porque a rota muda por sessão | `providerOptions.gateway.only: ['google']`. `order` não serve: a afinidade de sessão do gateway promove a Vertex por cima da ordem pedida. A Vertex também recusa `mediaResolution: HIGH` em PDF. Sem fallback de provedor: se o AI Studio cair, a extração falha e o operador preenche à mão (RNF-002) |
+| RG com órgão emissor junto | O campo da CNH é "número + órgão + UF" | Prompt pede só o número + `stripRgIssuer` no pós-processamento |
+| Categoria fora do select | Texto livre no schema | `z.enum(CNH_CATEGORIES)` no schema enviado ao modelo; select do formulário usa a mesma constante (passa a incluir **ACC**) |
+| Tudo vinha "high" | Nada conferia a resposta | `postProcessCnhFields` (`packages/core/src/document-extraction/cnh.ts`): só dígitos em CPF/Registro, **dígito verificador** dos dois, CPF = Registro, data DD/MM/AAAA→ISO, idade 18–100, validade > nascimento. O que não confere vira `low` (selo "Confira"), **nunca é descartado** |
+
+Também: `temperature: 0` e `.describe()` por campo no schema (o AI SDK repassa ao JSON Schema).
+
+Resultado após a correção: 8/8 chamadas com todos os campos corretos (5 no PDF, 3 em foto do cartão).
+
+A tabela do verso da CNH 2022 (A1, B1, C1, D1, BE, CE, C1E, DE, D1E) é a equivalência internacional e **não** é categoria do condutor, por isso não entrou no select.
 
 ---
 

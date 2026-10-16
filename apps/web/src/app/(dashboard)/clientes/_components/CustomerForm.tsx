@@ -16,7 +16,7 @@ import { useCepLookup } from '@/hooks/useCepLookup'
 import { DocumentImportCard } from '@/components/documents/DocumentImportCard'
 
 import { createCustomer, updateCustomer, extractCnhFields } from '../actions'
-import { ExtractDocumentFileSchema, type Customer, type CnhFields } from '@gomoto/core'
+import { CNH_CATEGORIES, ExtractDocumentFileSchema, type Customer, type CnhFields } from '@gomoto/core'
 
 // ─── Constantes ──────────────────────────────────────────────────────────────
 
@@ -25,7 +25,6 @@ const STATE_OPTIONS = [
   'MG','PA','PB','PR','PE','PI','RJ','RN','RS','RO','RR','SC','SP','SE','TO',
 ]
 
-const CNH_CATEGORY_OPTIONS = ['A','B','AB','C','AC','D','AD','E','AE']
 
 const NAV_ITEMS_INDIVIDUAL = [
   { id: 'sec-type',      label: 'Tipo de Pessoa' },
@@ -632,7 +631,12 @@ export function CustomerForm({ customerId, initialData }: CustomerFormProps) {
                 <Field label="Categoria" lowConfidence={lowConfidenceFields.has('drivers_license_category')}>
                   <select className={selectCls} value={form.drivers_license_category}
                     onChange={(e) => set('drivers_license_category', e.target.value)}>
-                    {CNH_CATEGORY_OPTIONS.map((cat) => (
+                    {/* Valor legado fora da lista aparece como está — senão o select
+                        exibiria a 1ª opção e salvaria outro valor sem o operador ver. */}
+                    {form.drivers_license_category && !(CNH_CATEGORIES as readonly string[]).includes(form.drivers_license_category) && (
+                      <option value={form.drivers_license_category} className="bg-surface">{form.drivers_license_category}</option>
+                    )}
+                    {CNH_CATEGORIES.map((cat) => (
                       <option key={cat} value={cat} className="bg-surface">{cat}</option>
                     ))}
                   </select>

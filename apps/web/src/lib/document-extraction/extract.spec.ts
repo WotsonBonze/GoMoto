@@ -45,6 +45,7 @@ describe('extractFields — dispatch do registry', () => {
     const call = generateTextMock.mock.calls[0][0]
     expect(call.model).toBe('google/gemini-2.5-flash')
     expect(call.timeout).toBe(EXTRACTION_TIMEOUT_MS)
+    expect(call.temperature).toBe(0)
     expect(call.messages[0].content[0].text).toContain('CNH')
     expect(call.messages[0].content[1]).toMatchObject({ type: 'file', mediaType: 'application/pdf' })
   })
@@ -90,6 +91,8 @@ describe('extractFields — dispatch do registry', () => {
 
     const call = generateTextMock.mock.calls[0][0]
     expect(call.providerOptions.gateway.disallowPromptTraining).toBe(true)
+    // Vertex lê PDF com menos detalhe (categoria/CPF errados) — rota fixa no AI Studio.
+    expect(call.providerOptions.gateway.only).toEqual(['google'])
   })
 
   it('calcula fieldsFound/fieldsTotal a partir de um resultado com campos nulos (RF-005)', async () => {
@@ -110,6 +113,27 @@ describe('extractFields — dispatch do registry', () => {
     expect(result).not.toBeNull()
     expect(result!.fieldsTotal).toBe(7)
     expect(result!.fieldsFound).toBe(2)
+  })
+
+  it('aplica o pós-processamento da CNH (normaliza e rebaixa o que não confere)', async () => {
+    generateTextMock.mockResolvedValue({
+      output: {
+        name: { value: 'João', confidence: 'high' },
+        cpf: { value: '529.982.247-25', confidence: 'high' },
+        rg: { value: '254954811 DETRAN RJ', confidence: 'high' },
+        birth_date: { value: '1990-01-01', confidence: 'high' },
+        // 10 dígitos: o Nº do espelho lido no lugar do registro.
+        drivers_license: { value: '2408149527', confidence: 'high' },
+        drivers_license_category: { value: 'B', confidence: 'high' },
+        drivers_license_validity: { value: '2030-01-01', confidence: 'high' },
+      },
+    })
+
+    const result = await extractFields('cnh', makeFile())
+
+    expect(result!.fields.cpf).toEqual({ value: '52998224725', confidence: 'high' })
+    expect(result!.fields.rg).toEqual({ value: '254954811', confidence: 'high' })
+    expect(result!.fields.drivers_license).toEqual({ value: '2408149527', confidence: 'low' })
   })
 })
 

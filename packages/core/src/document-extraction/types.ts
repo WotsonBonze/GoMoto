@@ -16,11 +16,17 @@ export type ExtractionDocumentType = z.infer<typeof DocumentTypeSchema>
 export const ExtractionConfidenceSchema = z.enum(['high', 'low'])
 export type ExtractionConfidence = z.infer<typeof ExtractionConfidenceSchema>
 
-export function extractionField<T extends z.ZodTypeAny>(valueSchema: T) {
-  return z.object({
+/**
+ * `description` vai para o JSON Schema enviado ao modelo (AI SDK repassa o
+ * `.describe()`) — é onde o formato e o rótulo do documento de cada campo
+ * chegam colados ao próprio campo, reforçando o prompt.
+ */
+export function extractionField<T extends z.ZodTypeAny>(valueSchema: T, description?: string) {
+  const field = z.object({
     value: valueSchema.nullable(),
     confidence: ExtractionConfidenceSchema,
   })
+  return description ? field.describe(description) : field
 }
 export type ExtractionField<T> = { value: T | null; confidence: ExtractionConfidence }
 

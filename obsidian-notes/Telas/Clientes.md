@@ -46,7 +46,7 @@ Layout com navegação lateral por seção (sticky), não é mais um form plano.
 | Seção | Campos |
 |---|---|
 | Dados Pessoais | Nome completo, CPF, RG, Data de Nascimento |
-| Habilitação (CNH) | Número, Categoria (A/B/AB/C/AC/D/AD/E/AE), Validade |
+| Habilitação (CNH) | Número, Categoria (`CNH_CATEGORIES` de `@gomoto/core`: ACC/A/B/AB/C/AC/D/AD/E/AE — valor legado fora da lista aparece como opção extra), Validade |
 | Contato | Telefone 1, Telefone 2, Email, Nome/Telefone dos Contatos de Emergência **1, 2 e 3** |
 | Endereço | CEP (com **busca automática** via ViaCEP — preenche Logradouro/Bairro/Cidade/UF), Logradouro, Número, Complemento, Bairro, Cidade, UF |
 | Documentos | Foto da CNH, Comprovante de Residência (upload, ver §Documentos abaixo) |
