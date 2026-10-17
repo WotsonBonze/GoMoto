@@ -1,5 +1,5 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { useSupabaseContext, useRequiredTenantId } from '../context'
+import { useSupabaseContext, useReadScope, useRequiredTenantId } from '../context'
 import {
   listVehicles,
   listAvailableVehicles,
@@ -14,7 +14,12 @@ const KEY = 'vehicles'
 
 export function useVehicles() {
   const supabase = useSupabaseContext()
-  return useQuery({ queryKey: [KEY], queryFn: () => listVehicles(supabase) })
+  const scope = useReadScope()
+  return useQuery({
+    queryKey: [KEY, { tenantId: scope.tenantId }],
+    queryFn: () => listVehicles(supabase, scope.tenantId),
+    enabled: scope.ready,
+  })
 }
 
 export function useAvailableVehicles() {

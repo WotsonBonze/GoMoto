@@ -1,11 +1,16 @@
 import type { SupabaseClient } from '@supabase/supabase-js'
 import type { Maintenance } from '@gomoto/core'
 
-export async function listMaintenances(client: SupabaseClient): Promise<Maintenance[]> {
-  const { data, error } = await client
+export async function listMaintenances(
+  client: SupabaseClient,
+  tenantId?: string | null,
+): Promise<Maintenance[]> {
+  let q = client
     .from('maintenances')
     .select('*, vehicle:vehicles(*)')
     .order('created_at', { ascending: false })
+  if (tenantId) q = q.eq('tenant_id', tenantId)
+  const { data, error } = await q
   if (error) throw error
   return (data ?? []) as Maintenance[]
 }

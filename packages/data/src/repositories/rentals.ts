@@ -8,6 +8,7 @@ type RentalFilter = {
 export async function listRentals(
   client: SupabaseClient,
   filter?: RentalFilter,
+  tenantId?: string | null,
 ): Promise<Rental[]> {
   let q = client
     .from('rentals')
@@ -17,14 +18,18 @@ export async function listRentals(
   if (filter?.status) {
     q = q.eq('status', filter.status)
   }
+  if (tenantId) q = q.eq('tenant_id', tenantId)
 
   const { data, error } = await q
   if (error) throw error
   return (data ?? []) as Rental[]
 }
 
-export async function listActiveRentals(client: SupabaseClient): Promise<Rental[]> {
-  return listRentals(client, { status: 'active' })
+export async function listActiveRentals(
+  client: SupabaseClient,
+  tenantId?: string | null,
+): Promise<Rental[]> {
+  return listRentals(client, { status: 'active' }, tenantId)
 }
 
 export async function getRental(client: SupabaseClient, id: string): Promise<Rental> {

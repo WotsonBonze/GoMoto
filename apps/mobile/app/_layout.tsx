@@ -25,8 +25,10 @@ function DataProviders({ children }: { children: ReactNode }) {
   // Re-cria o value só quando o tenant ativo muda — evita render desnecessário
   // nos consumidores do contexto.
   const tenantId = useMemo(() => activeTenantId, [activeTenantId])
+  // scopeReadsToTenant: a RLS de cliente enxerga o cadastro dele em todas as
+  // locadoras; as listas precisam filtrar pela locadora escolhida.
   return (
-    <SupabaseProvider client={supabase} tenantId={tenantId}>
+    <SupabaseProvider client={supabase} tenantId={tenantId} scopeReadsToTenant>
       <RealtimeSubscriptions>{children}</RealtimeSubscriptions>
     </SupabaseProvider>
   )

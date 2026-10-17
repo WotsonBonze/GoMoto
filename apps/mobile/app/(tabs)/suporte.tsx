@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import {
   Alert,
   Linking,
+  Modal,
   ScrollView,
   StyleSheet,
   Text,
@@ -9,14 +10,18 @@ import {
 } from 'react-native'
 import { SafeAreaView } from 'react-native-safe-area-context'
 import Constants from 'expo-constants'
+import { useRouter } from 'expo-router'
 import { applyPhoneMask, type TenantContact } from '@gomoto/core'
 import { useTenantContacts } from '@gomoto/data'
-import { useAuth } from '../../src/contexts/auth'
+import { useAuth, type TenantOption } from '../../src/contexts/auth'
 import { supabase } from '../../src/lib/supabase'
 import { useTheme, useThemePreference, type ThemeTokens, type ThemePreference } from '../../src/theme'
 import {
+  Badge,
   Card,
+  Icon,
   ListItem,
+  ModalHeader,
   ScreenHeader,
   SectionHeader,
   SegmentedControl,
@@ -93,7 +98,8 @@ function initials(name: string | null): string {
 type CustomerProfile = { name: string | null; phone: string | null }
 
 export default function ContaTab() {
-  const { session, tenants, activeTenantId, signOut } = useAuth()
+  const { session, tenants, activeTenantId, signOut, selectTenant } = useAuth()
+  const router = useRouter()
   const theme = useTheme()
   const styles = useMemo(() => createStyles(theme), [theme])
   const { preference, setPreference } = useThemePreference()
@@ -102,6 +108,7 @@ export default function ContaTab() {
   const appVersion = Constants.expoConfig?.version ?? '—'
 
   const [profile, setProfile] = useState<CustomerProfile>({ name: null, phone: null })
+  const [tenantPickerOpen, setTenantPickerOpen] = useState(false)
 
   useEffect(() => {
     const userId = session?.user.id
@@ -120,6 +127,14 @@ export default function ContaTab() {
         if (data) setProfile({ name: data.name ?? null, phone: data.phone ?? null })
       })
   }, [session?.user.id, activeTenantId])
+
+  // As listas já trocam sozinhas (a queryKey leva a locadora); voltar ao Início
+  // descarta o estado local da tela atual, como um Pix gerado na outra locadora.
+  function handleSwitchTenant(tenant: TenantOption) {
+    setTenantPickerOpen(false)
+    if (tenant.id === activeTenantId) return
+    void selectTenant(tenant.id).then(() => router.replace('/'))
+  }
 
   function handleSignOut() {
     Alert.alert('Sair', 'Tem certeza que deseja encerrar a sessão?', [
@@ -151,6 +166,27 @@ export default function ContaTab() {
             ) : null}
           </View>
         </Card>
+
+        {/* Locadora — só para quem é cliente de mais de uma */}
+        {tenants.length > 1 ? (
+          <View style={styles.section}>
+            <SectionHeader title="Locadora" />
+            <Card padded={false}>
+              <ListItem
+                icon="business-outline"
+                label={activeTenant?.name ?? '—'}
+                sublabel="Acessando agora"
+              />
+              <ListItem
+                icon="swap-horizontal-outline"
+                iconTone="neutral"
+                label="Trocar de locadora"
+                onPress={() => setTenantPickerOpen(true)}
+                last
+              />
+            </Card>
+          </View>
+        ) : null}
 
         {/* Aparência */}
         <View style={styles.section}>
@@ -191,6 +227,47 @@ export default function ContaTab() {
           <ListItem icon="log-out-outline" label="Sair da conta" onPress={handleSignOut} destructive last />
         </Card>
       </ScrollView>
+
+      <Modal
+        visible={tenantPickerOpen}
+        animationType="slide"
+        presentationStyle="pageSheet"
+        onRequestClose={() => setTenantPickerOpen(false)}
+      >
+        <SafeAreaView style={styles.safe} edges={['top', 'bottom']}>
+          <ModalHeader
+            title="Escolha a locadora"
+            subtitle="Com qual deseja continuar?"
+            onClose={() => setTenantPickerOpen(false)}
+          />
+          <ScrollView contentContainerStyle={styles.content}>
+            <Card padded={false}>
+              {tenants.map((tenant, i) => {
+                const active = tenant.id === activeTenantId
+                const suspended = !!tenant.suspended_at
+                return (
+                  <ListItem
+                    key={tenant.id}
+                    icon="business-outline"
+                    iconTone={active ? 'primary' : 'neutral'}
+                    label={tenant.name}
+                    sublabel={active ? 'Acessando agora' : suspended ? 'Temporariamente indisponível' : undefined}
+                    trailing={
+                      active ? (
+                        <Icon name="checkmark-circle" size={20} color={theme.primary} />
+                      ) : suspended ? (
+                        <Badge label="Indisponível" size="sm" />
+                      ) : undefined
+                    }
+                    onPress={active || suspended ? undefined : () => handleSwitchTenant(tenant)}
+                    last={i === tenants.length - 1}
+                  />
+                )
+              })}
+            </Card>
+          </ScrollView>
+        </SafeAreaView>
+      </Modal>
     </SafeAreaView>
   )
 }

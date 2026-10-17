@@ -5,11 +5,14 @@ const BUCKET = 'maintenance-files'
 
 export async function listMaintenanceRecords(
   client: SupabaseClient,
+  tenantId?: string | null,
 ): Promise<MaintenanceRecord[]> {
-  const { data, error } = await client
+  let q = client
     .from('maintenance_records')
     .select('*')
     .order('created_at', { ascending: false })
+  if (tenantId) q = q.eq('tenant_id', tenantId)
+  const { data, error } = await q
   if (error) throw error
   return (data ?? []) as MaintenanceRecord[]
 }

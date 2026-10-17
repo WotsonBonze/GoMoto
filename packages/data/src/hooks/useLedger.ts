@@ -8,7 +8,7 @@
  */
 
 import { useInfiniteQuery, useQuery } from '@tanstack/react-query'
-import { useSupabaseContext, useRequiredTenantId, useTenantId } from '../context'
+import { useReadScope, useSupabaseContext, useRequiredTenantId, useTenantId } from '../context'
 import {
   calculateAmountDue,
   classifyCustomerDelinquency,
@@ -596,9 +596,11 @@ export function usePaymentIntentStatus(intentId: string | undefined, enabled = t
  */
 export function useMyCharges(onlyOpen = true) {
   const supabase = useSupabaseContext()
+  const scope = useReadScope()
 
   return useQuery<MyChargeRow[]>({
-    queryKey: [KEY.charges, 'mine', onlyOpen],
+    queryKey: [KEY.charges, 'mine', onlyOpen, { tenantId: scope.tenantId }],
+    enabled: scope.ready,
     queryFn: async () => {
       let query = supabase
         .from('charge_balances')
@@ -606,6 +608,7 @@ export function useMyCharges(onlyOpen = true) {
         .order('due_date', { ascending: true })
 
       if (onlyOpen) query = query.eq('status', 'open').gt('open_amount', 0)
+      if (scope.tenantId) query = query.eq('tenant_id', scope.tenantId)
 
       const [{ data, error }, index] = await Promise.all([
         query,
@@ -635,17 +638,21 @@ export const MY_PAID_CHARGES_PAGE_SIZE = 30
  */
 export function useMyPaidCharges(pageSize = MY_PAID_CHARGES_PAGE_SIZE) {
   const supabase = useSupabaseContext()
+  const scope = useReadScope()
 
   return useInfiniteQuery({
-    queryKey: [KEY.charges, 'mine', 'paid', pageSize],
+    queryKey: [KEY.charges, 'mine', 'paid', pageSize, { tenantId: scope.tenantId }],
+    enabled: scope.ready,
     initialPageParam: 0,
     queryFn: async ({ pageParam }): Promise<MyChargeRow[]> => {
       const from = pageParam * pageSize
+      let query = supabase
+        .from('charge_balances')
+        .select('*')
+        .eq('status', 'paid')
+      if (scope.tenantId) query = query.eq('tenant_id', scope.tenantId)
       const [{ data, error }, index] = await Promise.all([
-        supabase
-          .from('charge_balances')
-          .select('*')
-          .eq('status', 'paid')
+        query
           .order('due_date', { ascending: false })
           .order('charge_id', { ascending: false })
           .range(from, from + pageSize - 1),

@@ -96,11 +96,14 @@ export async function getInspectionScheduleWithContext(
  */
 export async function listPendingInspectionSchedulesForCustomer(
   client: SupabaseClient,
+  tenantId?: string | null,
 ): Promise<InspectionScheduleWithStatus[]> {
-  const { data, error } = await client
+  let q = client
     .from('inspection_schedules')
     .select('*')
     .order('target_date', { ascending: true })
+  if (tenantId) q = q.eq('tenant_id', tenantId)
+  const { data, error } = await q
   if (error) throw error
   const withStatus = await withDerivedStatus(client, (data ?? []) as InspectionSchedule[])
   return withStatus.filter((s) => s.status !== 'approved')

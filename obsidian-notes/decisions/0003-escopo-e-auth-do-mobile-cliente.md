@@ -66,6 +66,10 @@ WHERE c.user_id = auth.uid();
 
 Todas as queries do mobile filtram pelo tenant ativo. RLS faz o reforço server-side (vê §5).
 
+> **Implementado em 2026-10-16** (até então nenhuma das duas frases acima valia):
+> - **Filtro por locadora ativa:** a RLS de cliente usa `current_customer_ids()`, que devolve o cadastro do usuário em **todas** as locadoras — ela isola cliente de cliente, não locadora de locadora para o mesmo cliente. Sem filtro no app, quem era cliente de duas via a mesma placa no Início e as cobranças misturadas, qualquer que fosse a escolha. Agora o `SupabaseProvider` do mobile liga `scopeReadsToTenant`, e os hooks de lista (`useRentals`, `useVehicles`, `useMaintenances`, `useMaintenanceRecords`, `useCustomers`, `useMyCharges`, `useMyPaidCharges`, vistorias do cliente) filtram por `tenant_id` via `useReadScope()` e levam a locadora na queryKey. O web não liga o escopo — comportamento inalterado.
+> - **Troca na aba Conta:** seção "Locadora", visível só com 2+ locadoras: mostra a locadora ativa e o item "Trocar de locadora", que abre um modal com a lista (✓ na atual, suspensas desabilitadas); tocar numa locadora troca via `selectTenant()` e volta ao Início.
+
 ### 4. Convite e onboarding do cliente
 
 O admin no web é quem dispara o acesso:

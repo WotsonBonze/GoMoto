@@ -1,11 +1,16 @@
 import type { SupabaseClient } from '@supabase/supabase-js'
 import type { Customer } from '@gomoto/core'
 
-export async function listCustomers(client: SupabaseClient): Promise<Customer[]> {
-  const { data, error } = await client
+export async function listCustomers(
+  client: SupabaseClient,
+  tenantId?: string | null,
+): Promise<Customer[]> {
+  let q = client
     .from('customers')
     .select('*')
     .order('created_at', { ascending: false })
+  if (tenantId) q = q.eq('tenant_id', tenantId)
+  const { data, error } = await q
   if (error) throw error
   return (data ?? []) as Customer[]
 }
