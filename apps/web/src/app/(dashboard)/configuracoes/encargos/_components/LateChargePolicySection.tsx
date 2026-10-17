@@ -50,7 +50,7 @@ export function LateChargePolicySection({
   versions: PolicyVersion[]
   /** Recarrega a lista de versões após gravar.
    *
-   *  A action chama `revalidatePath('/configuracoes')`, e isso não tem efeito
+   *  A action chama `revalidatePath('/configuracoes/encargos')`, e isso não tem efeito
    *  nenhum aqui: a tela é Client Component e as versões vêm de
    *  `useLateChargePolicies()`, um cache do TanStack Query. Sem invalidar esse
    *  cache, salvar respondia "salvo" com a tabela mostrando a política antiga —

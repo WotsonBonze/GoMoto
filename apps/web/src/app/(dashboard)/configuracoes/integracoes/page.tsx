@@ -41,7 +41,7 @@ export default async function IntegracoesPage() {
   try {
     ctx = await requireTenantOwnerOrAdmin()
   } catch {
-    redirect('/configuracoes')
+    redirect('/configuracoes/conta')
   }
 
   // As duas views são `security_invoker`, então a RLS filtra por tenant sozinha

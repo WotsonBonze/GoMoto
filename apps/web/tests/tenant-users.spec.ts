@@ -215,7 +215,7 @@ test.describe('Usuários do tenant — convite, papéis, revogação (Spec 0011)
     try {
       await page.waitForURL(/\/dashboard/, { timeout: 15_000 })
       await page.goto('/configuracoes/usuarios')
-      await page.waitForURL(/\/configuracoes$/, { timeout: 10_000 })
+      await page.waitForURL(/\/configuracoes\/conta$/, { timeout: 10_000 })
     } finally {
       await context.close()
     }

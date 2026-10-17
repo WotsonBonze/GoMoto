@@ -4,15 +4,15 @@ import React, { useMemo, useState, useTransition } from 'react'
 import Link from 'next/link'
 import { useRouter } from 'next/navigation'
 import {
-  Activity, AlertTriangle, ArrowLeft, CheckCircle2, Clock, Loader2, RotateCw,
+  Activity, AlertTriangle, CheckCircle2, Clock, Loader2, RotateCw,
   ShieldAlert, ShieldCheck,
 } from 'lucide-react'
 
-import { PageTitle } from '@/components/layout/PageTitle'
 import { Badge } from '@/components/ui/Badge'
 import { Card } from '@/components/ui/Card'
 import { cn } from '@/lib/utils'
 import { replayGatewayEventAction } from './actions'
+import { SettingsHeader } from '../_components/SettingsHeader'
 
 /** Espelha `gateway_event_audit` (ADR 0034). */
 export interface GatewayEventRow {
@@ -199,20 +199,12 @@ export function IntegracoesClient({
   ), [eventos, filtro])
 
   return (
-    <div className="p-6 space-y-8 max-w-6xl">
-      <div>
-        <Link
-          href="/configuracoes"
-          className="inline-flex items-center gap-1.5 text-[13px] text-fg-mute hover:text-fg transition-colors mb-3"
-        >
-          <ArrowLeft className="w-4 h-4" />
-          Configurações
-        </Link>
-        <PageTitle
-          title="Diagnóstico das integrações"
-          subtitle="O que os gateways enviaram, o que virou dinheiro e o que ficou pelo caminho."
-        />
-      </div>
+    <div className="space-y-8">
+      <SettingsHeader
+        icon={Activity}
+        title="Diagnóstico das integrações"
+        description="O que os gateways enviaram, o que virou dinheiro e o que ficou pelo caminho."
+      />
 
       {loadError ? (
         <Card className="border-critical">

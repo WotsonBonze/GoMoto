@@ -1,6 +1,24 @@
 # ⚙️ Tela: Configurações — [[GoMoto]]
 
-Rota: `/configuracoes` | Tipo: Client Component
+Rota: `/configuracoes/*` | Casca: `configuracoes/layout.tsx` (Server Component) — [[decisions/0041-configuracoes-com-submenu|ADR 0041]]
+
+`/configuracoes` não tem conteúdo próprio: redireciona para `/configuracoes/conta`. Cada assunto é uma sub-rota com `page.tsx` (guarda no servidor) e, quando escreve, `actions.ts` próprio.
+
+## Estrutura e permissões
+
+| Grupo | Item do menu | Rota | Quem vê |
+|---|---|---|---|
+| Minha conta | Perfil e segurança | `/configuracoes/conta` | todos |
+| Minha conta | Aparência | `/configuracoes/aparencia` | todos |
+| Empresa | Usuários | `/configuracoes/usuarios` | Owner/Admin |
+| Empresa | Contatos do app | `/configuracoes/contatos` | Owner/Admin |
+| Financeiro | Gateways de pagamento | `/configuracoes/pagamentos` | Owner |
+| Financeiro | Multa e juros | `/configuracoes/encargos` | Owner |
+| Financeiro | Diagnóstico | `/configuracoes/integracoes` | Owner/Admin |
+
+- O **menu** (`_components/settings-nav.ts`, testado) é filtrado pelo papel resolvido no layout via `getCurrentTenantRole()`; grupos vazios somem — Operator/Viewer veem só "Minha conta" (Spec 0011 RNF-003).
+- O menu só decide o que **mostrar**. Cada página barra com `requireTenantOwner()` / `requireTenantOwnerOrAdmin()` e `redirect('/configuracoes/conta')`; a checagem que vale para escrita continua no banco.
+- O callback OAuth dos gateways (`api/auth/gateway/[provider]/callback`) devolve para `/configuracoes/pagamentos?payment=...`. O `redirect_uri` registrado nos provedores não mudou.
 
 ## Seções
 
@@ -81,7 +99,7 @@ Havia três respostas para "qual política vale": `fn_create_charge` casava por 
 
 ### Diagnóstico das integrações (Owner e Admin) — [[decisions/0034-auditabilidade-do-caminho-do-dinheiro|ADR 0034]]
 
-Sub-rota `/configuracoes/integracoes`, no mesmo padrão de `/configuracoes/usuarios`: card com `ChevronRight` na tela principal, guarda por `requireTenantOwnerOrAdmin()` com `redirect('/configuracoes')` — Operator e Viewer não sabem que a tela existe.
+Sub-rota `/configuracoes/integracoes` (item "Diagnóstico" do menu), guarda por `requireTenantOwnerOrAdmin()` com `redirect('/configuracoes/conta')` — Operator e Viewer não sabem que a tela existe.
 
 **Por que Owner/Admin e não Operator:** um evento de gateway carrega valor, cliente e o erro cru do provedor. É informação de gestão, no mesmo nível de "Usuários".
 
@@ -138,41 +156,25 @@ O reprocessamento roda o **mesmo** processador do webhook — os três saíram p
 implementação da confirmação de pagamento. Falha volta para a fila com o motivo
 novo, que é o que o operador precisa ler.
 
-### 1. Segurança (ícone Lock `#a880ff`)
+### Minha conta — `/configuracoes/conta` (todos)
 
-| Campo | Tipo |
+- **Informações da Conta** (read-only): e-mail de acesso e "Membro desde", via `supabase.auth.getUser()`.
+- **Segurança**: nova senha + confirmação (mínimo 6 caracteres, precisam coincidir), salva via `supabase.auth.updateUser({ password })`.
+
+### Aparência — `/configuracoes/aparencia` (todos) — ADR 0019
+
+Preferência por operador (`update_own_theme_preference`). Pré-visualiza no `<html>` ao clicar e restaura o tema salvo ao sair sem salvar — inclusive trocando de item no submenu.
+
+### Escrita (Server Actions por sub-rota)
+
+| Arquivo | Actions |
 |---|---|
-| Nova Senha | password com toggle Eye/EyeOff |
-| Confirmar Nova Senha | password |
-
-**Validações:**
-- Mínimo 6 caracteres
-- Senhas devem corresponder
-
-Salva via `supabase.auth.updateUser({ password: newPassword })`.
-
-### 2. Informações da Conta (ícone User `#e65e24`) — Read-Only
-
-- E-mail de acesso (`supabase.auth.getUser()`)
-- Membro desde (data formatada com `Intl.DateTimeFormat('pt-BR', { day, month, year })`)
-
-## Componente FeedbackMessage
-
-```typescript
-type: 'success' | 'error'
-// success: bg #0e2f13, border #229731, icon CheckCircle2
-// error:   bg #7c1c1c, border #ff9c9a, icon AlertCircle
-```
-
-## Queries Supabase
-
-```sql
--- Alterar senha
-supabase.auth.updateUser({ password: '...' })
-
--- Buscar usuário logado
-supabase.auth.getUser()
-```
+| `pagamentos/actions.ts` | `connectGateway*`, `setDefaultGatewayAction`, `disconnectGatewayAction`, `deleteGatewayAction` |
+| `encargos/actions.ts` | `createLateChargePolicyAction` |
+| `contatos/actions.ts` | `create/update/delete/reorderTenantContactAction(s)` |
+| `aparencia/actions.ts` | `updateThemePreferenceAction` |
+| `usuarios/actions.ts` | convite, papel, revogação, reativação, reset de senha |
+| `integracoes/actions.ts` | `replayGatewayEventAction` |
 
 ## Tags
 `#projeto/tela` `#gomoto/configuracoes`

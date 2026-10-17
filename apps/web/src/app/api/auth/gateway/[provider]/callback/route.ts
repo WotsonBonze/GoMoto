@@ -24,7 +24,7 @@ import { getOAuthProvider } from '@/lib/payment/registry'
 import { oauthStateSecret } from '@/lib/payment/oauth-state'
 import { revalidatePath } from 'next/cache'
 
-const REDIRECT_BASE = '/configuracoes'
+const REDIRECT_BASE = '/configuracoes/pagamentos'
 
 type RouteContext = { params: Promise<{ provider: string }> }
 

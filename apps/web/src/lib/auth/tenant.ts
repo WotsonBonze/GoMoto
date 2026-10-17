@@ -24,6 +24,27 @@ export async function getCurrentTenantId(client: SupabaseClient): Promise<string
   return data?.tenant_id ?? null
 }
 
+/**
+ * Papel do usuário autenticado no tenant atual, ou null se não houver vínculo.
+ * Não lança: serve para decidir o que MOSTRAR (ex.: menu de Configurações).
+ * Para decidir o que PERMITIR, use os guards abaixo.
+ */
+export async function getCurrentTenantRole(client: SupabaseClient): Promise<TenantMemberRole | null> {
+  const {
+    data: { user },
+  } = await client.auth.getUser()
+  if (!user) return null
+  const tenantId = await getCurrentTenantId(client)
+  if (!tenantId) return null
+  const { data } = await client
+    .from('tenant_members')
+    .select('role')
+    .eq('tenant_id', tenantId)
+    .eq('user_id', user.id)
+    .maybeSingle()
+  return (data?.role as TenantMemberRole | undefined) ?? null
+}
+
 export type TenantMemberContext = {
   supabase: SupabaseClient
   userId: string
