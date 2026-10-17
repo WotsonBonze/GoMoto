@@ -1,4 +1,4 @@
-import { useCallback, useMemo } from 'react'
+import { useMemo } from 'react'
 import {
   ActivityIndicator,
   Image,
@@ -10,7 +10,7 @@ import {
   View,
 } from 'react-native'
 import { SafeAreaView } from 'react-native-safe-area-context'
-import { useFocusEffect, useRouter } from 'expo-router'
+import { useRouter } from 'expo-router'
 import {
   useMyCharges,
   useMaintenances,
@@ -25,6 +25,7 @@ import {
   type Vehicle,
 } from '@gomoto/core'
 import { useAuth } from '../../src/contexts/auth'
+import { useRefreshOnFocus } from '../../src/hooks/useRefreshOnFocus'
 import { useTheme, type ThemeTokens } from '../../src/theme'
 import {
   Badge,
@@ -310,14 +311,7 @@ export default function HomeTab() {
   const maintenancesQuery = useMaintenances()
   const vehiclesQuery     = useVehicles()
 
-  useFocusEffect(
-    useCallback(() => {
-      void rentalsQuery.refetch()
-      void billingsQuery.refetch()
-      void maintenancesQuery.refetch()
-      void vehiclesQuery.refetch()
-    }, [rentalsQuery.refetch, billingsQuery.refetch, maintenancesQuery.refetch, vehiclesQuery.refetch]),
-  )
+  useRefreshOnFocus([rentalsQuery, billingsQuery, maintenancesQuery, vehiclesQuery])
 
   const isLoading = rentalsQuery.isLoading || billingsQuery.isLoading
 

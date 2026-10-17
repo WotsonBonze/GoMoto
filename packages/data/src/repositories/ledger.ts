@@ -573,13 +573,16 @@ export type LateChargePolicyRow = {
  */
 export async function listLateChargePolicies(
   client: SupabaseClient,
+  tenantId?: string | null,
 ): Promise<LateChargePolicyRow[]> {
-  const { data, error } = await client
+  let q = client
     .from('late_charge_policies')
     .select('id, version, effective_from, fee_type, fee_value, daily_interest_rate, grace_period_days, min_amount')
     .order('effective_from', { ascending: false })
     .order('version', { ascending: false })
+  if (tenantId) q = q.eq('tenant_id', tenantId)
 
+  const { data, error } = await q
   if (error) throw error
   return (data ?? []) as LateChargePolicyRow[]
 }

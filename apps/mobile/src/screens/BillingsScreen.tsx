@@ -14,11 +14,11 @@ import {
   View,
 } from 'react-native'
 import { SafeAreaView } from 'react-native-safe-area-context'
-import { useFocusEffect } from 'expo-router'
 import { useChargeDetail, useMyCharges, useMyPaidCharges, usePaymentIntentStatus } from '@gomoto/data'
 import type { MyChargeRow } from '@gomoto/data'
 import { isAuthRetryableFetchError } from '@supabase/supabase-js'
 import { supabase } from '../lib/supabase'
+import { useRefreshOnFocus } from '../hooks/useRefreshOnFocus'
 import { useTheme, type ThemeTokens } from '../theme'
 import {
   Badge,
@@ -859,11 +859,7 @@ export function BillingsScreen() {
   const query        = useMyCharges(true)
   const historyQuery = useMyPaidCharges()
 
-  useFocusEffect(
-    useCallback(() => {
-      void query.refetch()
-    }, [query.refetch]),
-  )
+  useRefreshOnFocus([query])
 
   // Paga, a cobrança sai de "a pagar" e entra em "pagas": recarrega as duas
   // listas e fecha o detalhe.

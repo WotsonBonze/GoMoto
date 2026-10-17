@@ -7,7 +7,8 @@
  * que a mesma cobrança tinha três valores devidos diferentes.
  */
 
-import { useInfiniteQuery, useQuery } from '@tanstack/react-query'
+import { useCallback } from 'react'
+import { useInfiniteQuery, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useReadScope, useSupabaseContext, useRequiredTenantId, useTenantId } from '../context'
 import {
   calculateAmountDue,
@@ -102,17 +103,47 @@ export type ChargeWithDue = ChargeBalanceRow & {
  * empresa), então buscar todas e indexar sai mais barato que juntar a política
  * em cada consulta de cobrança.
  */
-async function policyIndex(
-  supabase: Parameters<typeof listLateChargePolicies>[0],
-): Promise<Map<string, LateChargePolicy>> {
-  const versoes = await listLateChargePolicies(supabase)
-  return new Map(versoes.map((v) => [v.id, {
-    fee_type:            v.fee_type,
-    fee_value:           v.fee_value,
-    daily_interest_rate: v.daily_interest_rate,
-    grace_period_days:   v.grace_period_days,
-    min_amount:          v.min_amount,
-  }]))
+const POLICY_INDEX_STALE_MS = 5 * 60_000
+
+type PolicyRef = { late_charge_policy_id: string | null }
+
+/**
+ * Carregador do índice em cache. Antes cada lista de cobranças buscava
+ * `late_charge_policies` de novo — a tela Início do app fazia isso duas vezes
+ * por abertura. Política é versionada (mudança = linha nova, id novo), então o
+ * cache só fica velho por FALTA de id: se alguma cobrança aponta para uma
+ * política fora do índice, busca de novo antes de calcular — senão o encargo
+ * sairia zerado.
+ *
+ * Chamar sem linhas aquece o cache em paralelo com a consulta das cobranças;
+ * chamar com as linhas devolve o índice garantido para elas.
+ */
+function usePolicyIndex() {
+  const supabase = useSupabaseContext()
+  const qc = useQueryClient()
+  const { tenantId } = useReadScope()
+
+  return useCallback(
+    async (rows?: PolicyRef[]): Promise<Map<string, LateChargePolicy>> => {
+      const options = {
+        queryKey: ['late-charge-policies', 'index', { tenantId }],
+        queryFn: () => listLateChargePolicies(supabase, tenantId),
+      }
+      let versoes = await qc.fetchQuery({ ...options, staleTime: POLICY_INDEX_STALE_MS })
+      const known = new Set(versoes.map((v) => v.id))
+      if (rows?.some((r) => r.late_charge_policy_id && !known.has(r.late_charge_policy_id))) {
+        versoes = await qc.fetchQuery({ ...options, staleTime: 0 })
+      }
+      return new Map(versoes.map((v) => [v.id, {
+        fee_type:            v.fee_type,
+        fee_value:           v.fee_value,
+        daily_interest_rate: v.daily_interest_rate,
+        grace_period_days:   v.grace_period_days,
+        min_amount:          v.min_amount,
+      }]))
+    },
+    [supabase, qc, tenantId],
+  )
 }
 
 /** A política que ESTA cobrança congelou — nunca a vigente hoje. */
@@ -130,15 +161,17 @@ function policyOf(
  */
 export function useOpenCharges(customerId: string | undefined) {
   const supabase = useSupabaseContext()
+  const loadPolicyIndex = usePolicyIndex()
 
   return useQuery<ChargeWithDue[]>({
     queryKey: [KEY.charges, 'open', customerId],
     enabled: !!customerId,
     queryFn: async () => {
-      const [charges, index] = await Promise.all([
+      const [charges] = await Promise.all([
         listOpenCharges(supabase, customerId!),
-        policyIndex(supabase),
+        loadPolicyIndex(),
       ])
+      const index = await loadPolicyIndex(charges)
 
       return charges.map((c) => {
         const { accrued, amount_due } = calculateAmountDue(c, policyOf(index, c))
@@ -150,18 +183,20 @@ export function useOpenCharges(customerId: string | undefined) {
 
 export function useChargeDetail(chargeId: string | undefined) {
   const supabase = useSupabaseContext()
+  const loadPolicyIndex = usePolicyIndex()
 
   return useQuery({
     queryKey: [KEY.charges, chargeId],
     enabled: !!chargeId,
     queryFn: async () => {
-      const [balance, items, index] = await Promise.all([
+      const [balance, items] = await Promise.all([
         getChargeBalance(supabase, chargeId!),
         listChargeItems(supabase, chargeId!),
-        policyIndex(supabase),
+        loadPolicyIndex(),
       ])
 
       if (!balance) return null
+      const index = await loadPolicyIndex([balance])
 
       const { accrued, amount_due } = calculateAmountDue(balance, policyOf(index, balance))
       return { ...balance, items, accrued, amount_due }
@@ -177,14 +212,16 @@ export function useChargeDetail(chargeId: string | undefined) {
  */
 export function useChargesList() {
   const supabase = useSupabaseContext()
+  const loadPolicyIndex = usePolicyIndex()
 
   return useQuery({
     queryKey: [KEY.charges, 'cockpit'],
     queryFn: async () => {
-      const [rows, index] = await Promise.all([
+      const [rows] = await Promise.all([
         listChargesForCockpit(supabase),
-        policyIndex(supabase),
+        loadPolicyIndex(),
       ])
+      const index = await loadPolicyIndex(rows)
 
       return rows.map((r) => {
         const p = policyOf(index, r)
@@ -597,6 +634,7 @@ export function usePaymentIntentStatus(intentId: string | undefined, enabled = t
 export function useMyCharges(onlyOpen = true) {
   const supabase = useSupabaseContext()
   const scope = useReadScope()
+  const loadPolicyIndex = usePolicyIndex()
 
   return useQuery<MyChargeRow[]>({
     queryKey: [KEY.charges, 'mine', onlyOpen, { tenantId: scope.tenantId }],
@@ -610,13 +648,11 @@ export function useMyCharges(onlyOpen = true) {
       if (onlyOpen) query = query.eq('status', 'open').gt('open_amount', 0)
       if (scope.tenantId) query = query.eq('tenant_id', scope.tenantId)
 
-      const [{ data, error }, index] = await Promise.all([
-        query,
-        policyIndex(supabase),
-      ])
+      const [{ data, error }] = await Promise.all([query, loadPolicyIndex()])
 
       if (error) throw error
-      return enrichMyCharges(supabase, (data ?? []) as ChargeBalanceRow[], index)
+      const rows = (data ?? []) as ChargeBalanceRow[]
+      return enrichMyCharges(supabase, rows, await loadPolicyIndex(rows))
     },
   })
 }
@@ -639,6 +675,7 @@ export const MY_PAID_CHARGES_PAGE_SIZE = 30
 export function useMyPaidCharges(pageSize = MY_PAID_CHARGES_PAGE_SIZE) {
   const supabase = useSupabaseContext()
   const scope = useReadScope()
+  const loadPolicyIndex = usePolicyIndex()
 
   return useInfiniteQuery({
     queryKey: [KEY.charges, 'mine', 'paid', pageSize, { tenantId: scope.tenantId }],
@@ -651,16 +688,17 @@ export function useMyPaidCharges(pageSize = MY_PAID_CHARGES_PAGE_SIZE) {
         .select('*')
         .eq('status', 'paid')
       if (scope.tenantId) query = query.eq('tenant_id', scope.tenantId)
-      const [{ data, error }, index] = await Promise.all([
+      const [{ data, error }] = await Promise.all([
         query
           .order('due_date', { ascending: false })
           .order('charge_id', { ascending: false })
           .range(from, from + pageSize - 1),
-        policyIndex(supabase),
+        loadPolicyIndex(),
       ])
 
       if (error) throw error
-      return enrichMyCharges(supabase, (data ?? []) as ChargeBalanceRow[], index)
+      const rows = (data ?? []) as ChargeBalanceRow[]
+      return enrichMyCharges(supabase, rows, await loadPolicyIndex(rows))
     },
     // Página incompleta = acabou. Evita uma ida extra só para descobrir o fim.
     getNextPageParam: (lastPage, allPages) =>

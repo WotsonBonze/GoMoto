@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useState } from 'react'
+import { useMemo, useState } from 'react'
 import {
   ActivityIndicator,
   RefreshControl,
@@ -8,13 +8,13 @@ import {
   View,
 } from 'react-native'
 import { SafeAreaView } from 'react-native-safe-area-context'
-import { useFocusEffect } from 'expo-router'
 import {
   usePendingInspectionSchedulesForCustomer,
   usePeriodicInspectionsForCustomer,
 } from '@gomoto/data'
 import type { Inspection, InspectionScheduleWithStatus } from '@gomoto/core'
 import { InspectionSubmitModal } from './InspectionSubmitModal'
+import { useRefreshOnFocus } from '../../hooks/useRefreshOnFocus'
 import { useTheme, type ThemeTokens } from '../../theme'
 import {
   Badge,
@@ -56,11 +56,8 @@ export function InspectionsScreen() {
   const pendingQuery = usePendingInspectionSchedulesForCustomer()
   const historyQuery = usePeriodicInspectionsForCustomer()
 
-  useFocusEffect(
-    useCallback(() => {
-      void pendingQuery.refetch()
-    }, [pendingQuery.refetch]),
-  )
+  // staleTime das vistorias é 60 s (useCustomerInspections).
+  useRefreshOnFocus([pendingQuery], 60_000)
 
   async function handleRefresh() {
     setRefreshing(true)

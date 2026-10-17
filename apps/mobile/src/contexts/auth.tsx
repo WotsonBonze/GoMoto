@@ -1,5 +1,5 @@
 import type { Session } from '@supabase/supabase-js'
-import { createContext, useContext, useEffect, useState, type ReactNode } from 'react'
+import { createContext, useContext, useEffect, useRef, useState, type ReactNode } from 'react'
 import * as Linking from 'expo-linking'
 import AsyncStorage from '@react-native-async-storage/async-storage'
 import { cpfShellEmail, normalizeCpf, validateCpfDigits } from '@gomoto/core'
@@ -82,6 +82,25 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [loading, setLoading] = useState(true)
   const [tenants, setTenants] = useState<TenantOption[]>([])
   const [activeTenantId, setActiveTenantId] = useState<string | null>(null)
+  // Sincronização em andamento/concluída por usuário. O bootstrap e o
+  // INITIAL_SESSION (e o login e o SIGNED_IN) disparam no mesmo instante e
+  // buscavam `customers` duas vezes; agora o segundo reaproveita a promessa.
+  const syncRef = useRef<{ userId: string; promise: Promise<TenantOption[]> } | null>(null)
+
+  function syncTenantsOnce(userId: string | null): Promise<TenantOption[]> {
+    if (!userId) {
+      syncRef.current = null
+      return syncTenantsFor(null)
+    }
+    if (syncRef.current?.userId === userId) return syncRef.current.promise
+    const promise = syncTenantsFor(userId)
+    syncRef.current = { userId, promise }
+    // Falhou: libera para o próximo evento de auth tentar de novo.
+    promise.catch(() => {
+      if (syncRef.current?.promise === promise) syncRef.current = null
+    })
+    return promise
+  }
 
   // Carrega tenants do cliente e resolve qual fica ativo. Chamada após cada
   // mudança de session (login, logout, refresh via magic link).
@@ -126,7 +145,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         if (data.session) {
           let list: TenantOption[] | null = null
           try {
-            list = await syncTenantsFor(data.session.user.id)
+            list = await syncTenantsOnce(data.session.user.id)
           } catch (err) {
             // Não deu para confirmar o vínculo — isso não é o mesmo que "não é
             // cliente". Mantém a sessão em vez de deslogar.
@@ -159,10 +178,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     // que aguarda o callback → deadlock e spinner infinito (na 2ª abertura o
     // token já foi renovado e salvo, por isso "funcionava"). O setTimeout tira
     // o trabalho de dentro do ciclo de notificação, como a doc do Supabase manda.
-    const { data: sub } = supabase.auth.onAuthStateChange((_event, next) => {
+    const { data: sub } = supabase.auth.onAuthStateChange((event, next) => {
       setSession(next)
+      // Renovação de token (~1 h) é a deixa para reler as locadoras — é assim
+      // que uma suspensa ou recém-adicionada aparece sem reabrir o app.
+      if (event === 'TOKEN_REFRESHED') syncRef.current = null
       setTimeout(() => {
-        syncTenantsFor(next?.user?.id ?? null).catch((err) => {
+        syncTenantsOnce(next?.user?.id ?? null).catch((err) => {
           console.warn('[auth] falha ao sincronizar tenants', err)
         })
       }, 0)
@@ -192,7 +214,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     if (data.user) {
       let list: TenantOption[]
       try {
-        list = await syncTenantsFor(data.user.id)
+        list = await syncTenantsOnce(data.user.id)
       } catch {
         await supabase.auth.signOut({ scope: 'local' })
         return { error: 'Não foi possível carregar sua conta. Verifique a conexão e tente de novo.' }
@@ -210,7 +232,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   // cliente em todos os aparelhos ao sair de um só.
   async function signOut() {
     await supabase.auth.signOut({ scope: 'local' })
-    await syncTenantsFor(null)
+    await syncTenantsOnce(null)
   }
 
   async function setPassword(password: string) {

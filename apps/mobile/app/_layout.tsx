@@ -1,8 +1,8 @@
 import { Stack, useRouter, useSegments } from 'expo-router'
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react'
-import { StyleSheet, View } from 'react-native'
+import { AppState, Platform, StyleSheet, View } from 'react-native'
 import * as SplashScreen from 'expo-splash-screen'
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import { focusManager, QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { SupabaseProvider, useMaintenanceRecordsRealtime } from '@gomoto/data'
 
 import { AnimatedSplash } from '../src/components/AnimatedSplash'
@@ -13,6 +13,16 @@ import { ThemeProvider, useTheme, type ThemeTokens } from '../src/theme'
 // Segura a splash nativa até o AnimatedSplash assumir a tela (ele chama
 // hideAsync no primeiro layout) — sem isso ela some sozinha no 1º render.
 void SplashScreen.preventAutoHideAsync()
+
+// No React Native o TanStack Query não sabe quando o app volta do segundo
+// plano: sem isto, voltar do app do banco após pagar o Pix não recarregava
+// nada (o refetch forçado no foco de cada aba tapava o buraco, caro). Com o
+// AppState, o que passou do staleTime recarrega ao voltar.
+focusManager.setEventListener((handleFocus) => {
+  if (Platform.OS === 'web') return
+  const sub = AppState.addEventListener('change', (state) => handleFocus(state === 'active'))
+  return () => sub.remove()
+})
 
 // QueryClient é estável durante o ciclo do app. Defaults conservadores: dados
 // considerados frescos por 30 s (mobile alterna foreground/background bastante).
