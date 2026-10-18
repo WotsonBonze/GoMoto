@@ -145,12 +145,23 @@ e o modal de pagamento se orienta por `method`:
 
 | `method` | Gateway | Modal |
 |---|---|---|
-| `pix` | Mercado Pago, Cora | QR (`payload.qr_code_base64`) + copia-e-cola (`payload.emv`, fallback `qr_code`) |
+| `pix` | Mercado Pago, Cora, Asaas | QR (`payload.qr_code_base64`) + copia-e-cola (`payload.emv`, fallback `qr_code`) |
 | `payment_link` | InfinitePay | Abre `payload.checkout_url` no navegador **dentro do app** (`expo-web-browser`: Custom Tabs / SFSafariViewController) assim que o link é gerado; o modal fica por trás com *Abrir página de pagamento* |
 | outro | — | Aviso "forma de pagamento não suportada nesta versão do app" em vez de QR vazio |
 
 `expo-web-browser` e não `Linking.openURL`: o checkout abre sobre o app e o
 cliente volta fechando a página, sem trocar de aplicativo.
+
+**Um modal só, que troca de tela** (desde 2026-10-16). O pagamento não é um
+`Modal` próprio: `BillingDetailModal` troca o detalhe pela `PaymentView` dentro
+do mesmo `Modal`. Antes eram dois `Modal` irmãos, e no iOS o segundo não
+aparecia: o RN (Fabric, `RCTModalHostViewComponentView`) apresenta o modal a
+partir do controlador da raiz, que já estava apresentando o detalhe, e o UIKit
+recusa sem erro. Na InfinitePay ainda havia uma corrida: o SFSafariViewController
+e o modal de pagamento eram apresentados no mesmo instante. No Android cada
+`Modal` é um Dialog e empilha, por isso só o iOS falhava. Agora o navegador sobe
+sobre um modal já aberto e estável. Voltar do Android e arrastar a folha no iOS
+(`onRequestClose`) voltam do pagamento para o detalhe antes de fechar.
 
 A confirmação usa o **mesmo mecanismo do cockpit**: `usePaymentIntentStatus`
 lê `payment_intents.status` a cada 5s (política `customer_read_own_payment_intents`)

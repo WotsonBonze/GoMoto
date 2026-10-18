@@ -48,7 +48,7 @@ import {
  * elegeu (ADR 0030). O que muda de provedor para provedor mora em `payload`,
  * e a tela se orienta por `method`:
  *
- * - `pix` (Mercado Pago, Cora): `payload.emv` + `payload.qr_code_base64`. A
+ * - `pix` (Mercado Pago, Cora, Asaas): `payload.emv` + `payload.qr_code_base64`. A
  *   imagem é garantida pelo servidor (`ensureQrImage`, ADR 0031 §4).
  * - `payment_link` (InfinitePay): `payload.checkout_url` — página hospedada
  *   onde o cliente escolhe Pix ou cartão (ADR 0032).
@@ -437,28 +437,35 @@ function ChargeRow({
 }
 
 // ---------------------------------------------------------------------------
-// PaymentModal
+// PaymentView
 // ---------------------------------------------------------------------------
 
 /**
  * Tela de pagamento, desenhada pelo `method` que o gateway eleito devolveu.
  *
+ * É conteúdo, não um `Modal` próprio: o `BillingDetailModal` troca o detalhe
+ * por esta tela dentro do MESMO modal. No iOS um `Modal` irmão de outro já
+ * aberto não aparece — o RN o apresenta a partir do controlador da raiz, que
+ * já está apresentando o detalhe, e o UIKit recusa em silêncio. No Android
+ * cada `Modal` é um Dialog e empilha, por isso o problema só existia no iOS.
+ *
  * O seletor "Pix / Boleto / Cartão" que existia antes foi removido: o app não
  * escolhe meio nenhum (o servidor usa o do gateway da locadora), então ele
  * prometia uma escolha que não existia.
  */
-function PaymentModal({
+function PaymentView({
   billing,
   intent,
   paid,
-  onClose,
+  onBack,
   styles,
   theme,
 }: {
   billing: MyChargeRow
   intent: PaymentIntent
   paid: boolean
-  onClose: () => void
+  /** Volta ao detalhe; a tentativa continua valendo. */
+  onBack: () => void
   styles: Styles
   theme: ThemeTokens
 }) {
@@ -484,112 +491,110 @@ function PaymentModal({
   }
 
   return (
-    <Modal visible animationType="slide" presentationStyle="pageSheet" onRequestClose={onClose}>
-      <SafeAreaView style={styles.modalSafe} edges={['top', 'bottom']}>
-        <ModalHeader title={isPix ? 'Pagar com Pix' : 'Pagamento'} onClose={onClose} />
+    <>
+      <ModalHeader title={isPix ? 'Pagar com Pix' : 'Pagamento'} onClose={onBack} />
 
-        {paid ? (
-          <View style={styles.successWrap}>
-            <View style={styles.successIcon}>
-              <Icon name="checkmark" size={48} color={theme.success} />
-            </View>
-            <Text style={styles.successTitle}>Pagamento confirmado</Text>
-            <Text style={styles.successAmount}>{formatCurrency(amount)}</Text>
-            <Text style={styles.successText}>{billing.description}</Text>
+      {paid ? (
+        <View style={styles.successWrap}>
+          <View style={styles.successIcon}>
+            <Icon name="checkmark" size={48} color={theme.success} />
           </View>
-        ) : (
-          <ScrollView contentContainerStyle={styles.modalBody}>
-            {/* Valor + estado da espera — o polling roda enquanto o detalhe estiver aberto */}
-            <View style={styles.payHero}>
-              <Text style={styles.heroLabel}>Valor</Text>
-              <Text style={styles.heroAmount}>{formatCurrency(amount)}</Text>
-              <Text style={styles.payHeroSub} numberOfLines={1}>
-                {billing.description} · via {intent.provider_label}
-              </Text>
-              <View style={styles.waiting}>
-                <ActivityIndicator size="small" color={theme.primary} />
-                <Text style={styles.waitingText}>Aguardando pagamento</Text>
-              </View>
+          <Text style={styles.successTitle}>Pagamento confirmado</Text>
+          <Text style={styles.successAmount}>{formatCurrency(amount)}</Text>
+          <Text style={styles.successText}>{billing.description}</Text>
+        </View>
+      ) : (
+        <ScrollView contentContainerStyle={styles.modalBody}>
+          {/* Valor + estado da espera — o polling roda enquanto o detalhe estiver aberto */}
+          <View style={styles.payHero}>
+            <Text style={styles.heroLabel}>Valor</Text>
+            <Text style={styles.heroAmount}>{formatCurrency(amount)}</Text>
+            <Text style={styles.payHeroSub} numberOfLines={1}>
+              {billing.description} · via {intent.provider_label}
+            </Text>
+            <View style={styles.waiting}>
+              <ActivityIndicator size="small" color={theme.primary} />
+              <Text style={styles.waitingText}>Aguardando pagamento</Text>
             </View>
+          </View>
 
-            {isPix && pixCode ? (
-              <>
-                {qrImage ? (
-                  <View style={styles.qrWrap}>
-                    <Image
-                      source={{ uri: `data:image/png;base64,${qrImage}` }}
-                      style={styles.qrImage}
-                      resizeMode="contain"
-                    />
-                  </View>
-                ) : null}
-
-                <Button
-                  label={copied ? 'Código copiado' : 'Copiar código Pix'}
-                  icon={copied ? 'checkmark' : 'copy-outline'}
-                  variant={copied ? 'success' : 'primary'}
-                  onPress={copyCode}
-                />
-
-                <View style={styles.codeBox}>
-                  <Text style={styles.codeLabel}>Pix copia e cola</Text>
-                  <Text style={styles.code} selectable numberOfLines={3}>{pixCode}</Text>
+          {isPix && pixCode ? (
+            <>
+              {qrImage ? (
+                <View style={styles.qrWrap}>
+                  <Image
+                    source={{ uri: `data:image/png;base64,${qrImage}` }}
+                    style={styles.qrImage}
+                    resizeMode="contain"
+                  />
                 </View>
+              ) : null}
 
-                <Card>
-                  <Text style={styles.cardTitle}>Como pagar</Text>
-                  <View style={styles.steps}>
-                    {[
-                      'Copie o código acima ou leia o QR Code.',
-                      'No app do seu banco, escolha Pix › Pix copia e cola.',
-                      'Cole o código e confirme. A confirmação aparece aqui sozinha.',
-                    ].map((step, i) => (
-                      <View key={i} style={styles.step}>
-                        <View style={styles.stepNum}>
-                          <Text style={styles.stepNumText}>{i + 1}</Text>
-                        </View>
-                        <Text style={styles.stepText}>{step}</Text>
-                      </View>
-                    ))}
-                  </View>
-                </Card>
-
-                {intent.expires_at ? (
-                  <Text style={styles.footnote}>
-                    Código válido até {formatDate(intent.expires_at)}
-                  </Text>
-                ) : null}
-              </>
-            ) : null}
-
-            {isLink && url ? (
-              <>
-                <Notice
-                  icon="lock-closed"
-                  tone="primary"
-                  text={`O pagamento é feito na página segura da ${intent.provider_label}, onde você escolhe Pix ou cartão. Ao terminar, feche a página e volte para cá — a confirmação aparece automaticamente.`}
-                />
-                <Button
-                  label="Abrir página de pagamento"
-                  icon="open-outline"
-                  onPress={() => void openCheckout(url)}
-                />
-              </>
-            ) : null}
-
-            {/* Gateway novo que esta versão do app ainda não sabe desenhar, ou
-                payload incompleto: dizer isso em vez de mostrar um QR vazio. */}
-            {!(isPix && pixCode) && !(isLink && url) && (
-              <Notice
-                icon="warning"
-                tone="warning"
-                text="Esta forma de pagamento ainda não é suportada nesta versão do app. Atualize o aplicativo ou fale com a locadora."
+              <Button
+                label={copied ? 'Código copiado' : 'Copiar código Pix'}
+                icon={copied ? 'checkmark' : 'copy-outline'}
+                variant={copied ? 'success' : 'primary'}
+                onPress={copyCode}
               />
-            )}
-          </ScrollView>
-        )}
-      </SafeAreaView>
-    </Modal>
+
+              <View style={styles.codeBox}>
+                <Text style={styles.codeLabel}>Pix copia e cola</Text>
+                <Text style={styles.code} selectable numberOfLines={3}>{pixCode}</Text>
+              </View>
+
+              <Card>
+                <Text style={styles.cardTitle}>Como pagar</Text>
+                <View style={styles.steps}>
+                  {[
+                    'Copie o código acima ou leia o QR Code.',
+                    'No app do seu banco, escolha Pix › Pix copia e cola.',
+                    'Cole o código e confirme. A confirmação aparece aqui sozinha.',
+                  ].map((step, i) => (
+                    <View key={i} style={styles.step}>
+                      <View style={styles.stepNum}>
+                        <Text style={styles.stepNumText}>{i + 1}</Text>
+                      </View>
+                      <Text style={styles.stepText}>{step}</Text>
+                    </View>
+                  ))}
+                </View>
+              </Card>
+
+              {intent.expires_at ? (
+                <Text style={styles.footnote}>
+                  Código válido até {formatDate(intent.expires_at)}
+                </Text>
+              ) : null}
+            </>
+          ) : null}
+
+          {isLink && url ? (
+            <>
+              <Notice
+                icon="lock-closed"
+                tone="primary"
+                text={`O pagamento é feito na página segura da ${intent.provider_label}, onde você escolhe Pix ou cartão. Ao terminar, feche a página e volte para cá — a confirmação aparece automaticamente.`}
+              />
+              <Button
+                label="Abrir página de pagamento"
+                icon="open-outline"
+                onPress={() => void openCheckout(url)}
+              />
+            </>
+          ) : null}
+
+          {/* Gateway novo que esta versão do app ainda não sabe desenhar, ou
+              payload incompleto: dizer isso em vez de mostrar um QR vazio. */}
+          {!(isPix && pixCode) && !(isLink && url) && (
+            <Notice
+              icon="warning"
+              tone="warning"
+              text="Esta forma de pagamento ainda não é suportada nesta versão do app. Atualize o aplicativo ou fale com a locadora."
+            />
+          )}
+        </ScrollView>
+      )}
+    </>
   )
 }
 
@@ -629,9 +634,10 @@ function BillingDetailModal({
   const [generating, setGenerating] = useState(false)
   const [intent, setIntent]         = useState<PaymentIntent | null>(null)
   const [paid, setPaid]             = useState(false)
-  // Fechar o modal de pagamento NÃO encerra a tentativa: o Pix pode compensar
+  // Voltar da tela de pagamento NÃO encerra a tentativa: o Pix pode compensar
   // depois, e o polling segue enquanto o detalhe estiver aberto.
   const [showPayment, setShowPayment] = useState(false)
+  const onPayment = !!intent && showPayment
 
   // Itens do documento (a lista só traz o principal). A política
   // `customer_read_own_charge_items` deixa o cliente ler os próprios.
@@ -682,7 +688,9 @@ function BillingDetailModal({
       const result = await createPaymentIntent(billing.charge_id)
       setIntent(result)
       setShowPayment(true)
-      // Checkout hospedado: abre direto, o modal fica por trás para reabrir.
+      // Checkout hospedado: abre direto, a tela de pagamento fica por trás
+      // para reabrir. Seguro no iOS porque nenhum modal novo está sendo
+      // apresentado — o SFSafariViewController sobe sobre o modal já aberto.
       const url = result.payload?.checkout_url
       if (result.method === 'payment_link' && url) void openCheckout(url)
     } catch (err: unknown) {
@@ -694,154 +702,162 @@ function BillingDetailModal({
   }
 
   return (
-    <>
-      <Modal visible animationType="slide" presentationStyle="pageSheet" onRequestClose={onClose}>
-        <SafeAreaView style={styles.modalSafe} edges={['top', 'bottom']}>
-          <ModalHeader title={`Cobrança nº ${billing.charge_number}`} onClose={onClose} />
+    // Um modal só, que troca detalhe por pagamento — ver `PaymentView`.
+    // `onRequestClose` (voltar do Android, arrastar a folha no iOS) desfaz a
+    // troca antes de fechar, como o X de cada tela.
+    <Modal
+      visible
+      animationType="slide"
+      presentationStyle="pageSheet"
+      onRequestClose={onPayment ? () => setShowPayment(false) : onClose}
+    >
+      <SafeAreaView style={styles.modalSafe} edges={['top', 'bottom']}>
+        {onPayment ? (
+          <PaymentView
+            billing={billing}
+            intent={intent}
+            paid={paid}
+            onBack={() => setShowPayment(false)}
+            styles={styles}
+            theme={theme}
+          />
+        ) : (
+          <>
+            <ModalHeader title={`Cobrança nº ${billing.charge_number}`} onClose={onClose} />
 
-          <ScrollView contentContainerStyle={styles.modalBody}>
-            {/* Hero: status + valor + vencimento */}
-            <View style={styles.detailHero}>
-              <Badge label={STATUS_LABEL[statusKey] ?? statusKey} tone={tone} dot />
-              <Text style={[styles.heroLabel, styles.heroLabelSpaced]}>
-                {isPaid ? 'Valor pago' : 'Valor a pagar'}
-              </Text>
-              <Text style={[styles.heroAmount, tone === 'danger' && { color: theme.danger }]}>
-                {formatCurrency(isPaid ? billing.paid_amount : billing.amount_due)}
-              </Text>
-              <Text style={[styles.detailHeroDue, { color: tone === 'primary' || isPaid ? theme.textSoft : colors.fg }]}>
-                {isPaid
-                  ? `Vencimento ${formatDate(billing.due_date)}`
-                  : `${dueLabel(billing, todayIso)} · ${formatDate(billing.due_date)}`}
-              </Text>
-            </View>
+            <ScrollView contentContainerStyle={styles.modalBody}>
+              {/* Hero: status + valor + vencimento */}
+              <View style={styles.detailHero}>
+                <Badge label={STATUS_LABEL[statusKey] ?? statusKey} tone={tone} dot />
+                <Text style={[styles.heroLabel, styles.heroLabelSpaced]}>
+                  {isPaid ? 'Valor pago' : 'Valor a pagar'}
+                </Text>
+                <Text style={[styles.heroAmount, tone === 'danger' && { color: theme.danger }]}>
+                  {formatCurrency(isPaid ? billing.paid_amount : billing.amount_due)}
+                </Text>
+                <Text style={[styles.detailHeroDue, { color: tone === 'primary' || isPaid ? theme.textSoft : colors.fg }]}>
+                  {isPaid
+                    ? `Vencimento ${formatDate(billing.due_date)}`
+                    : `${dueLabel(billing, todayIso)} · ${formatDate(billing.due_date)}`}
+                </Text>
+              </View>
 
-            {tone === 'danger' && (
-              <Notice
-                icon="alert-circle"
-                tone="danger"
-                title="Cobrança vencida"
-                text={billing.accrued_total > 0
-                  ? `Foram acrescidos ${formatCurrency(billing.accrued_total)} de encargos por ${plural(overdueDays, 'dia', 'dias')} de atraso. Pague o quanto antes para evitar novos acréscimos.`
-                  : 'Pague o quanto antes para evitar encargos por atraso.'}
-              />
-            )}
+              {tone === 'danger' && (
+                <Notice
+                  icon="alert-circle"
+                  tone="danger"
+                  title="Cobrança vencida"
+                  text={billing.accrued_total > 0
+                    ? `Foram acrescidos ${formatCurrency(billing.accrued_total)} de encargos por ${plural(overdueDays, 'dia', 'dias')} de atraso. Pague o quanto antes para evitar novos acréscimos.`
+                    : 'Pague o quanto antes para evitar encargos por atraso.'}
+                />
+              )}
 
-            {isPaid && (
-              <Notice
-                icon="checkmark-circle"
-                tone="success"
-                title="Cobrança quitada"
-                text={`Total recebido: ${formatCurrency(billing.paid_amount)}`}
-              />
-            )}
+              {isPaid && (
+                <Notice
+                  icon="checkmark-circle"
+                  tone="success"
+                  title="Cobrança quitada"
+                  text={`Total recebido: ${formatCurrency(billing.paid_amount)}`}
+                />
+              )}
 
-            {/* Composição: itens do documento + ajustes */}
-            <Card>
-              <Text style={styles.cardTitle}>Composição</Text>
-              <View style={styles.lines}>
-                {detail.isLoading ? (
-                  <ActivityIndicator size="small" color={theme.primary} style={styles.inlineLoading} />
-                ) : items.length > 0 ? (
-                  items.map((item) => (
-                    <View key={item.id} style={styles.lineRow}>
-                      <Text style={styles.lineLabel} numberOfLines={2}>
-                        {item.quantity > 1 ? `${item.quantity}× ` : ''}{item.description}
-                      </Text>
-                      <Text style={[styles.lineValue, item.amount < 0 && { color: theme.success }]}>
-                        {item.amount < 0 ? `− ${formatCurrency(-item.amount)}` : formatCurrency(item.amount)}
-                      </Text>
-                    </View>
-                  ))
-                ) : (
-                  <View style={styles.lineRow}>
-                    <Text style={styles.lineLabel}>{billing.description}</Text>
-                    <Text style={styles.lineValue}>{formatCurrency(billing.total_amount)}</Text>
-                  </View>
-                )}
-
-                {(billing.paid_amount > 0 && !isPaid) || billing.accrued_total > 0 ? (
-                  <>
-                    <View style={styles.lineDivider} />
+              {/* Composição: itens do documento + ajustes */}
+              <Card>
+                <Text style={styles.cardTitle}>Composição</Text>
+                <View style={styles.lines}>
+                  {detail.isLoading ? (
+                    <ActivityIndicator size="small" color={theme.primary} style={styles.inlineLoading} />
+                  ) : items.length > 0 ? (
+                    items.map((item) => (
+                      <View key={item.id} style={styles.lineRow}>
+                        <Text style={styles.lineLabel} numberOfLines={2}>
+                          {item.quantity > 1 ? `${item.quantity}× ` : ''}{item.description}
+                        </Text>
+                        <Text style={[styles.lineValue, item.amount < 0 && { color: theme.success }]}>
+                          {item.amount < 0 ? `− ${formatCurrency(-item.amount)}` : formatCurrency(item.amount)}
+                        </Text>
+                      </View>
+                    ))
+                  ) : (
                     <View style={styles.lineRow}>
-                      <Text style={styles.lineLabelMuted}>Subtotal</Text>
+                      <Text style={styles.lineLabel}>{billing.description}</Text>
                       <Text style={styles.lineValue}>{formatCurrency(billing.total_amount)}</Text>
                     </View>
-                  </>
-                ) : null}
+                  )}
 
-                {billing.paid_amount > 0 && !isPaid && (
+                  {(billing.paid_amount > 0 && !isPaid) || billing.accrued_total > 0 ? (
+                    <>
+                      <View style={styles.lineDivider} />
+                      <View style={styles.lineRow}>
+                        <Text style={styles.lineLabelMuted}>Subtotal</Text>
+                        <Text style={styles.lineValue}>{formatCurrency(billing.total_amount)}</Text>
+                      </View>
+                    </>
+                  ) : null}
+
+                  {billing.paid_amount > 0 && !isPaid && (
+                    <View style={styles.lineRow}>
+                      <Text style={styles.lineLabelMuted}>Já pago</Text>
+                      <Text style={[styles.lineValue, { color: theme.success }]}>
+                        − {formatCurrency(billing.paid_amount)}
+                      </Text>
+                    </View>
+                  )}
+
+                  {billing.accrued_total > 0 && (
+                    <View style={styles.lineRow}>
+                      <Text style={styles.lineLabelMuted}>
+                        Encargos ({plural(overdueDays, 'dia', 'dias')} de atraso)
+                      </Text>
+                      <Text style={[styles.lineValue, { color: theme.danger }]}>
+                        + {formatCurrency(billing.accrued_total)}
+                      </Text>
+                    </View>
+                  )}
+
+                  <View style={styles.lineDivider} />
                   <View style={styles.lineRow}>
-                    <Text style={styles.lineLabelMuted}>Já pago</Text>
-                    <Text style={[styles.lineValue, { color: theme.success }]}>
-                      − {formatCurrency(billing.paid_amount)}
+                    <Text style={styles.lineTotalLabel}>{isPaid ? 'Total pago' : 'Total a pagar'}</Text>
+                    <Text style={styles.lineTotalValue}>
+                      {formatCurrency(isPaid ? billing.paid_amount : billing.amount_due)}
                     </Text>
                   </View>
-                )}
-
-                {billing.accrued_total > 0 && (
-                  <View style={styles.lineRow}>
-                    <Text style={styles.lineLabelMuted}>
-                      Encargos ({plural(overdueDays, 'dia', 'dias')} de atraso)
-                    </Text>
-                    <Text style={[styles.lineValue, { color: theme.danger }]}>
-                      + {formatCurrency(billing.accrued_total)}
-                    </Text>
-                  </View>
-                )}
-
-                <View style={styles.lineDivider} />
-                <View style={styles.lineRow}>
-                  <Text style={styles.lineTotalLabel}>{isPaid ? 'Total pago' : 'Total a pagar'}</Text>
-                  <Text style={styles.lineTotalValue}>
-                    {formatCurrency(isPaid ? billing.paid_amount : billing.amount_due)}
-                  </Text>
                 </View>
+              </Card>
+
+              {/* Dados do documento */}
+              <Card>
+                <Text style={styles.cardTitle}>Detalhes</Text>
+                <View style={styles.lines}>
+                  <InfoRow label="Origem" value={kindLabel(billing)} styles={styles} />
+                  {billing.vehicle_plate ? <InfoRow label="Veículo" value={billing.vehicle_plate} styles={styles} /> : null}
+                  <InfoRow label="Emissão" value={formatDate(billing.issue_date)} styles={styles} />
+                  <InfoRow label="Vencimento" value={formatDate(billing.due_date)} styles={styles} />
+                  {isPaid && billing.paid_at ? (
+                    <InfoRow label="Pagamento" value={formatLocalDate(billing.paid_at)} styles={styles} />
+                  ) : null}
+                  <InfoRow label="Número" value={`#${billing.charge_number}`} styles={styles} last />
+                </View>
+              </Card>
+            </ScrollView>
+
+            {/* Ação principal fixa no rodapé — sempre ao alcance do polegar */}
+            {canPay && (
+              <View style={styles.footer}>
+                <Button
+                  label={intent ? 'Ver pagamento em andamento' : `Pagar ${formatCurrency(billing.amount_due)}`}
+                  icon={intent ? 'time-outline' : undefined}
+                  variant={tone === 'danger' && !intent ? 'danger' : 'primary'}
+                  loading={generating}
+                  onPress={intent ? () => setShowPayment(true) : handlePay}
+                />
               </View>
-            </Card>
-
-            {/* Dados do documento */}
-            <Card>
-              <Text style={styles.cardTitle}>Detalhes</Text>
-              <View style={styles.lines}>
-                <InfoRow label="Origem" value={kindLabel(billing)} styles={styles} />
-                {billing.vehicle_plate ? <InfoRow label="Veículo" value={billing.vehicle_plate} styles={styles} /> : null}
-                <InfoRow label="Emissão" value={formatDate(billing.issue_date)} styles={styles} />
-                <InfoRow label="Vencimento" value={formatDate(billing.due_date)} styles={styles} />
-                {isPaid && billing.paid_at ? (
-                  <InfoRow label="Pagamento" value={formatLocalDate(billing.paid_at)} styles={styles} />
-                ) : null}
-                <InfoRow label="Número" value={`#${billing.charge_number}`} styles={styles} last />
-              </View>
-            </Card>
-          </ScrollView>
-
-          {/* Ação principal fixa no rodapé — sempre ao alcance do polegar */}
-          {canPay && (
-            <View style={styles.footer}>
-              <Button
-                label={intent ? 'Ver pagamento em andamento' : `Pagar ${formatCurrency(billing.amount_due)}`}
-                icon={intent ? 'time-outline' : undefined}
-                variant={tone === 'danger' && !intent ? 'danger' : 'primary'}
-                loading={generating}
-                onPress={intent ? () => setShowPayment(true) : handlePay}
-              />
-            </View>
-          )}
-        </SafeAreaView>
-      </Modal>
-
-      {intent && showPayment && (
-        <PaymentModal
-          billing={billing}
-          intent={intent}
-          paid={paid}
-          onClose={() => setShowPayment(false)}
-          styles={styles}
-          theme={theme}
-        />
-      )}
-    </>
+            )}
+          </>
+        )}
+      </SafeAreaView>
+    </Modal>
   )
 }
 
