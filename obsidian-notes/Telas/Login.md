@@ -14,6 +14,15 @@ Identidade fixa da Locaw — **não** segue o tema do tenant (ADR 0019): o login
 - **Inertes por enquanto** (texto visível, sem ação): "Esqueci a senha" (não há fluxo de recuperação no web) e "Termos" (não há página de termos).
 - Fora do escopo do mockup, de propósito: checkbox "Manter conectado" (a sessão já persiste sempre) e card de evento/campanha (sem conteúdo real).
 
+## Login personalizado por subdomínio (ADR 0042)
+
+- `page.tsx` (Server Component) lê o `Host`, chama `getLoginBranding()` (`apps/web/src/lib/login-branding.ts`) e entrega a `LoginForm.tsx` (Client Component com o formulário).
+- `{sub}.{NEXT_PUBLIC_ROOT_DOMAIN}/login` com subdomínio cadastrado: logo da locadora no lugar do logo Locaw (versão escura no painel de marca, clara no celular) e rodapé `{locadora} · powered by Locaw`. Título e tags não mudam.
+- Sem subdomínio, subdomínio desconhecido, empresa suspensa ou erro na consulta: identidade Locaw.
+- Cache: `unstable_cache` por subdomínio (tag `login-branding:{sub}`, 1 h), invalidado pelo admin ao salvar; logos com nome versionado e cache imutável.
+- Dev: `http://empresa1.localhost:3000/login` (seed).
+- Subdomínio e logos: admin da plataforma em `/admin/empresas/[id]` → "Login personalizado".
+
 ## Campos
 
 | Campo | Tipo | autoComplete |

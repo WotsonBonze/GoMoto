@@ -60,7 +60,10 @@ ON CONFLICT (user_id) DO NOTHING;
 -- ============================================================
 UPDATE tenants
    SET name = 'Empresa Teste 1', slug = 'empresa-teste-1',
-       contact_phone = '11999990001', contact_email = 'contato@empresa1.com.br'
+       contact_phone = '11999990001', contact_email = 'contato@empresa1.com.br',
+       -- Login personalizado (ADR 0042): http://empresa1.localhost:3000/login.
+       -- Sem logo no seed (arquivo vai para o Storage) — envie pelo admin.
+       login_subdomain = 'empresa1'
  WHERE id = '00000000-0000-0000-0000-000000000001';
 
 INSERT INTO tenants (id, name, slug, contact_phone, contact_email) VALUES
