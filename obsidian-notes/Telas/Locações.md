@@ -151,6 +151,32 @@ O ramo com pro rata nunca teve o defeito: lá as fronteiras já descartam o venc
 que coincide com o início. Dois testes existentes em `rentals.spec.ts` **codificavam o
 bug como esperado** (contavam vencimentos, não períodos) e foram corrigidos junto.
 
+## Tela travava ao digitar a data de início (corrigido 2026-10-18)
+
+O `<input type="date">` emite cada estado intermediário do ano como data completa
+("2" → `0002-10-18`, depois `0020`, `0202`, `2026`). Dois defeitos somados:
+
+- **Fim calculado errado.** `computeEndDate` da tela montava `new Date(y, m - 1, d)`,
+  que lê ano 0–99 como 1900 + ano: início `0002-10-18` + 3 meses dava fim `1903-01-18`,
+  e a prévia gerava ~1.900 anos de cobranças a cada tecla. Virou
+  `computeRentalEndDate` no core (`rules/rentals.ts`), que lê o ano literal.
+- **Gerador quadrático.** `generateCycleCharges` buscava vencimentos com `.some()`
+  dentro do laço — 18 s para 95 mil ciclos semanais. Agora usa `Set` (0,5 s).
+
+Regras da tela desde então:
+
+- **A prévia só calcula com data completa e plausível** — `isPlausibleRentalDate`
+  (ano entre 2000 e 2100, `RENTAL_DATE_YEAR_RANGE`). Enquanto o ano está sendo
+  digitado, nem a prévia é gerada nem o fim é recalculado a partir do início.
+- **Erro de data só no `onBlur`** ("Data de início inválida"): avisar a cada tecla
+  seria ruído, já que todo estado intermediário é "inválido".
+- **`ChargePreview` desenha só as primeiras 24 cobranças de ciclo**
+  (`PREVIEW_VISIBLE_CHARGES`) e resume o resto numa linha "+ N cobranças até dd/mm/aaaa"
+  com o valor somado. Contagem e total do cabeçalho seguem considerando todas.
+
+A faixa de anos **não** está no schema Zod (`RentalSchema` aceita qualquer
+`YYYY-MM-DD`) — o servidor ainda aceitaria início em `0202-10-18` via payload direto.
+
 ## Caução gera cobrança própria (2026-07-26)
 
 Caução deixou de ser só bookkeeping em `deposits` — ver detalhes completos em [[Specs/0008-modulo-financeiro]] (nota na FT-02). Resumo para quem só mexe em tela:

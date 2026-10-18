@@ -6,7 +6,7 @@ import Link from 'next/link'
 import { AlertCircle, ChevronLeft, ChevronRight } from 'lucide-react'
 
 import { useCustomers, useAvailableVehicles, useContractTemplates, useContractTemplate, useInspectionProfiles } from '@gomoto/data'
-import { generateCycleCharges, WEEK_DAY_OPTIONS, formatDueDay, resolveContractVariables, substituteVariables } from '@gomoto/core'
+import { generateCycleCharges, computeRentalEndDate, isPlausibleRentalDate, WEEK_DAY_OPTIONS, formatDueDay, resolveContractVariables, substituteVariables } from '@gomoto/core'
 import type { CycleCharge, Rental } from '@gomoto/core'
 import { formatCurrency, formatDate } from '@/lib/utils'
 import { renderContractTemplateHtml } from '@/lib/contract-render'
@@ -67,18 +67,6 @@ const readOnlyCls = 'flex h-9 w-full items-center rounded-lg border border-divid
 const CONTRACT_TYPE_LABEL = { rental: 'Locação', rent_to_own: 'Compra Programada' }
 const CYCLE_LABEL         = { weekly: 'Semanal', monthly: 'Mensal' }
 
-function computeEndDate(startDate: string, qty: number, unit: 'months' | 'weeks'): string {
-  if (!startDate || qty <= 0) return ''
-  const [y, m, d] = startDate.split('-').map(Number)
-  const date = new Date(y, m - 1, d)
-  if (unit === 'months') {
-    date.setMonth(date.getMonth() + qty)
-  } else {
-    date.setDate(date.getDate() + qty * 7)
-  }
-  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`
-}
-
 function todayISO(): string {
   const d = new Date()
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
@@ -133,10 +121,20 @@ function buildInitialForm(
 
 type ExtraChargeRow = { due_date: string; label: string; amount: number }
 
+/**
+ * Quantas cobranças de ciclo a prévia desenha. Contrato longo semanal passa de
+ * centenas de linhas; o total e a contagem consideram todas, a tabela mostra
+ * o começo e resume o resto.
+ */
+const PREVIEW_VISIBLE_CHARGES = 24
+
 function ChargePreview({ charges, extraRows = [] }: { charges: CycleCharge[]; extraRows?: ExtraChargeRow[] }) {
   if (charges.length === 0 && extraRows.length === 0) return null
   const total = charges.reduce((s, c) => s + c.amount, 0) + extraRows.reduce((s, r) => s + r.amount, 0)
   const count = charges.length + extraRows.length
+  const visibleCharges = charges.slice(0, PREVIEW_VISIBLE_CHARGES)
+  const hiddenCharges  = charges.slice(PREVIEW_VISIBLE_CHARGES)
+  const hiddenTotal    = hiddenCharges.reduce((s, c) => s + c.amount, 0)
   return (
     <div>
       <p className="mb-2 text-[13px] font-semibold text-fg">
@@ -152,7 +150,7 @@ function ChargePreview({ charges, extraRows = [] }: { charges: CycleCharge[]; ex
             </tr>
           </thead>
           <tbody>
-            {charges.map((c, i) => (
+            {visibleCharges.map((c, i) => (
               <tr key={i} className="h-9 border-b border-border last:border-0">
                 <td className="px-3 text-fg-soft">{formatDate(c.due_date)}</td>
                 <td className="px-3 text-fg-mute">
@@ -161,6 +159,14 @@ function ChargePreview({ charges, extraRows = [] }: { charges: CycleCharge[]; ex
                 <td className="px-3 text-right font-mono text-fg">{formatCurrency(c.amount)}</td>
               </tr>
             ))}
+            {hiddenCharges.length > 0 && (
+              <tr className="h-9 border-b border-border last:border-0">
+                <td colSpan={2} className="px-3 text-fg-mute">
+                  + {hiddenCharges.length} cobrança{hiddenCharges.length !== 1 ? 's' : ''} até {formatDate(hiddenCharges[hiddenCharges.length - 1]!.due_date)}
+                </td>
+                <td className="px-3 text-right font-mono text-fg-mute">{formatCurrency(hiddenTotal)}</td>
+              </tr>
+            )}
             {extraRows.map((r, i) => (
               <tr key={`extra-${i}`} className="h-9 border-b border-border last:border-0">
                 <td className="px-3 text-fg-soft">{formatDate(r.due_date)}</td>
@@ -273,10 +279,24 @@ export function RentalForm({ rentalId, initialData, defaultCustomerId, tenantNam
     setForm(f => ({ ...f, [k]: v }))
   }
 
+  /**
+   * Erro de data só ao sair do campo: durante a digitação o ano passa por
+   * 0002, 0020, 0202 — avisar "inválida" a cada tecla seria ruído.
+   */
+  function handleDateBlur(field: 'start_date' | 'end_date', label: string) {
+    const value = form[field]
+    setFieldErrors(e => ({
+      ...e,
+      [field]: value && !isPlausibleRentalDate(value) ? `Data de ${label} inválida` : undefined,
+    }))
+  }
+
   function handleStartDateChange(value: string) {
-    const n = parseInt(periodQty, 10)
-    const unit = form.cycle === 'monthly' ? 'months' : 'weeks'
-    const computed = n > 0 && value ? computeEndDate(value, n, unit) : ''
+    // Enquanto o ano está sendo digitado (0002, 0020, 0202…) o fim não acompanha:
+    // recalcular a partir de um estado intermediário sobrescrevia o fim à toa.
+    const computed = isPlausibleRentalDate(value)
+      ? computeRentalEndDate(value, parseInt(periodQty, 10), form.cycle)
+      : ''
     setForm(f => ({
       ...f,
       start_date: value,
@@ -286,25 +306,24 @@ export function RentalForm({ rentalId, initialData, defaultCustomerId, tenantNam
 
   function handleEndDateChange(value: string) {
     set('end_date', value)
+    if (!isPlausibleRentalDate(form.start_date) || !isPlausibleRentalDate(value)) return
     const period = computePeriod(form.start_date, value, form.cycle)
     if (period) setPeriodQty(period)
   }
 
   function handlePeriodChange(qty: string) {
     setPeriodQty(qty)
-    const n = parseInt(qty, 10)
-    if (n > 0 && form.start_date) {
-      const unit = form.cycle === 'monthly' ? 'months' : 'weeks'
-      const computed = computeEndDate(form.start_date, n, unit)
-      if (computed) set('end_date', computed)
-    }
+    const computed = computeRentalEndDate(form.start_date, parseInt(qty, 10), form.cycle)
+    if (computed) set('end_date', computed)
   }
 
   const previewCharges = useMemo<CycleCharge[]>(() => {
     const dueDay = parseInt(form.due_day, 10)
     const amount = parseFloat(form.cycle_amount)
+    // Só calcula com as duas datas digitadas por completo — cada tecla no ano
+    // emite uma data "válida" (0002, 0020, 0202) que geraria séculos de ciclos.
     if (
-      !form.start_date || !form.end_date ||
+      !isPlausibleRentalDate(form.start_date) || !isPlausibleRentalDate(form.end_date) ||
       isNaN(dueDay) || dueDay < 1 || dueDay > 28 ||
       isNaN(amount) || amount <= 0 ||
       form.end_date <= form.start_date
@@ -412,7 +431,9 @@ export function RentalForm({ rentalId, initialData, defaultCustomerId, tenantNam
     if (!form.vehicle_id)   errors.vehicle_id  = 'Selecione um veículo'
     if (!form.customer_id)  errors.customer_id = 'Selecione um cliente'
     if (!form.start_date)   errors.start_date  = 'Data de início obrigatória'
+    else if (!isPlausibleRentalDate(form.start_date)) errors.start_date = 'Data de início inválida'
     if (!form.end_date)     errors.end_date    = 'Data de fim obrigatória'
+    else if (!isPlausibleRentalDate(form.end_date))   errors.end_date   = 'Data de fim inválida'
     if (form.end_date && form.start_date && form.end_date <= form.start_date)
       errors.end_date = 'Data de fim deve ser posterior ao início'
     if (!form.cycle_amount || parseFloat(form.cycle_amount) <= 0)
@@ -772,11 +793,7 @@ export function RentalForm({ rentalId, initialData, defaultCustomerId, tenantNam
                         value={form.cycle}
                         onChange={e => {
                           const newCycle = e.target.value as FormState['cycle']
-                          const unit = newCycle === 'monthly' ? 'months' : 'weeks'
-                          const n = parseInt(periodQty, 10)
-                          const computed = n > 0 && form.start_date
-                            ? computeEndDate(form.start_date, n, unit)
-                            : ''
+                          const computed = computeRentalEndDate(form.start_date, parseInt(periodQty, 10), newCycle)
                           if (!computed && form.start_date && form.end_date) {
                             const newPeriod = computePeriod(form.start_date, form.end_date, newCycle)
                             if (newPeriod) setPeriodQty(newPeriod)
@@ -844,6 +861,7 @@ export function RentalForm({ rentalId, initialData, defaultCustomerId, tenantNam
                         className={fieldErrors.start_date ? inputErrCls : inputCls}
                         value={form.start_date}
                         onChange={e => handleStartDateChange(e.target.value)}
+                        onBlur={() => handleDateBlur('start_date', 'início')}
                       />
                       {fieldErrors.start_date && (
                         <p className="mt-1 text-[12px] text-danger">{fieldErrors.start_date}</p>
@@ -857,6 +875,7 @@ export function RentalForm({ rentalId, initialData, defaultCustomerId, tenantNam
                         className={fieldErrors.end_date ? inputErrCls : inputCls}
                         value={form.end_date}
                         onChange={e => handleEndDateChange(e.target.value)}
+                        onBlur={() => handleDateBlur('end_date', 'fim')}
                       />
                       <div className="mt-1.5 flex items-center gap-1.5">
                         <input
