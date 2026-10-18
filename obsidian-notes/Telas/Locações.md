@@ -151,6 +151,29 @@ O ramo com pro rata nunca teve o defeito: lá as fronteiras já descartam o venc
 que coincide com o início. Dois testes existentes em `rentals.spec.ts` **codificavam o
 bug como esperado** (contavam vencimentos, não períodos) e foram corrigidos junto.
 
+## Aba Financeiro: listas longas agrupadas por ação e mês (2026-10-18)
+
+Um contrato semanal de 2 anos tem ~105 parcelas; no meio dele a aba mostrava
+~105 linhas de cronograma + ~90 de cobranças, e o que pedia ação (vencidas)
+ficava perdido entre as pagas. Decisão do Alan: agrupar **por ação + mês**.
+
+- **Cronograma contratado** lista só o que está **a emitir**. Parcela emitida já
+  aparece em Cobranças com o saldo real — repeti-la dobrava a lista. As próximas
+  4 (`UPCOMING_VISIBLE`) ficam visíveis; o resto, um `<details>` por mês com
+  quantidade e subtotal. Os cards (Total contratado / Já emitido / A emitir)
+  seguem somando o plano inteiro.
+- **Cobranças**: em aberto e vencidas sempre visíveis; pagas/baixadas num
+  `<details>` "Pagas" (total pago), subdividido por mês, mais recente primeiro.
+- Sem JS no cliente: `<details>` nativo, como o "Histórico do plano" já usava.
+  Cada mês é uma tabela própria, então as colunas usam `table-fixed` +
+  `colgroup` compartilhado (`ScheduleColGroup`/`BillingColGroup`) para alinhar.
+- Agrupamento em `groupByMonth` (`[id]/(tabs)/_lib/shared.ts`, teste ao lado).
+- Chevron com grupo **nomeado** (`group/month`, `group/settled`): os `<details>`
+  são aninhados, e `group-open` sem nome giraria o chevron dos meses ao abrir o pai.
+
+Limite conhecido: cliente com dezenas de cobranças vencidas mostra todas — de
+propósito, é a lista que pede ação.
+
 ## Tela travava ao digitar a data de início (corrigido 2026-10-18)
 
 O `<input type="date">` emite cada estado intermediário do ano como data completa

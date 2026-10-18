@@ -1,11 +1,12 @@
 import Link from 'next/link'
+import { ChevronRight } from 'lucide-react'
 import { formatCurrency } from '@/lib/utils'
 import {
   BILLING_STATUS_BADGE, BILLING_TYPE_LABEL,
 } from '@/lib/billing-status'
 import { contractedBacklog, displayPeriodEnd } from '@gomoto/core'
 import { getRentalCore } from '../_lib/get-rental-core'
-import { fmt } from '../_lib/shared'
+import { fmt, groupByMonth } from '../_lib/shared'
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -77,6 +78,85 @@ function ScheduleRowCells({ line }: { line: ScheduleRow }) {
     </tr>
   )
 }
+
+/**
+ * Larguras fixas compartilhadas: o cronograma e as cobranças se dividem em
+ * várias tabelas (próximas + um `<details>` por mês), e sem `table-fixed` cada
+ * uma calcularia as colunas sozinha — os valores não alinhariam entre meses.
+ */
+function ScheduleColGroup() {
+  return (
+    <colgroup>
+      <col className="w-12" />
+      <col />
+      <col className="w-32" />
+      <col className="w-32" />
+      <col className="w-28" />
+    </colgroup>
+  )
+}
+
+function BillingColGroup() {
+  return (
+    <colgroup>
+      <col className="w-36" />
+      <col />
+      <col className="w-24" />
+      <col className="w-24" />
+      <col className="w-24" />
+      <col className="w-24" />
+      <col className="w-20" />
+    </colgroup>
+  )
+}
+
+function BillingRowCells({ billing: b, description }: { billing: BillingRow; description: string }) {
+  // Atraso é derivado, não status armazenado (Princípio 4); o resto é o
+  // próprio `charge_status`. O mapeamento de 'open' para 'pending' que existia
+  // aqui vinha do enum antigo e fazia cobrança BAIXADA cair no fallback e
+  // exibir "Pendente".
+  const dynStatus = b.is_overdue ? 'overdue' : b.status
+  const badge     = BILLING_STATUS_BADGE[dynStatus] ?? BILLING_STATUS_BADGE.open
+  return (
+    <tr className="border-b border-border last:border-0 hover:bg-surface-2">
+      <td className="h-9 px-4 text-fg-soft">
+        {fmt(b.due_date)}
+        {b.is_overdue && <span className="ml-2 text-danger">{b.days_overdue}d</span>}
+      </td>
+      <td className="h-9 truncate px-4 text-fg-soft" title={description}>{description}</td>
+      <td className="h-9 px-4 text-right font-mono text-fg-mute">
+        {b.paid_amount > 0 ? formatCurrency(b.paid_amount) : '—'}
+      </td>
+      <td className="h-9 px-4 text-right font-mono text-fg-soft">{formatCurrency(b.open_amount)}</td>
+      <td className="h-9 px-4 text-right font-mono text-fg">{formatCurrency(b.total_amount)}</td>
+      <td className="h-9 px-4">
+        <span className={`rounded-full px-2 py-0.5 text-[11px] font-semibold ${badge.bg} ${badge.text}`}>
+          {badge.label}
+        </span>
+      </td>
+      <td className="h-9 whitespace-nowrap px-4 text-right">
+        <Link href={`/cobrancas/${b.charge_id}`} className="text-[12px] text-fg-mute transition-colors hover:text-primary">
+          Ver →
+        </Link>
+      </td>
+    </tr>
+  )
+}
+
+/** Linha-resumo de um mês recolhido: rótulo, quantidade e subtotal. */
+function MonthSummary({ label, count, noun, total }: { label: string; count: number; noun: [string, string]; total: number }) {
+  return (
+    <summary className="flex h-9 cursor-pointer list-none items-center gap-3 px-4 text-[13px] text-fg-soft hover:bg-surface-2 [&::-webkit-details-marker]:hidden">
+      <ChevronRight className="h-3.5 w-3.5 shrink-0 text-fg-mute transition-transform group-open/month:rotate-90" />
+      <span className="w-20 font-medium text-fg">{label}</span>
+      <span className="text-fg-mute">{count} {count === 1 ? noun[0] : noun[1]}</span>
+      <span className="ml-auto font-mono tabular-nums text-fg">{formatCurrency(total)}</span>
+    </summary>
+  )
+}
+
+/** Quantas parcelas a emitir ficam visíveis antes do agrupamento por mês. */
+const UPCOMING_VISIBLE = 4
 
 type AdjustmentRow = {
   id: string
@@ -170,6 +250,24 @@ export default async function RentalFinancialTab({
   const scheduleActive  = schedule.filter(l => l.status !== 'cancelled' && l.status !== 'superseded')
   const scheduleHistory = schedule.filter(l => l.status === 'cancelled' || l.status === 'superseded')
   const contractedTotal = scheduleActive.reduce((sum, l) => sum + Number(l.amount), 0)
+
+  // A tabela do cronograma mostra só o que AINDA NÃO virou cobrança. A parcela
+  // emitida já aparece em "Cobranças", com o saldo real; repeti-la aqui dobrava
+  // a lista de um contrato longo (semanal de 2 anos = 105 linhas) sem informar
+  // nada novo. Os cards acima seguem somando o plano inteiro.
+  const scheduleToIssue      = scheduleActive.filter(l => l.status === 'scheduled')
+  const scheduleIssuedCount  = scheduleActive.length - scheduleToIssue.length
+  const scheduleNext         = scheduleToIssue.slice(0, UPCOMING_VISIBLE)
+  const scheduleLaterByMonth = groupByMonth(scheduleToIssue.slice(UPCOMING_VISIBLE), l => l.due_date, l => l.amount)
+
+  // Cobranças por AÇÃO: em aberto (e vencidas) pedem atenção e ficam sempre à
+  // vista; quitadas são histórico e ficam recolhidas por mês, o mais recente
+  // primeiro.
+  const openBillings       = billings.filter(b => b.status === 'open')
+  const settledBillings    = billings.filter(b => b.status !== 'open')
+  const settledByMonth     = groupByMonth([...settledBillings].reverse(), b => b.due_date, b => b.paid_amount)
+  const settledPaidTotal   = settledBillings.reduce((s, b) => s + b.paid_amount, 0)
+  const settledLabel       = settledBillings.some(b => b.status === 'written_off') ? 'Pagas e baixadas' : 'Pagas'
 
   // A descrição vive nos ITENS, não no documento. Consulta separada: juntar
   // charge_items dentro de charge_balances reintroduziria o fan-out de F-01.
@@ -424,21 +522,46 @@ export default async function RentalFinancialTab({
           </div>
 
           <div className="overflow-x-auto rounded-xl bg-surface">
-            <table className="w-full text-[13px]">
-              <thead>
-                <tr className="border-b border-divider text-fg-mute">
-                  <th className="h-9 w-12 px-4 text-left font-medium">#</th>
-                  <th className="h-9 px-4 text-left font-medium">Período</th>
-                  <th className="h-9 px-4 text-left font-medium">Vencimento</th>
-                  <th className="h-9 px-4 text-right font-medium">Valor</th>
-                  <th className="h-9 px-4 text-right font-medium">Situação</th>
-                </tr>
-              </thead>
-              <tbody>
-                {scheduleActive.map((l) => <ScheduleRowCells key={l.id} line={l} />)}
-              </tbody>
-            </table>
+            {scheduleToIssue.length === 0 ? (
+              <p className="px-4 py-3 text-[13px] text-fg-mute">
+                Todas as parcelas já foram emitidas — acompanhe em Cobranças.
+              </p>
+            ) : (
+              <>
+                <table className="w-full table-fixed text-[13px]">
+                  <ScheduleColGroup />
+                  <thead>
+                    <tr className="border-b border-divider text-fg-mute">
+                      <th className="h-9 px-4 text-left font-medium">#</th>
+                      <th className="h-9 px-4 text-left font-medium">Período</th>
+                      <th className="h-9 px-4 text-left font-medium">Vencimento</th>
+                      <th className="h-9 px-4 text-right font-medium">Valor</th>
+                      <th className="h-9 px-4 text-right font-medium">Situação</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {scheduleNext.map((l) => <ScheduleRowCells key={l.id} line={l} />)}
+                  </tbody>
+                </table>
+                {scheduleLaterByMonth.map(g => (
+                  <details key={g.key} className="group/month border-t border-divider">
+                    <MonthSummary label={g.label} count={g.rows.length} noun={['parcela', 'parcelas']} total={g.total} />
+                    <table className="w-full table-fixed border-t border-divider text-[13px]">
+                      <ScheduleColGroup />
+                      <tbody>
+                        {g.rows.map((l) => <ScheduleRowCells key={l.id} line={l} />)}
+                      </tbody>
+                    </table>
+                  </details>
+                ))}
+              </>
+            )}
           </div>
+          {scheduleIssuedCount > 0 && (
+            <p className="mt-2 text-[12px] text-fg-mute">
+              {scheduleIssuedCount} parcela{scheduleIssuedCount === 1 ? ' já emitida está' : 's já emitidas estão'} em Cobranças.
+            </p>
+          )}
 
           {/* Plano substituído fica atrás de um disclosure nativo: é histórico,
               não previsão, e misturar os dois faz "Total contratado" parecer
@@ -480,7 +603,8 @@ export default async function RentalFinancialTab({
           </div>
         ) : (
           <div className="overflow-hidden rounded-xl border border-divider">
-            <table className="w-full text-[13px]">
+            <table className="w-full table-fixed text-[13px]">
+              <BillingColGroup />
               <thead>
                 <tr className="border-b border-divider bg-surface">
                   <th className="h-9 px-4 text-left font-medium text-fg-mute">Vencimento</th>
@@ -488,45 +612,48 @@ export default async function RentalFinancialTab({
                   <th className="h-9 px-4 text-right font-medium text-fg-mute">Pago</th>
                   <th className="h-9 px-4 text-right font-medium text-fg-mute">Em aberto</th>
                   <th className="h-9 px-4 text-right font-medium text-fg-mute">Total</th>
-                  <th className="h-9 px-4 font-medium text-fg-mute">Status</th>
+                  <th className="h-9 px-4 text-left font-medium text-fg-mute">Status</th>
                   <th className="h-9 px-4"></th>
                 </tr>
               </thead>
               <tbody>
-                {billings.map(b => {
-                  // Atraso é derivado, não status armazenado (Princípio 4); o
-                  // resto é o próprio `charge_status`. O mapeamento de 'open'
-                  // para 'pending' que existia aqui vinha do enum antigo e
-                  // fazia cobrança BAIXADA cair no fallback e exibir "Pendente".
-                  const dynStatus = b.is_overdue ? 'overdue' : b.status
-                  const badge     = BILLING_STATUS_BADGE[dynStatus] ?? BILLING_STATUS_BADGE.open
-                  return (
-                    <tr key={b.charge_id} className="border-b border-border last:border-0 hover:bg-surface-2">
-                      <td className="h-9 px-4 text-fg-soft">
-                        {fmt(b.due_date)}
-                        {b.is_overdue && <span className="ml-2 text-danger">{b.days_overdue}d</span>}
-                      </td>
-                      <td className="h-9 px-4 text-fg-soft">{descByCharge.get(b.charge_id) ?? '—'}</td>
-                      <td className="h-9 px-4 text-right font-mono text-fg-mute">
-                        {b.paid_amount > 0 ? formatCurrency(b.paid_amount) : '—'}
-                      </td>
-                      <td className="h-9 px-4 text-right font-mono text-fg-soft">{formatCurrency(b.open_amount)}</td>
-                      <td className="h-9 px-4 text-right font-mono text-fg">{formatCurrency(b.total_amount)}</td>
-                      <td className="h-9 px-4">
-                        <span className={`rounded-full px-2 py-0.5 text-[11px] font-semibold ${badge.bg} ${badge.text}`}>
-                          {badge.label}
-                        </span>
-                      </td>
-                      <td className="h-9 px-4 text-right">
-                        <Link href={`/cobrancas/${b.charge_id}`} className="text-[12px] text-fg-mute transition-colors hover:text-primary">
-                          Ver →
-                        </Link>
-                      </td>
-                    </tr>
-                  )
-                })}
+                {openBillings.length === 0 ? (
+                  <tr>
+                    <td colSpan={7} className="h-9 px-4 text-fg-mute">Nenhuma cobrança em aberto.</td>
+                  </tr>
+                ) : (
+                  openBillings.map(b => (
+                    <BillingRowCells key={b.charge_id} billing={b} description={descByCharge.get(b.charge_id) ?? '—'} />
+                  ))
+                )}
               </tbody>
             </table>
+
+            {settledBillings.length > 0 && (
+              <details className="group/settled border-t border-divider">
+                <summary className="flex h-9 cursor-pointer list-none items-center gap-3 bg-surface px-4 text-[13px] text-fg-soft hover:bg-surface-2 [&::-webkit-details-marker]:hidden">
+                  <ChevronRight className="h-3.5 w-3.5 shrink-0 text-fg-mute transition-transform group-open/settled:rotate-90" />
+                  <span className="font-medium text-fg">{settledLabel}</span>
+                  <span className="text-fg-mute">
+                    {settledBillings.length} cobrança{settledBillings.length === 1 ? '' : 's'}
+                  </span>
+                  <span className="ml-auto font-mono tabular-nums text-success">{formatCurrency(settledPaidTotal)}</span>
+                </summary>
+                {settledByMonth.map(g => (
+                  <details key={g.key} className="group/month border-t border-divider">
+                    <MonthSummary label={g.label} count={g.rows.length} noun={['cobrança', 'cobranças']} total={g.total} />
+                    <table className="w-full table-fixed border-t border-divider text-[13px]">
+                      <BillingColGroup />
+                      <tbody>
+                        {g.rows.map(b => (
+                          <BillingRowCells key={b.charge_id} billing={b} description={descByCharge.get(b.charge_id) ?? '—'} />
+                        ))}
+                      </tbody>
+                    </table>
+                  </details>
+                ))}
+              </details>
+            )}
           </div>
         )}
       </section>
