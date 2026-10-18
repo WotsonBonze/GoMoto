@@ -17,7 +17,7 @@ async function loginAsNewContext(browser: Browser, email: string, password: stri
   const page = await context.newPage()
   await page.goto('/login')
   await page.getByLabel('Email').fill(email)
-  await page.getByLabel('Senha').fill(password)
+  await page.getByLabel('Senha', { exact: true }).fill(password)
   await page.getByRole('button', { name: /entrar/i }).click()
   return { context, page }
 }
