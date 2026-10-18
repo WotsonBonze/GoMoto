@@ -59,7 +59,7 @@ Dentro: tabela de pendentes + toggle de histórico (slice 5 quando colapsado, op
 | Campo | Tipo | Required | Obs |
 |---|---|---|---|
 | Motocicleta | select | ✓ | — |
-| Tipo | readonly | — | Sempre "Corretiva" (não editável) |
+| Tipo | select | ✓ | Seleção entre "Corretiva" e "Preventiva" (além de "Vistoria" para registros legados) |
 | Descrição | text | ✓ | — |
 | Data Agendada | date | — | — |
 | KM no Serviço | number | — | — |

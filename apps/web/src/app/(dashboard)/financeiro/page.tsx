@@ -85,14 +85,17 @@ export default async function FinancialDashboardPage() {
       .eq('is_overdue', true)
       .order('days_overdue', { ascending: false })
       .limit(50),
-    // Veículos com aquisição cadastrada (para ROI)
+    // Veículos com aquisição cadastrada (para ROI). Ordenado por placa, não por
+    // cadastro: `created_at DESC` escondia exatamente os veículos mais antigos
+    // — os que têm mais história de ROI para mostrar — assim que a frota
+    // passasse de 10 veículos com aquisição registrada.
     supabase
       .from('vehicles')
       .select('id, license_plate, make, model, acquisition_amount, sale_value, sold_at')
       .eq('tenant_id', tenantId)
       .not('acquisition_amount', 'is', null)
-      .order('created_at', { ascending: false })
-      .limit(10),
+      .order('license_plate', { ascending: true })
+      .limit(100),
     // Clientes inadimplentes
     // Bloqueio é decisão humana e vive em `delinquency_blocks`; a coluna
     // `customers.delinquency_status` era mantida por trigger inerte (F-04).
@@ -447,6 +450,9 @@ export default async function FinancialDashboardPage() {
           <section>
             <div className="mb-3 flex items-center justify-between">
               <h2 className="text-[14px] font-bold text-primary">ROI de veículos</h2>
+              {vehicles.length >= 100 && (
+                <span className="text-[12px] text-fg-mute">Mostrando os 100 primeiros por placa</span>
+              )}
             </div>
             <div className="overflow-hidden rounded-xl border border-divider">
               <table className="w-full text-[13px]">

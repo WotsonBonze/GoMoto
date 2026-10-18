@@ -570,13 +570,49 @@ docker exec supabase_db_GoMoto psql -U postgres -d postgres \
 > "Pago em" exibia o VENCIMENTO com outro rótulo, e ainda um dia antes por causa
 > de fuso: cobrança recebida em 21/08 aparecia paga em 20/07, antes de vencer.
 
-### 6.4 Pagar com crédito não escapa do encargo
+### 6.4 Aplicar crédito só lança encargo quando avança sobre ele
 
-- [x] Em cobrança vencida, aplique crédito.
+**Parcial — dentro do que já é dívida lançada:**
+- [x] Em cobrança vencida, aplique crédito **parcial**, sem cobrir tudo (o
+      campo já nasce sugerindo esse valor: o teto sem juros).
+- [x] O total da cobrança **não muda** — aplicar crédito parcial não realiza
+      multa nem juros. "Esta cobrança deve (sem juros)" mostra o saldo já
+      lançado (`open_amount`), não o "a pagar" do topo da página quando os
+      dois diferem (a diferença é encargo em projeção, mostrada à parte como
+      "Juros previstos até hoje").
+- [x] Abaixo do campo, com o valor no teto sem juros, aparece a nota "abate só
+      a dívida já lançada" — não o aviso de juros.
+- [x] Registre o restante em **Registrar pagamento**, com a data em que o
+      cliente pagou de verdade — se essa data está dentro do prazo (antes do
+      vencimento + carência), a tela não sugere multa nem juros, e nada é
+      lançado.
 
-**Verificar:**
-- [x] O encargo é realizado antes do abatimento — quem paga com crédito paga o
-      mesmo que quem paga em dinheiro.
+**Quitação total — crédito cobre a cobrança inteira, juros incluído:**
+- [x] Em cobrança vencida com saldo de crédito suficiente para cobrir o "se
+      quitar tudo agora", aparece o atalho **"Quitar a cobrança inteira agora
+      com o crédito (…, juros de hoje incluído)"**.
+- [x] Clicar no atalho preenche o campo com o valor TOTAL (principal + multa +
+      juros de hoje) e troca a nota por um aviso: "inclui juros até hoje… o
+      encargo é calculado e lançado nesta cobrança agora" — **antes** de
+      confirmar, não só depois no extrato.
+- [x] Confirmar: o total da cobrança **sobe** pelo encargo, a cobrança fecha
+      em zero, e o encargo aparece como receita (`receita_encargos_atraso`).
+- [x] Digitar manualmente um valor entre o teto sem juros e o teto com juros
+      (sem usar o atalho) produz o mesmo aviso e o mesmo resultado — quem
+      decide é o valor pedido, não o botão.
+
+> Existiram duas decisões anteriores, cada uma simétrica demais: primeiro,
+> realizar o encargo em QUALQUER aplicação de crédito, com
+> `realizeAccruedBefore(..., new Date())` sempre HOJE — o que quebrava a
+> reconciliação de um pagamento retroativo (operador abre cobrança vencida que
+> o cliente já tinha pago fora do sistema, aplica o desconto do saldo dele, e
+> o juros de HOJE virava item permanente, mesmo registrando o restante depois
+> com a data retroativa correta). Depois, o oposto — crédito NUNCA realiza
+> encargo —, o que reabria a porta original: quitar 100% de uma cobrança
+> vencida só com crédito escapava do juros que já tinha corrido. A regra final
+> distingue as duas situações pelo valor pedido: até `open_amount`, desconto
+> puro; acima disso, o crédito está avançando sobre o encargo e ele é
+> realizado — com a diferença visível na tela antes de confirmar.
 
 ---
 
@@ -722,15 +758,45 @@ Só faz sentido com **duas ou mais versões** de política na base (crie uma em 
 - [x] O saldo de caução do contrato foi a zero.
 - [x] A moto voltou para **disponível** e pode ser locada de novo.
 
-### 7.5 Destino da caução — reter
+### 7.5 Distribuição de caução e crédito, dívida a dívida
 
-- [x] Em outro contrato, encerre escolhendo **Reter tudo**.
+> Substituiu *Reter tudo* / *Abater parte da dívida* (Spec 0017). O operador não
+> escolhe mais um valor agregado que o sistema espalha da cobrança mais antiga
+> para a mais nova: informa, **dívida a dívida**, quanto de caução e quanto de
+> crédito quita cada uma. Caixas desmarcadas de propósito — o fluxo mudou e a
+> verificação manual anterior (*Reter tudo*) já não vale.
+
+- [ ] Em um contrato com **caução, crédito do cliente e 2 ou mais cobranças em
+      aberto**, abra **Encerrar**.
 
 **Verificar:**
-- [x] O **caixa não mudou** (atalho acima) — reter só converte passivo em
-      abatimento; o dinheiro já estava com a empresa.
-- [x] A dívida do cliente foi abatida pelo valor retido.
-- [x] O saldo de caução foi a zero.
+- [ ] A seção **Distribuição de caução e crédito** lista cada cobrança em aberto
+      numa linha, com a **origem** (Entrada, Despesa, Ciclo…) e o valor devido.
+- [ ] Digitando valores, o **alocado** e o **resta** de caução e de crédito
+      mudam na hora, sem esperar o servidor.
+- [ ] Passar do valor de uma dívida — ou do saldo de caução/crédito — mostra o
+      aviso em vermelho e trava **Confirmar Encerramento**.
+- [ ] Caução numa dívida e crédito em outra, confirmando: cada uma é baixada
+      **exatamente** pelo valor alocado, e nenhuma outra dívida é tocada.
+- [ ] O **caixa não mudou** com o que foi alocado (é abatimento, o dinheiro já
+      estava com a empresa) — só a devolução da sobra tira dinheiro.
+- [ ] Com cobrança ainda em aberto, a **sobra de caução** exige escolha
+      (*Devolver* ou *Deixar em custódia*): nada é devolvido por padrão.
+- [ ] Em locação com multa por rescisão, escolher **Cobrar a multa** faz a
+      multa aparecer como **mais uma linha** da lista — sem seção de abatimento
+      própria.
+- [ ] Nada é gravado até **Confirmar Encerramento**: dá para mexer nos valores
+      à vontade antes disso.
+- [ ] Em **ambas** as colunas (caução e crédito), digitar (ou colar) mais do que
+      cabe **corta o valor** no teto da linha — o menor entre o saldo que sobrou
+      e o que a dívida ainda deve depois da outra fonte já aplicada ali — sem
+      mostrar aviso.
+- [ ] O botão **Máx.** de cada linha, nas DUAS colunas, aplica esse teto na
+      dívida; fica desligado quando a linha já está no teto ou o saldo acabou, e
+      volta a ligar quando outra linha libera saldo.
+- [ ] Numa dívida já 100% coberta pelo crédito (ex.: "Máx." do crédito nela), o
+      "Máx." da caução naquela MESMA linha fica desligado — mas segue disponível
+      em qualquer OUTRA dívida da lista.
 
 ### 7.6 Cronograma futuro é cancelado
 

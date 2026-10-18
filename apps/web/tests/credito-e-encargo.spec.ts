@@ -236,16 +236,17 @@ test.describe('Crédito do cliente e encargo por atraso', () => {
     await modal.getByRole('button', { name: 'Aplicar crédito' }).click()
     await expect(modal).toBeHidden({ timeout: 15_000 })
 
-    // A dívida cai pelo crédito aplicado. Pela RELAÇÃO, não por número fixo: a
-    // cobrança está vencida, e quitar com crédito realiza o encargo antes de
-    // abater — o total sobe e o devido é `total − 120`.
+    // A dívida cai pelo crédito aplicado, e SÓ pelo crédito: aplicar crédito
+    // não realiza encargo por atraso (esse é o registro de pagamento, na data
+    // do recebimento — ver 'Aplicar crédito não realiza encargo' abaixo). O
+    // documento continua devendo o principal, sem multa nem juros lançados.
     const depois = await saldo(chargeId)
     expect(Number(depois!.paid_amount)).toBe(120)
+    expect(Number(depois!.total_amount), 'aplicar crédito não pode gravar encargo').toBe(300)
     expect(
       Number(depois!.open_amount),
       'crédito não abateu a dívida',
-    ).toBeCloseTo(Number(depois!.total_amount) - 120, 2)
-    expect(Number(depois!.total_amount), 'encargo do atraso não foi realizado').toBeGreaterThan(300)
+    ).toBeCloseTo(180, 2)
 
     // E o passivo com o cliente é baixado no razão — crédito é dívida NOSSA
     // com ele, então aplicá-lo debita `creditos_de_clientes`.
@@ -328,11 +329,17 @@ test.describe('Crédito do cliente e encargo por atraso', () => {
     expect(lancamento, 'encargo cobrado sem virar receita').not.toBeNull()
   })
 
-  test('quitar com crédito também realiza o encargo do atraso', async ({ page }) => {
-    // Assimetria achada percorrendo a tela: receber em dinheiro realizava o
-    // encargo, aplicar crédito não. O mesmo atraso custava diferente conforme a
-    // forma de pagamento, e quem quitava com crédito escapava da multa que já
-    // tinha corrido.
+  test('quitar com crédito NÃO realiza o encargo do atraso', async ({ page }) => {
+    // Assimetria proposital, e não a antiga: quem realiza encargo é o registro
+    // de PAGAMENTO, sempre na data do recebimento (`realizeAccruedBefore` com
+    // `paidAt`). Aplicar crédito não tem campo de data — só existe "agora" — e
+    // gravar juros de hoje ali quebrava a reconciliação de um pagamento
+    // retroativo: operador abre uma cobrança vencida que o cliente já pagou
+    // (fora do sistema) antes do vencimento, aplica o desconto com o saldo
+    // dele, e o juros de HOJE virava item permanente da cobrança. Registrar o
+    // restante com a data retroativa (dentro do prazo) recalculava tudo
+    // certo — só que o juros já lançado pelo crédito não voltava atrás, porque
+    // tinha deixado de ser projeção. Ver `applyCustomerCredits`.
     const tenantId = await getTestTenantId()
 
     const v = await createTestVehicle()
@@ -375,13 +382,13 @@ test.describe('Crédito do cliente e encargo por atraso', () => {
 
     const depois = await saldo(chargeId)
 
-    // O encargo virou dívida antes do abatimento: o total sobe.
+    // O total NÃO sobe: crédito não é evento de realização de encargo.
     expect(
       Number(depois!.total_amount),
-      'quitar com crédito não realizou o encargo do atraso',
-    ).toBeGreaterThan(500)
+      'quitar com crédito não pode realizar o encargo do atraso',
+    ).toBe(500)
 
-    // E virou receita, como no recebimento em dinheiro.
+    // E não há lançamento de receita de encargo vindo desta operação.
     const { data: encargo } = await admin()
       .from('financial_entries')
       .select('amount')
@@ -389,11 +396,200 @@ test.describe('Crédito do cliente e encargo por atraso', () => {
       .eq('account_code', 'receita_encargos_atraso')
       .maybeSingle()
 
-    expect(encargo, 'encargo cobrado sem virar receita').not.toBeNull()
+    expect(encargo, 'crédito não pode gerar receita de encargo').toBeNull()
 
     // O crédito foi consumido e o saldo devido cai por ele.
     expect(Number(depois!.paid_amount)).toBe(100)
     expect(Number(depois!.open_amount)).toBeCloseTo(Number(depois!.total_amount) - 100, 2)
+  })
+})
+
+/**
+ * A regra final: aplicar crédito só realiza encargo quando o valor pedido
+ * AVANÇA sobre o que já é dívida lançada (`open_amount`) — ou seja, quando o
+ * crédito está cobrindo (total ou parcialmente) o juros ainda em projeção.
+ * Abater só até `open_amount` é desconto puro e não toca o encargo.
+ *
+ * Os dois casos vivem lado a lado porque são o mesmo mecanismo visto de dois
+ * ângulos: o primeiro teste reproduz o caso relatado ao vivo (cobrança vencida
+ * no sistema, mas paga fora dele antes do vencimento — o crédito é só parte de
+ * um desconto, o resto vem por pagamento retroativo, e nada disso pode gerar
+ * juros); o segundo prova que, quando o crédito É a quitação inteira da
+ * cobrança, o juros até hoje entra na conta — do contrário, quitar 100% com
+ * crédito seria uma forma de escapar do encargo que já correu.
+ *
+ * Antes da correção anterior a esta: aplicar qualquer crédito realizava o
+ * encargo com base em HOJE (`new Date()`, sem campo de data no modal),
+ * gravando juros permanentes mesmo num desconto parcial. Depois da correção
+ * anterior, crédito nunca realizava encargo — nem quando quitava tudo,
+ * abrindo espaço para pagar uma cobrança vencida 100% em crédito sem nunca
+ * pagar o juros que já tinha corrido.
+ */
+test.describe('Aplicar crédito só realiza encargo quando avança sobre ele', () => {
+  let v3 = ''
+  let c3 = ''
+  let r3 = ''
+
+  test.beforeAll(async () => {
+    const veiculo = await createTestVehicle()
+    v3 = veiculo.id
+    const contrato = await createTestContract(v3)
+    c3 = contrato.customerId
+    r3 = contrato.contractId
+  })
+
+  test.afterAll(async () => {
+    await admin().from('customer_credits').delete().eq('customer_id', c3)
+    await admin().from('rentals').delete().eq('id', r3)
+    await deleteTestCustomer(c3).catch(() => {})
+    await deleteTestVehicle(v3).catch(() => {})
+  })
+
+  test('crédito seguido de pagamento retroativo dentro do prazo não cobra juros', async ({ page }) => {
+    const tenantId = await getTestTenantId()
+
+    // Vencida há 10 dias no sistema — mas o cliente pagou antes disso.
+    const chargeId = await cobrancaVencida(500, 10, c3, r3)
+    const { data: chargeRow } = await admin().from('charges').select('due_date').eq('id', chargeId).single()
+    const dueDate = (chargeRow as { due_date: string }).due_date
+
+    // Concede R$ 200 de crédito ao cliente — é o "desconto" que o operador vai
+    // abater na cobrança.
+    const { data: credito } = await admin().from('customer_credits').insert({
+      tenant_id: tenantId, customer_id: c3, amount: 200,
+      origin: 'manual_adjustment', reason: `${TEST_TAG} Crédito retroativo ${RUN}`,
+    }).select('id').single()
+
+    await admin().rpc('post_financial_transaction', {
+      p_tenant_id: tenantId,
+      p_transaction: {
+        event_type: 'credit_granted',
+        description: `${TEST_TAG} Crédito concedido`,
+        source_module: 'customer_credit',
+        source_id: (credito as { id: string }).id,
+      },
+      p_entries: [
+        { account_code: 'despesa_operacional',  direction: 'debit',  amount: 200, customer_id: c3 },
+        { account_code: 'creditos_de_clientes', direction: 'credit', amount: 200, customer_id: c3 },
+      ],
+    })
+
+    await page.goto(`/cobrancas/${chargeId}`)
+    await waitForPageLoad(page)
+
+    // Passo 1: aplica o desconto com o saldo do cliente.
+    await page.getByRole('button', { name: 'Aplicar crédito' }).click()
+    const creditModal = getModal(page)
+    await expect(creditModal).toBeVisible()
+    await creditModal.locator('input[type=number]').fill('200')
+    await creditModal.getByRole('button', { name: 'Aplicar crédito' }).click()
+    await expect(creditModal).toBeHidden({ timeout: 15_000 })
+
+    // Só o crédito abateu — nenhum juros de hoje pode ter sido gravado.
+    const aposCredito = await saldo(chargeId)
+    expect(Number(aposCredito!.total_amount), 'aplicar crédito não pode gravar encargo').toBe(500)
+    expect(Number(aposCredito!.open_amount)).toBeCloseTo(300, 2)
+
+    // Passo 2: registra o restante com a data em que o cliente REALMENTE
+    // pagou — dois dias antes do vencimento, portanto dentro do prazo.
+    await page.getByRole('button', { name: 'Registrar pagamento' }).click()
+    const payModal = getModal(page)
+    await expect(payModal).toBeVisible()
+
+    const [ano, mes, dia] = dueDate.split('-').map(Number)
+    const dataRetroativa = new Date(ano!, mes! - 1, dia! - 2)
+    const campoData = payModal.locator('input[type="date"]')
+    await campoData.fill(
+      `${dataRetroativa.getFullYear()}-`
+      + `${String(dataRetroativa.getMonth() + 1).padStart(2, '0')}-`
+      + `${String(dataRetroativa.getDate()).padStart(2, '0')}`,
+    )
+
+    // Pago em dia: a tela não pode sugerir multa nem juros.
+    await expect(payModal.getByText('Valor devido')).toBeVisible()
+    await expect(payModal.getByText(/dias de atraso/)).toHaveCount(0)
+
+    const valorSugerido = Number(await payModal.locator('input[type="number"]').inputValue())
+    expect(valorSugerido, 'pagamento em dia não pode incluir juros').toBe(300)
+
+    await payModal.getByRole('button', { name: /confirmar pagamento/i }).click()
+    await expect(payModal).toBeHidden({ timeout: 15_000 })
+
+    // Nada de encargo em NENHUMA das duas pernas do recebimento.
+    const final = await saldo(chargeId)
+    expect(Number(final!.total_amount), 'nenhum encargo deveria ter sido lançado').toBe(500)
+    expect(Number(final!.open_amount)).toBe(0)
+    expect(Number(final!.paid_amount)).toBe(500)
+
+    const { data: encargos } = await admin()
+      .from('charge_items')
+      .select('id')
+      .eq('charge_id', chargeId)
+      .eq('source_module', 'late_charge')
+    expect(encargos ?? [], 'pagamento em dia não pode gerar item de encargo').toEqual([])
+  })
+
+  test('quitar a cobrança inteira com crédito realiza o juros até hoje', async ({ page }) => {
+    const tenantId = await getTestTenantId()
+
+    // Vencida há 15 dias, sem nenhum pagamento anterior.
+    const chargeId = await cobrancaVencida(400, 15, c3, r3)
+
+    // Crédito generoso — mais do que a cobrança pode chegar a valer — para o
+    // teto do modal ser o total devido HOJE (juros incluído), não o saldo.
+    const { data: credito } = await admin().from('customer_credits').insert({
+      tenant_id: tenantId, customer_id: c3, amount: 1000,
+      origin: 'manual_adjustment', reason: `${TEST_TAG} Crédito quitação total ${RUN}`,
+    }).select('id').single()
+
+    await admin().rpc('post_financial_transaction', {
+      p_tenant_id: tenantId,
+      p_transaction: {
+        event_type: 'credit_granted',
+        description: `${TEST_TAG} Crédito concedido`,
+        source_module: 'customer_credit',
+        source_id: (credito as { id: string }).id,
+      },
+      p_entries: [
+        { account_code: 'despesa_operacional',  direction: 'debit',  amount: 1000, customer_id: c3 },
+        { account_code: 'creditos_de_clientes', direction: 'credit', amount: 1000, customer_id: c3 },
+      ],
+    })
+
+    await page.goto(`/cobrancas/${chargeId}`)
+    await waitForPageLoad(page)
+    await page.getByRole('button', { name: 'Aplicar crédito' }).click()
+
+    const modal = getModal(page)
+    await expect(modal).toBeVisible()
+
+    // O atalho existe porque o saldo cobre o total devido hoje — clicar nele
+    // preenche o valor que inclui o juros, deixando a decisão explícita.
+    await modal.getByRole('button', { name: /Quitar a cobrança inteira agora/ }).click()
+
+    // E o aviso de que este valor lança encargo precisa estar na tela ANTES
+    // de confirmar — não só no extrato, depois.
+    await expect(modal.getByText(/inclui juros até hoje/)).toBeVisible()
+
+    const valorPreenchido = Number(await modal.locator('input[type=number]').inputValue())
+    expect(valorPreenchido, 'o atalho preenche o total com juros, não só o principal').toBeGreaterThan(400)
+
+    await modal.getByRole('button', { name: 'Aplicar crédito' }).click()
+    await expect(modal).toBeHidden({ timeout: 15_000 })
+
+    // O total da cobrança cresceu: o juros virou item de verdade.
+    const depois = await saldo(chargeId)
+    expect(Number(depois!.total_amount), 'quitar tudo com crédito precisa realizar o juros').toBeGreaterThan(400)
+    expect(Number(depois!.open_amount), 'quitação total não pode sobrar saldo').toBe(0)
+    expect(Number(depois!.paid_amount)).toBeCloseTo(Number(depois!.total_amount), 2)
+
+    const { data: encargo } = await admin()
+      .from('financial_entries')
+      .select('amount')
+      .eq('charge_id', chargeId)
+      .eq('account_code', 'receita_encargos_atraso')
+      .maybeSingle()
+    expect(encargo, 'juros não virou receita').not.toBeNull()
   })
 })
 

@@ -11,6 +11,7 @@ function buildVehicle(overrides: Partial<Vehicle>): Vehicle {
     make: 'Honda',
     year_manufacture: '2022',
     color: 'Vermelha',
+    vehicle_type: 'motorcycle',
     renavam: '12345678901',
     chassis: '9BWZZZ377VT004251',
     status: 'available',

@@ -83,6 +83,13 @@ test.describe('Fração de centavo', () => {
     const b = bal as { paid_amount: number; open_amount: number; status: string }
     expect(Number(b.paid_amount)).toBe(0)
     expect(Number(b.open_amount)).toBe(446.83)
+
+    // O pagamento fica sem alocação de propósito — é o que o teste prova. Mas
+    // ele é, literalmente, dinheiro recebido que não quitou nada: a view
+    // `financial_reconciliation` (ADR 0034) o acusa, com razão, e a tela de
+    // diagnóstico passaria a mostrar um problema falso em todo banco de
+    // desenvolvimento. Some com ele aqui, onde ele já cumpriu o papel.
+    await admin().from('payments').delete().eq('id', paymentId)
   })
 
   test('o campo de recebimento não aceita mais de duas casas', async ({ page }) => {

@@ -227,6 +227,42 @@ test.describe('Confirmação do gateway', () => {
     expect((p as { reversed_at: string | null }).reversed_at).not.toBeNull()
   })
 
+  /**
+   * ADR 0030 (G-05): `fn_confirm_gateway_payment` tinha `p_method DEFAULT 'pix'`
+   * e o webhook nunca passava nada. Um pagamento de outro meio entraria no razão
+   * como PIX. Enquanto só existe PIX o defeito é invisível — e é exatamente por
+   * isso que ele precisa morrer antes do segundo gateway.
+   */
+  test('o método do pagamento vem do intent, não é assumido como pix', async () => {
+    const tenantId = await getTestTenantId()
+    const charge = await createCharge(admin(), tenantId, {
+      customerId, rentalId,
+      dueDate: new Date(Date.now() + 5 * 86400000).toISOString().slice(0, 10),
+      sourceModule: 'manual',
+      items: [{
+        description: `${TEST_TAG} Metodo ${RUN}`,
+        credit_account_code: 'receita_locacao',
+        quantity: 1, unit_amount: 130, amount: 130,
+      }],
+    })
+
+    const { data: intent, error: intentErr } = await admin()
+      .from('payment_intents')
+      .insert({
+        tenant_id: tenantId, charge_id: charge.chargeId, provider: 'mercadopago',
+        provider_account_id: accountId, provider_intent_id: `mp-metodo-${RUN}`,
+        amount: 130, status: 'pending', method: 'credit_card',
+      })
+      .select('id').single()
+    if (intentErr) throw new Error(`intent: ${intentErr.message}`)
+
+    const paymentId = await entregaEvento(tenantId, (intent as { id: string }).id, 130)
+
+    const { data: pay } = await admin()
+      .from('payments').select('method').eq('id', paymentId).single()
+    expect((pay as { method: string }).method, 'gravou pix para um pagamento de cartão').toBe('credit_card')
+  })
+
   test('valor não positivo é recusado', async () => {
     const { tenantId, intentId } = await cobrancaComIntent(90)
     const { error } = await admin().rpc('fn_confirm_gateway_payment', {

@@ -19,9 +19,10 @@
 'use client'
 
 import { useState, useMemo } from 'react'
+import Link from 'next/link'
 import { useQueryClient } from '@tanstack/react-query'
 import {
-  Plus, Search, Wallet, TrendingDown, Users, CheckCircle2, XCircle, AlertTriangle,
+  Plus, Search, Wallet, TrendingDown, Users, CheckCircle2, XCircle, AlertTriangle, Eye,
 } from 'lucide-react'
 import { PageTitle } from '@/components/layout/PageTitle'
 import { Button } from '@/components/ui/Button'
@@ -113,6 +114,16 @@ export default function ExpensesPage() {
   const [form, setForm] = useState(emptyForm)
   /** Percentual é entrada de UI; o que vai ao banco é sempre valor. */
   const [shareAmount, setShareAmount] = useState('')
+  /**
+   * "Já paga": registra e baixa numa tacada só, para quem está lançando uma
+   * conta que já saiu do caixa (ex.: dado retroativo) — sem precisar abrir o
+   * modal de baixa logo em seguida. São duas chamadas de servidor em sequência
+   * (create, depois pay), não uma transação só: se a segunda falhar, a despesa
+   * fica criada e em aberto — estado normal, que o operador resolve com um
+   * clique a mais, não um dado quebrado.
+   */
+  const [createPaid, setCreatePaid] = useState(false)
+  const [createPaidAt, setCreatePaidAt] = useState('')
 
   const refresh = () => queryClient.invalidateQueries({ queryKey: ['payables'] })
 
@@ -173,6 +184,15 @@ export default function ExpensesPage() {
     return splitPreview?.customer_amount ?? 0
   }, [form.responsibility, form.amount, splitPreview])
 
+  // Só nasce PAGA sozinha quando o cliente devolve por CRÉDITO — é aí que
+  // `fn_create_payable` nunca chega a fazer a empresa dever ao fornecedor.
+  // Responsabilidade "Cliente" com "Cobrar do cliente" (reimbursement='charge')
+  // NÃO nasce paga: a empresa ainda deve ao fornecedor até cobrar de volta —
+  // só muda quem banca no fim, não quem paga primeiro. Checar só
+  // `responsibility === 'customer'` escondia "Já paga" também nesse caso, que
+  // é um estado aberto de verdade.
+  const bornAlreadyPaid = customerAmount > 0 && form.reimbursement === 'credit'
+
   async function handleCreate() {
     setSaving(true)
     setFeedback(null)
@@ -195,22 +215,36 @@ export default function ExpensesPage() {
       source_module: 'expense',
     })
 
-    setSaving(false)
-
     if (!result.ok) {
+      setSaving(false)
       setFormError(result.error.message)
       return
     }
 
+    let paidFeedback = ''
+    if (createPaid && !bornAlreadyPaid) {
+      const payResult = await payExpenseAction(result.data.payable_id, createPaidAt || undefined)
+      // "Conta já paga" só acontece se o próprio create já tiver quitado —
+      // não é erro, é o resultado que o operador queria de qualquer jeito.
+      if (payResult.ok || payResult.error.message === 'Conta já paga') {
+        paidFeedback = ' e já registrada como paga'
+      } else {
+        paidFeedback = `, mas não foi possível marcar como paga: ${payResult.error.message}`
+      }
+    }
+
+    setSaving(false)
     setModalOpen(false)
     setForm(emptyForm)
+    setCreatePaid(false)
+    setCreatePaidAt('')
 
     setFeedback(
-      result.data.charge_id
-        ? 'Despesa registrada e cobrança gerada para o cliente.'
+      (result.data.charge_id
+        ? 'Despesa registrada e cobrança gerada para o cliente'
         : result.data.credit_id
-          ? 'Despesa registrada e crédito concedido ao cliente.'
-          : 'Despesa registrada.',
+          ? 'Despesa registrada e crédito concedido ao cliente'
+          : 'Despesa registrada') + paidFeedback + '.',
     )
     refresh()
   }
@@ -256,6 +290,15 @@ export default function ExpensesPage() {
   const customers = (customersQuery.data ?? []).filter((c) => c.active)
   const vehicles = vehiclesQuery.data ?? []
   const rentals = rentalsQuery.data ?? []
+
+  const vehiclePlateById = useMemo(
+    () => new Map(vehicles.map((v) => [v.id, v.license_plate])),
+    [vehicles],
+  )
+  const categoryLabelByCode = useMemo(
+    () => new Map<string, string>(EXPENSE_CATEGORIES.map((c) => [c.value, c.label])),
+    [],
+  )
 
   return (
     <div className="space-y-6">
@@ -313,8 +356,11 @@ export default function ExpensesPage() {
             <thead>
               <tr className="border-b border-[var(--divider)] text-left text-[11px] uppercase tracking-wide text-[var(--fg-mute)]">
                 <th className="px-4 py-2 font-medium">Descrição</th>
+                <th className="px-4 py-2 font-medium">Tipo</th>
+                <th className="px-4 py-2 font-medium">Veículo</th>
                 <th className="px-4 py-2 font-medium">Competência</th>
                 <th className="px-4 py-2 font-medium">Vencimento</th>
+                <th className="px-4 py-2 font-medium">Pago em</th>
                 <th className="px-4 py-2 font-medium text-right">Total</th>
                 <th className="px-4 py-2 font-medium text-right">Empresa</th>
                 <th className="px-4 py-2 font-medium text-right">Cliente</th>
@@ -324,11 +370,11 @@ export default function ExpensesPage() {
             </thead>
             <tbody>
               {payablesQuery.isLoading && (
-                <tr><td colSpan={8} className="px-4 py-8 text-center text-[13px] text-[var(--fg-mute)]">Carregando…</td></tr>
+                <tr><td colSpan={11} className="px-4 py-8 text-center text-[13px] text-[var(--fg-mute)]">Carregando…</td></tr>
               )}
 
               {!payablesQuery.isLoading && visible.length === 0 && (
-                <tr><td colSpan={8} className="px-4 py-8 text-center text-[13px] text-[var(--fg-mute)]">Nenhuma despesa encontrada.</td></tr>
+                <tr><td colSpan={11} className="px-4 py-8 text-center text-[13px] text-[var(--fg-mute)]">Nenhuma despesa encontrada.</td></tr>
               )}
 
               {visible.map((p) => (
@@ -339,8 +385,17 @@ export default function ExpensesPage() {
                       <span className="ml-2 text-[var(--fg-mute)]">{p.vendor_name}</span>
                     )}
                   </td>
+                  <td className="px-4 text-[var(--fg-soft)]">
+                    {categoryLabelByCode.get(p.expense_account_code) ?? p.expense_account_code}
+                  </td>
+                  <td className="px-4 text-[var(--fg-soft)]">
+                    {p.vehicle_id ? vehiclePlateById.get(p.vehicle_id) ?? '—' : '—'}
+                  </td>
                   <td className="px-4 tabular-nums">{formatDate(p.competence_date)}</td>
                   <td className="px-4 tabular-nums">{formatDate(p.due_date)}</td>
+                  <td className="px-4 tabular-nums">
+                    {p.status === 'paid' && p.paid_at ? formatDate(p.paid_at) : '—'}
+                  </td>
                   <td className="px-4 text-right tabular-nums">{formatCurrency(p.amount)}</td>
                   <td className="px-4 text-right tabular-nums font-medium">
                     {formatCurrency(p.company_amount)}
@@ -351,25 +406,34 @@ export default function ExpensesPage() {
                   <td className="px-4"><StatusBadge status={p.status} /></td>
                   <td className="px-4">
                     <div className="flex items-center justify-end gap-1">
+                      <Link
+                        href={`/despesas/${p.id}`}
+                        title="Ver detalhes"
+                        className="p-1 text-[var(--fg-soft)] hover:text-[var(--primary)]"
+                      >
+                        <Eye className="h-4 w-4" />
+                      </Link>
                       {p.status === 'open' && (
-                        <>
-                          <button
-                            title="Registrar pagamento"
-                            onClick={() => abrirPagamento(p)}
-                            disabled={saving}
-                            className="p-1 text-[var(--fg-soft)] hover:text-[var(--success)]"
-                          >
-                            <CheckCircle2 className="h-4 w-4" />
-                          </button>
-                          <button
-                            title="Cancelar"
-                            onClick={() => handleCancel(p)}
-                            disabled={saving}
-                            className="p-1 text-[var(--fg-soft)] hover:text-[var(--danger)]"
-                          >
-                            <XCircle className="h-4 w-4" />
-                          </button>
-                        </>
+                        <button
+                          title="Registrar pagamento"
+                          onClick={() => abrirPagamento(p)}
+                          disabled={saving}
+                          className="p-1 text-[var(--fg-soft)] hover:text-[var(--success)]"
+                        >
+                          <CheckCircle2 className="h-4 w-4" />
+                        </button>
+                      )}
+                      {/* Despesa PAGA cancela normalmente desde a ADR 0029 — o
+                          estorno da baixa acontece junto. O botão só faltava aqui. */}
+                      {(p.status === 'open' || p.status === 'paid') && (
+                        <button
+                          title="Cancelar"
+                          onClick={() => handleCancel(p)}
+                          disabled={saving}
+                          className="p-1 text-[var(--fg-soft)] hover:text-[var(--danger)]"
+                        >
+                          <XCircle className="h-4 w-4" />
+                        </button>
                       )}
                     </div>
                   </td>
@@ -419,6 +483,41 @@ export default function ExpensesPage() {
               onChange={(e) => setForm({ ...form, due_date: e.target.value })}
             />
           </div>
+
+          {!bornAlreadyPaid && (
+            <div>
+              <label className="flex items-center gap-2 text-[13px] text-[var(--fg)]">
+                <input
+                  type="checkbox"
+                  checked={createPaid}
+                  onChange={(e) => {
+                    setCreatePaid(e.target.checked)
+                    if (e.target.checked && !createPaidAt) setCreatePaidAt(businessToday || todayIso())
+                  }}
+                />
+                Já paga
+              </label>
+
+              {createPaid && (
+                <div className="mt-2">
+                  <label className="mb-1.5 block text-[13px] text-[var(--fg-mute)]" htmlFor="create-paid-at">
+                    Paga em
+                  </label>
+                  <input
+                    id="create-paid-at"
+                    type="date"
+                    value={createPaidAt}
+                    max={businessToday || undefined}
+                    onChange={(e) => setCreatePaidAt(e.target.value)}
+                    className="h-9 w-full rounded-lg border border-[var(--border)] bg-[var(--surface-2)] px-3 text-[13px] text-[var(--fg)] outline-none focus:border-[var(--primary)]"
+                  />
+                  <p className="mt-1.5 text-[12px] leading-relaxed text-[var(--fg-mute)]">
+                    Registra a despesa e já dá baixa nela, com esta data de pagamento.
+                  </p>
+                </div>
+              )}
+            </div>
+          )}
 
           <div className="grid grid-cols-2 gap-4">
             <Select

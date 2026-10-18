@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { isVehicleModelYearCoherent } from '../rules/vehicles'
 
 const dateString = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Formato de data inválido (AAAA-MM-DD)')
 
@@ -23,6 +24,21 @@ export const AcquisitionTypeEnum = z.enum([
 ])
 export type AcquisitionType = z.infer<typeof AcquisitionTypeEnum>
 
+export const VehicleTypeEnum = z.enum(['motorcycle', 'car'], { error: 'Tipo do veículo é obrigatório' })
+export type VehicleType = z.infer<typeof VehicleTypeEnum>
+
+/**
+ * Campo opcional de texto: string vazia vira `null`. RENAVAM e chassi têm
+ * índice único por tenant — `''` gravado em dois veículos colide, `NULL` não.
+ */
+const optionalText = (max: number) =>
+  z.preprocess((v) => (typeof v === 'string' && v.trim() === '' ? null : v), z.string().trim().max(max).nullable().optional())
+
+const yearString = (label: string) =>
+  z.string({ error: `${label} é obrigatório` })
+    .trim()
+    .regex(/^\d{4}$/, `${label} deve ter 4 dígitos`)
+
 const imeiSchema = z
   .string()
   .regex(/^\d{15}$/, 'IMEI deve ter exatamente 15 dígitos numéricos')
@@ -31,14 +47,16 @@ const imeiSchema = z
 
 export const VehicleBaseSchema = z.object({
   license_plate:             z.string().trim().min(1, 'Placa é obrigatória').max(10),
-  renavam:                   z.string().trim().min(1, 'RENAVAM é obrigatório').max(20),
+  /** Opcional desde o cadastro simplificado: fica em "Identificação complementar". */
+  renavam:                   optionalText(20),
+  vehicle_type:              VehicleTypeEnum,
   make:                      z.string().trim().min(1, 'Marca é obrigatória').max(100),
   model:                     z.string().trim().min(1, 'Modelo é obrigatório').max(100),
-  year_manufacture:          z.string().trim().max(10).optional().nullable(),
-  year_model:                z.string().trim().max(10).optional().nullable(),
-  color:                     z.string().trim().max(50).optional().nullable(),
+  year_manufacture:          yearString('Ano de fabricação'),
+  year_model:                yearString('Ano modelo'),
+  color:                     z.string({ error: 'Cor é obrigatória' }).trim().min(1, 'Cor é obrigatória').max(50),
   fuel:                      z.string().trim().max(50).optional().nullable(),
-  chassis:                   z.string().trim().max(20).optional().nullable(),
+  chassis:                   optionalText(20),
   engine_capacity:           z.string().trim().max(20).optional().nullable(),
   km_entry:                  z.number().int().min(0).optional().nullable(),
   observations:              z.string().trim().max(2000).optional().nullable(),
@@ -80,6 +98,9 @@ export const VehicleBaseSchema = z.object({
 })
 
 export const VehicleSchema = VehicleBaseSchema.refine(
+  (d) => isVehicleModelYearCoherent(d.year_manufacture, d.year_model),
+  { message: 'Ano modelo deve ser igual ao ano de fabricação ou o seguinte', path: ['year_model'] },
+).refine(
   (d) => !d.has_tracker || (d.tracker_brand && d.tracker_model && d.tracker_imei),
   { message: 'Preencha marca, modelo e IMEI do rastreador', path: ['tracker_brand'] },
 ).refine(
@@ -124,6 +145,11 @@ export interface VehiclePhoto {
   url:        string
   created_at: string
   updated_at: string
+}
+
+export const VEHICLE_TYPE_LABELS: Record<VehicleType, string> = {
+  motorcycle: 'Moto',
+  car:        'Carro',
 }
 
 export const VEHICLE_STATUS_LABELS: Record<VehicleStatus, string> = {

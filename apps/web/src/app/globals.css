@@ -392,3 +392,20 @@ body {
 .contract-page em     { font-style: italic; }
 .contract-page u      { text-decoration: underline; }
 .contract-page s      { text-decoration: line-through; }
+
+/* ── Tela de login — identidade fixa da Locaw ──
+   Não segue data-brand/data-mode de propósito: o login roda antes de
+   existir sessão (sem tema do tenant) e é a vitrine da marca Locaw, não
+   da locadora. Escopo em .login-brand para não vazar para o cockpit. ── */
+.login-brand {
+  --login-ink: #121316;          /* painel escuro + botão Entrar */
+  --login-ink-line: #2A2B30;     /* círculos decorativos */
+  --login-ink-fg: #F2EEE6;       /* título creme sobre o escuro */
+  --login-ink-chip: #5A5B61;     /* contorno dos chips */
+  --login-accent: #F5C400;       /* amarelo da marca */
+  --login-paper: #FFFFFF;        /* painel do formulário */
+  --login-paper-fg: #121316;
+  --login-paper-soft: #4B4D55;
+  --login-paper-mute: #6B6E76;
+  --login-paper-border: #D4D6DB;
+}

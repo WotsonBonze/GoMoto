@@ -414,3 +414,38 @@ s3_secret_key = "env(S3_SECRET_KEY)"
 # declarative_schema_path = "./database"
 # JSON string passed through to pg-delta SQL formatting.
 # format_options = "{\"keywordCase\":\"upper\",\"indent\":2,\"maxWidth\":80,\"commaStyle\":\"trailing\"}"
+
+# ---------------------------------------------------------------------------
+# Edge Functions — webhooks de gateway (ADR 0030 / 0031)
+# ---------------------------------------------------------------------------
+# `verify_jwt = false` é obrigatório: quem chama estas funções é o gateway, de
+# fora, sem JWT do Supabase. Estava só como flag `--no-verify-jwt` na linha de
+# comando — quem deployasse sem lembrar dela derrubaria a confirmação de
+# pagamento em silêncio, com todo webhook virando 401.
+#
+# Isso NÃO deixa as funções abertas. Cada uma tem a sua própria porta:
+#   mercadopago-webhook → assinatura HMAC (x-signature)
+#   cora-webhook        → segredo no path, porque a Cora não assina nada
+#   infinitepay-webhook → segredo no path + reconsulta em payment_check, porque
+#                         a InfinitePay não assina E o corpo afirma o pagamento
+#   asaas-webhook       → token no header `asaas-access-token` + reconsulta em
+#                         GET /payments com a chave da conta dona do intent
+
+[functions.mercadopago-webhook]
+verify_jwt = false
+
+[functions.cora-webhook]
+verify_jwt = false
+
+[functions.infinitepay-webhook]
+verify_jwt = false
+
+[functions.asaas-webhook]
+verify_jwt = false
+
+# Dreno da fila de replay (ADR 0034 Fase 3b). `verify_jwt` LIGADO, ao contrário
+# dos três webhooks: aqui não há provedor externo a acomodar. Quem chama é a
+# Server Action do cockpit, com a chave service_role, depois de conferir papel e
+# tenant.
+[functions.gateway-replay]
+verify_jwt = true

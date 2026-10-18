@@ -1,7 +1,7 @@
 import type { ReactNode } from 'react'
 import Link from 'next/link'
 import {
-  Edit2, X, RotateCcw, TrendingUp, Zap,
+  Edit2, X, SlidersHorizontal, Zap,
 } from 'lucide-react'
 import { formatCurrency } from '@/lib/utils'
 import { getRentalCore } from './_lib/get-rental-core'
@@ -50,21 +50,15 @@ export default async function RentalDetailLayout({
                   <Zap className="h-4 w-4" />
                   Cobrança avulsa
                 </Link>
+                {/* Renovar e Reajustar eram dois recortes do mesmo ato — e ter
+                    dois donos para o prazo fazia as regras divergirem (ADR 0035). */}
                 <Link
-                  href={`/locacoes/${id}/renovar`}
+                  href={`/locacoes/${id}/ajustar`}
                   className="inline-flex h-9 items-center gap-1.5 rounded-full border border-border px-3 text-[13px] text-fg-mute transition-colors hover:border-fg-mute hover:text-fg"
-                  title="Renovar"
+                  title="Ajustar período, ciclo e valor"
                 >
-                  <RotateCcw className="h-4 w-4" />
-                  Renovar
-                </Link>
-                <Link
-                  href={`/locacoes/${id}/reajustar`}
-                  className="inline-flex h-9 items-center gap-1.5 rounded-full border border-border px-3 text-[13px] text-fg-mute transition-colors hover:border-fg-mute hover:text-fg"
-                  title="Reajustar"
-                >
-                  <TrendingUp className="h-4 w-4" />
-                  Reajustar
+                  <SlidersHorizontal className="h-4 w-4" />
+                  Ajustar
                 </Link>
                 <Link
                   href={`/locacoes/${id}/encerrar`}

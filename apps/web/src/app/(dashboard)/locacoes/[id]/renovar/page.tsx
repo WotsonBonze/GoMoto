@@ -1,26 +1,15 @@
-import { notFound } from 'next/navigation'
-import { createClient } from '@/lib/supabase/server'
-import { getCurrentTenantId } from '@/lib/auth/tenant'
-import { RenewForm } from '../../_components/RenewForm'
+import { redirect } from 'next/navigation'
 
-export default async function RenewRentalPage({
+/**
+ * Renovar virou um recorte de Ajustar (ADR 0035): esticar o fim é mudar um dos
+ * seis parâmetros do cronograma. Mesmo racional de `reajustar/page.tsx` para
+ * manter a rota viva como redirect.
+ */
+export default async function RenovarRedirect({
   params,
 }: {
   params: Promise<{ id: string }>
 }) {
   const { id } = await params
-  const supabase  = await createClient()
-  const tenantId  = await getCurrentTenantId(supabase)
-  if (!tenantId) notFound()
-
-  const { data, error } = await supabase
-    .from('rentals')
-    .select('*, customer:customers(id,name), vehicle:vehicles(id,license_plate,make,model)')
-    .eq('id', id)
-    .eq('tenant_id', tenantId)
-    .single()
-
-  if (error || !data || data.status !== 'active') notFound()
-
-  return <RenewForm rental={data} />
+  redirect(`/locacoes/${id}/ajustar`)
 }

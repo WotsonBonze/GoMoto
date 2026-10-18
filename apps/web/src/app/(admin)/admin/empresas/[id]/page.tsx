@@ -5,6 +5,8 @@ import { applyCnpjMask, applyZipMask, applyPhoneMask } from '@gomoto/core'
 import { requirePlatformAdmin } from '@/lib/auth/platform'
 import { SuspendActions } from './_components/SuspendActions'
 import { OwnerActions } from './_components/OwnerActions'
+import { LoginBrandingForm } from './_components/LoginBrandingForm'
+import { loginBrandingPublicUrl, loginRootDomain } from '@/lib/login-branding'
 
 // ─── Auxiliares ───────────────────────────────────────────────────────────────
 
@@ -204,6 +206,7 @@ export default async function EmpresaDetailPage({
                 <Row label="Nome fantasia"  value={tenant.name} />
                 <Row label="Razão social"   value={tenant.legal_name} />
                 <Row label="Slug"           value={tenant.slug} mono />
+                <Row label="Subdomínio"     value={tenant.login_subdomain ? `${tenant.login_subdomain}.${loginRootDomain()}` : null} mono />
                 <Row label="CNPJ"           value={cnpjFormatted} mono />
                 <Row label="Cadastrado em"  value={fmt(tenant.created_at)} />
               </tbody>
@@ -256,6 +259,20 @@ export default async function EmpresaDetailPage({
             <div className="border-t border-divider px-4 py-3">
               <OwnerActions tenantId={id} />
             </div>
+          </div>
+        </section>
+
+        {/* Login personalizado (ADR 0042) */}
+        <section>
+          <h2 className="text-[14px] font-bold text-primary mb-3">Login personalizado</h2>
+          <div className="bg-surface rounded-xl overflow-hidden">
+            <LoginBrandingForm
+              tenantId={id}
+              rootDomain={loginRootDomain()}
+              initialSubdomain={tenant.login_subdomain}
+              logoUrl={loginBrandingPublicUrl(tenant.login_logo_path)}
+              logoLightUrl={loginBrandingPublicUrl(tenant.login_logo_light_path)}
+            />
           </div>
         </section>
 

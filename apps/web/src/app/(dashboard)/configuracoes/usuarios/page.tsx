@@ -15,7 +15,7 @@ export default async function UsuariosPage() {
   try {
     ctx = await requireTenantOwnerOrAdmin()
   } catch {
-    redirect('/configuracoes')
+    redirect('/configuracoes/conta')
   }
 
   // list_tenant_members SECURITY DEFINER junta auth.users e retorna email/nome.

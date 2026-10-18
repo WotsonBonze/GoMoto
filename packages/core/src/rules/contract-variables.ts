@@ -59,7 +59,7 @@ export const TEMPLATE_VARIABLES = [
   { key: 'data_fim',          label: 'Data de fim por extenso',    category: 'Datas',      sample: '30 de setembro de 2026' },
   { key: 'data_hoje',         label: 'Data atual por extenso',     category: 'Datas',      sample: '6 de julho de 2026' },
   // Empresa
-  { key: 'nome_empresa',      label: 'Nome da empresa',            category: 'Empresa',    sample: 'GoMoto Locações LTDA' },
+  { key: 'nome_empresa',      label: 'Nome da empresa',            category: 'Empresa',    sample: 'Locaw Locações LTDA' },
 ] as const satisfies readonly TemplateVariable[]
 
 // Deriva as chaves reais do catálogo — usado para forçar em tempo de
@@ -130,6 +130,15 @@ export interface ResolveContractVariablesInput {
     start_date: string
     end_date: string
     security_deposit?: number | null
+    /**
+     * Spec 0014 (RF-004): km do veículo NA ENTREGA, congelado em
+     * `rentals.km_initial`. Fonte de `km_inicial` — `vehicle.km_current` é
+     * mutável e muda depois da entrega, o que fazia o PDF reimpresso mudar de
+     * km sozinho. `null`/ausente cai no fallback de `vehicle.km_current`, para
+     * locação anterior a esta feature e para o preview do formulário de
+     * criação (a locação ainda não existe no banco).
+     */
+    km_initial?: number | null
   }
   tenantName: string
   /** Injetável para teste determinístico — default `new Date()`. */
@@ -179,7 +188,10 @@ export function resolveContractVariables(input: ResolveContractVariablesInput): 
     chassi_veiculo: vehicle.chassis ?? '',
     cor_veiculo: vehicle.color ?? '',
     combustivel_veiculo: vehicle.fuel ?? '',
-    km_inicial: vehicle.km_current != null ? vehicle.km_current.toLocaleString('pt-BR') : '',
+    km_inicial: (() => {
+      const km = rental.km_initial ?? vehicle.km_current
+      return km != null ? km.toLocaleString('pt-BR') : ''
+    })(),
     proprietario_veiculo: vehicle.registered_owner_name ?? '',
     documento_proprietario_veiculo: vehicle.registered_owner_document ? formatDocument(vehicle.registered_owner_document) : '',
 

@@ -21,6 +21,7 @@
 ### Operação e negócio
 - [[Fluxos de Negócio]] — Locação, manutenção, financeiro, fila, saída de cliente
 - [[Roadmap]] — Próximos passos, backlog, o que está mockado
+- [[Benchmark/LocaSmart Pro]] — Análise do concorrente (2026-10-10): funcionalidades, cobrança e o que trazer pro GoMoto
 - [[Variáveis de Ambiente]] — `.env.local`, `.env.test`, como configurar
 
 ### Qualidade e segurança
@@ -43,7 +44,7 @@ Sistema monolítico full-stack para gerenciar:
 
 ## ⚙️ Stack resumida
 - [[Next.js]] 14.2.35 + TypeScript 5 + TailwindCSS 3.4
-- [[Supabase]] (PostgreSQL + Auth + Storage) — projeto `hcnxbqunescfanqzmsha`
+- [[Supabase]] (PostgreSQL + Auth + Storage) — projeto `oskgooflepkkjdwxuouj`
 - Leaflet 1.9, Recharts 3.8, Zod 4.3, Lucide
 - Deploy: Vercel (pendente)
 

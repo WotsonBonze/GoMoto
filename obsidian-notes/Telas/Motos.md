@@ -31,48 +31,57 @@ Cada pílula exibe **contador dinâmico**.
 
 Clicar na linha → seleciona/centraliza moto no mapa.
 
-## Formulário — Passo 1 (Dados Técnicos)
+## Formulário — `/veiculos/novo` e `/veiculos/[id]/editar` (2026-10-13)
 
-> Wizard 2 passos na **criação**. Edição pula direto pro passo 1 sem passo 2.
+> Um só componente (`veiculos/_components/VehicleForm.tsx`) para criar e editar.
+> Padrão **"Essencial + expandir"**: o cadastro pede só o que o veículo precisa
+> para entrar na frota; o resto fica em seções recolhidas, abertas sob demanda,
+> e pode ser completado depois na edição. Escolhido entre 3 propostas
+> (essencial + expandir, cadastro rápido em modal + checklist, assistente em
+> etapas) num protótipo clicável. Antes eram 8 seções e ~45 campos à vista, com 4 obrigatórios.
 
-| Campo | Tipo | Required | Obs |
+### Card "Essencial" (sempre visível)
+
+| Campo | Coluna | Obrigatório | Obs |
 |---|---|---|---|
-| Placa | text | ✓ | `.toUpperCase()` ao salvar |
-| RENAVAM | text | ✓ | — |
-| Marca | text | ✓ | `.toUpperCase()` |
-| Modelo | text | ✓ | — |
-| Ano (Fab/Mod) | text | ✓ | String simples |
-| Cor | text | ✓ | `.toUpperCase()` |
-| Combustível | select | — | GASOLINA / ÁLCOOL+GASOLINA / ELÉTRICO (default: GASOLINA) |
-| Chassi | text | ✓ | `.toUpperCase()` |
-| Cilindrada | text | — | Ex: 162cc |
-| Dono Anterior | text | — | Nome conforme documento |
-| CPF do Vendedor | text | — | — |
-| Data da Compra | date | — | — |
-| Valor FIPE (R$) | text | — | Sanitização: remove `.` milhar, troca `,` por `.`, parseFloat |
-| Status na Frota | select | — | available / rented / maintenance / inactive |
-| KM de Entrada | number | — | **Apenas criação** — zerado na edição propositalmente |
-| Observações | textarea | — | 4 linhas, laudo de vistoria |
+| Placa | `license_plate` | ✓ | máscara Mercosul, única por tenant |
+| Tipo do veículo | `vehicle_type` | ✓ | Moto (`motorcycle`) / Carro (`car`); sem default na criação; o CRLV preenche via `vehicleTypeFromCrlv` |
+| Marca | `make` | ✓ | `.toUpperCase()` |
+| Modelo | `model` | ✓ | — |
+| Ano fabricação | `year_manufacture` | ✓ | 4 dígitos |
+| Ano modelo | `year_model` | ✓ | 4 dígitos; igual à fabricação ou o seguinte (`isVehicleModelYearCoherent`) |
+| Cor | `color` | ✓ | `.toUpperCase()` |
+| KM de entrada | `km_entry` | — | recomendado, base do plano de manutenção. **Gravado uma vez só**: na criação ou, se ficou em branco, na edição (o campo aparece enquanto está vazio). Ao ser gravado, `km_current` sobe para ele |
 
-## Formulário — Passo 2 (Bootstrap de Manutenção)
+Moto sem placa (0 km antes do emplacamento) **não** é cadastrável por enquanto.
 
-Exibido **apenas na criação**. 13 itens de manutenção preventiva:
+### Seções recolhidas ("Mais informações", todas opcionais)
 
-| Item | Intervalo |
+| Seção | Conteúdo |
 |---|---|
-| Troca de óleo | 1.000 km |
-| Filtro de óleo | 4.000 km |
-| Troca da relação (corrente/coroa/pinhão) | 12.000 km |
-| Lona de freio traseira | 12.000 km |
-| Pastilha de freio dianteira | 8.000 km |
-| Pneu dianteiro | 12.000 km |
-| Pneu traseiro | 8.000 km |
-| Filtro de ar | 7.000 km |
-| Velas de ignição | 10.000 km |
-| Amortecedores | 25.000 km |
-| Vistoria mensal | 30 dias |
+| Identificação complementar | RENAVAM, chassi, combustível, cilindrada, observações |
+| Documentação (CRV) | proprietário, CPF/CNPJ, UF, nº do CRV, ano-exercício, transferência, anexo (criação) |
+| IPVA e licenciamento | valor, vencimento e situação de IPVA, licenciamento e DPVAT (DPVAT nasce "Isento") |
+| Aquisição | tipo, data, valor pago, FIPE, vendedor |
+| Rastreador GPS | **escondido** (`VEHICLE_TRACKER_ENABLED = false` em `lib/vehicles/features.ts`) até existir a integração; também some do detalhe. Dados já gravados são preservados na edição |
+| Seguro | valor mensal e vencimento (obrigatórios se ligado) |
+| Fotos | 6 slots |
+| Plano de manutenção | plano + "última vez feito" por item (bootstrap) |
 
-Cada item tem input de KM (tipo km) ou data (tipo data). Ao salvar: cria 13 registros em `maintenances` com `predicted_km` ou `scheduled_date` calculados. Itens vencidos recebem observação de aviso.
+- **Status:** não faz parte do formulário. O veículo nasce Disponível (DEFAULT da coluna) e o status muda pelas ações da tela de detalhe (`VehicleStatusActions`). A edição não envia `status`.
+- **Importação do CRLV:** abre as seções que receberam dados (selo "Do CRLV") e destaca em azul cada campo preenchido. O destaque some quando o operador edita o campo. O tipo (Moto/Carro) também vem do CRLV.
+- **Criação:** tudo recolhido. **Edição:** abrem expandidas as seções que já têm dado.
+- Selo "Preenchido" na linha da seção recolhida que tem dado.
+- RENAVAM e chassi vazios são gravados como `NULL`, não `''`, porque têm índice único por tenant.
+- Placa/RENAVAM/chassi duplicados voltam da action com `field` (`uniqueViolation` em `actions.ts`).
+
+### Validação e envio
+
+- `VehicleSchema` (`@gomoto/core`) roda no cliente antes de chamar a action. Todos os campos com problema são marcados de uma vez, e **um erro dentro de seção recolhida abre a seção**.
+- A action revalida com o mesmo schema; `updateVehicle` usa `.partial()` e por isso checa a coerência dos anos à parte.
+- Rodapé fixo com contador "x/7 obrigatórios preenchidos", Cancelar e Cadastrar/Salvar.
+- KM de entrada write-once (2026-10-13): `resolveKmEntryUpdate`/`canEditKmEntry` em `@gomoto/core`, e o trigger `vehicles_km_entry_guard` no banco recusa trocar ou apagar um valor já gravado. O mesmo trigger iguala `km_current` ao KM de entrada no primeiro preenchimento (nunca diminui). Antes, o cadastro deixava `km_current = 0`, e a primeira locação começava em 0 km.
+- Veículo legado sem ano ou cor válido precisa ter esses campos preenchidos na próxima edição. No banco local não havia nenhum.
 
 ## Queries Supabase
 

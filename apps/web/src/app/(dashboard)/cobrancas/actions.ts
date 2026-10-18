@@ -18,6 +18,7 @@ import {
   ReceivePaymentSchema,
   CancelChargeSchema,
   WriteOffChargeSchema,
+  ApplyDiscountSchema,
   type ActionResult, type ErrorCode,
 } from '@gomoto/core'
 import {
@@ -26,6 +27,7 @@ import {
   writeOffCharge,
   receivePayment,
   reversePayment,
+  applyDiscount,
 } from '@/lib/financial'
 
 type Failure = { ok: false; error: { code: ErrorCode; message: string } }
@@ -190,6 +192,47 @@ export async function reversePaymentAction(
       table: 'payments',
       recordId: paymentId,
       newData: { reversed: true, reason },
+    })
+
+    revalidateFinancial()
+    return { ok: true, data: undefined }
+  } catch (err) {
+    return fail('INTERNAL', toMessage(err))
+  }
+}
+
+// ============================================================
+// Desconto
+// ============================================================
+
+/**
+ * Concede desconto a uma cobrança em aberto.
+ *
+ * Nunca edita o valor emitido — insere item negativo e estorna a receita na
+ * proporção (ADR 0024, Princípio 5). Ver `applyDiscount` em `lib/financial`.
+ */
+export async function applyDiscountAction(raw: unknown): Promise<ActionResult<void>> {
+  const ctx = await getContext()
+  if (!ctx.ok) return ctx.failure
+
+  const parsed = ApplyDiscountSchema.safeParse(raw)
+  if (!parsed.success) {
+    return fail('VALIDATION_ERROR', parsed.error.issues[0]?.message ?? 'Dados inválidos')
+  }
+
+  try {
+    await applyDiscount(ctx.supabase, ctx.tenantId, {
+      chargeId: parsed.data.charge_id,
+      discountAmount: parsed.data.discount_amount,
+      reason: parsed.data.discount_reason,
+      createdBy: ctx.userId,
+    })
+
+    await logAction({
+      action: 'update',
+      table: 'charges',
+      recordId: parsed.data.charge_id,
+      newData: { discount: parsed.data.discount_amount, reason: parsed.data.discount_reason },
     })
 
     revalidateFinancial()

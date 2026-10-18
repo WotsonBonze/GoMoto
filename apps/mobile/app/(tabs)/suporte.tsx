@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import {
   Alert,
   Linking,
-  Pressable,
+  Modal,
   ScrollView,
   StyleSheet,
   Text,
@@ -10,26 +10,35 @@ import {
 } from 'react-native'
 import { SafeAreaView } from 'react-native-safe-area-context'
 import Constants from 'expo-constants'
-import { useAuth } from '../../src/contexts/auth'
+import { useRouter } from 'expo-router'
+import { applyPhoneMask, type TenantContact } from '@gomoto/core'
+import { useTenantContacts } from '@gomoto/data'
+import { useAuth, type TenantOption } from '../../src/contexts/auth'
 import { supabase } from '../../src/lib/supabase'
 import { useTheme, useThemePreference, type ThemeTokens, type ThemePreference } from '../../src/theme'
+import {
+  Badge,
+  Card,
+  Icon,
+  ListItem,
+  ModalHeader,
+  ScreenHeader,
+  SectionHeader,
+  SegmentedControl,
+  type SegmentOption,
+  type IconName,
+  type Tone,
+} from '../../src/components/ui'
 
-type Styles = ReturnType<typeof createStyles>
-
-const THEME_OPTIONS: { value: ThemePreference; label: string }[] = [
-  { value: 'auto', label: 'Sistema' },
-  { value: 'light', label: 'Claro' },
-  { value: 'dark', label: 'Escuro' },
+const THEME_OPTIONS: SegmentOption<ThemePreference>[] = [
+  { value: 'auto', label: 'Sistema', icon: 'phone-portrait-outline' },
+  { value: 'light', label: 'Claro', icon: 'sunny-outline' },
+  { value: 'dark', label: 'Escuro', icon: 'moon-outline' },
 ]
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-function formatPhone(raw: string | null | undefined): string | null {
-  if (!raw) return null
-  return raw.replace(/\D/g, '').length >= 10 ? raw : null
-}
 
 function openWhatsApp(phone: string) {
   const digits = phone.replace(/\D/g, '')
@@ -41,79 +50,45 @@ function openMail(email: string) {
   void Linking.openURL(`mailto:${email}`)
 }
 
-// ---------------------------------------------------------------------------
-// Sub-components
-// ---------------------------------------------------------------------------
-
-function SectionTitle({ text, styles }: { text: string; styles: Styles }) {
-  return <Text style={styles.sectionTitle}>{text}</Text>
+function callPhone(phone: string) {
+  void Linking.openURL(`tel:${phone.replace(/\D/g, '')}`)
 }
 
-function InfoRow({ label, value, styles }: { label: string; value: string; styles: Styles }) {
-  return (
-    <View style={styles.infoRow}>
-      <Text style={styles.infoLabel}>{label}</Text>
-      <Text style={styles.infoValue}>{value}</Text>
-    </View>
-  )
+/**
+ * Número sozinho abre direto pelo tipo que a locadora definiu (WhatsApp ou
+ * ligação). Com e-mail junto, pergunta qual canal usar.
+ */
+function openContact(contact: TenantContact) {
+  const { phone, email } = contact
+  const openPhone = phone
+    ? () => (contact.phone_kind === 'whatsapp' ? openWhatsApp(phone) : callPhone(phone))
+    : null
+
+  if (openPhone && !email) return openPhone()
+  if (email && !openPhone) return openMail(email)
+
+  Alert.alert(contact.label, contactSummary(contact), [
+    { text: contact.phone_kind === 'whatsapp' ? 'WhatsApp' : 'Ligar', onPress: openPhone! },
+    { text: 'E-mail', onPress: () => openMail(email!) },
+    { text: 'Cancelar', style: 'cancel' },
+  ])
 }
 
-function ActionRow({
-  label,
-  sublabel,
-  onPress,
-  accent,
-  styles,
-}: {
-  label: string
-  sublabel?: string
-  onPress: () => void
-  accent?: boolean
-  styles: Styles
-}) {
-  return (
-    <Pressable
-      style={({ pressed }) => [styles.actionRow, pressed && styles.actionRowPressed]}
-      onPress={onPress}
-    >
-      <View style={styles.actionRowLeft}>
-        <Text style={[styles.actionRowLabel, accent && styles.actionRowLabelAccent]}>
-          {label}
-        </Text>
-        {sublabel ? <Text style={styles.actionRowSublabel}>{sublabel}</Text> : null}
-      </View>
-      <Text style={styles.actionRowChevron}>›</Text>
-    </Pressable>
-  )
+function contactSummary(contact: TenantContact): string {
+  return [contact.phone ? applyPhoneMask(contact.phone) : null, contact.email].filter(Boolean).join(' · ')
 }
 
-function ThemeSelector({
-  preference,
-  onChange,
-  styles,
-}: {
-  preference: ThemePreference
-  onChange: (pref: ThemePreference) => void
-  styles: Styles
-}) {
-  return (
-    <View style={styles.themeOptions}>
-      {THEME_OPTIONS.map((opt) => {
-        const active = preference === opt.value
-        return (
-          <Pressable
-            key={opt.value}
-            style={[styles.themeOption, active && styles.themeOptionActive]}
-            onPress={() => onChange(opt.value)}
-          >
-            <Text style={[styles.themeOptionText, active && styles.themeOptionTextActive]}>
-              {opt.label}
-            </Text>
-          </Pressable>
-        )
-      })}
-    </View>
-  )
+function contactIcon(contact: TenantContact): { icon: IconName; tone: Tone } {
+  if (!contact.phone) return { icon: 'mail-outline', tone: 'primary' }
+  return contact.phone_kind === 'whatsapp'
+    ? { icon: 'logo-whatsapp', tone: 'success' }
+    : { icon: 'call-outline', tone: 'primary' }
+}
+
+function initials(name: string | null): string {
+  if (!name) return '?'
+  const parts = name.trim().split(/\s+/)
+  return ((parts[0]?.[0] ?? '') + (parts.length > 1 ? parts[parts.length - 1]![0] : '')).toUpperCase()
 }
 
 // ---------------------------------------------------------------------------
@@ -123,7 +98,8 @@ function ThemeSelector({
 type CustomerProfile = { name: string | null; phone: string | null }
 
 export default function ContaTab() {
-  const { session, tenants, activeTenantId, signOut } = useAuth()
+  const { session, tenants, activeTenantId, signOut, selectTenant } = useAuth()
+  const router = useRouter()
   const theme = useTheme()
   const styles = useMemo(() => createStyles(theme), [theme])
   const { preference, setPreference } = useThemePreference()
@@ -132,19 +108,33 @@ export default function ContaTab() {
   const appVersion = Constants.expoConfig?.version ?? '—'
 
   const [profile, setProfile] = useState<CustomerProfile>({ name: null, phone: null })
+  const [tenantPickerOpen, setTenantPickerOpen] = useState(false)
 
   useEffect(() => {
     const userId = session?.user.id
-    if (!userId) return
+    setProfile({ name: null, phone: null })
+    if (!userId || !activeTenantId) return
+    // Um login tem um cadastro em `customers` POR locadora (PRD 0001): só
+    // `user_id` devolve várias linhas para quem é cliente de duas, e o
+    // `.maybeSingle()` falhava — o perfil ficava "—".
     supabase
       .from('customers')
       .select('name, phone')
       .eq('user_id', userId)
+      .eq('tenant_id', activeTenantId)
       .maybeSingle()
       .then(({ data }) => {
         if (data) setProfile({ name: data.name ?? null, phone: data.phone ?? null })
       })
-  }, [session?.user.id])
+  }, [session?.user.id, activeTenantId])
+
+  // As listas já trocam sozinhas (a queryKey leva a locadora); voltar ao Início
+  // descarta o estado local da tela atual, como um Pix gerado na outra locadora.
+  function handleSwitchTenant(tenant: TenantOption) {
+    setTenantPickerOpen(false)
+    if (tenant.id === activeTenantId) return
+    void selectTenant(tenant.id).then(() => router.replace('/'))
+  }
 
   function handleSignOut() {
     Alert.alert('Sair', 'Tem certeza que deseja encerrar a sessão?', [
@@ -153,78 +143,131 @@ export default function ContaTab() {
     ])
   }
 
-  const tenantPhone = formatPhone(activeTenant?.contact_phone)
-  const tenantEmail = activeTenant?.contact_email ?? null
+  // Só o que a locadora cadastrou em Configurações (tenant_contacts). Sem
+  // contato cadastrado, a seção inteira some — o telefone/e-mail gerais da
+  // empresa (tenants.contact_*) não são exibidos ao cliente.
+  const contacts = useTenantContacts().data ?? []
 
   return (
     <SafeAreaView style={styles.safe} edges={['top']}>
-      <View style={styles.header}>
-        <Text style={styles.headerTitle}>Conta</Text>
-      </View>
+      <ScreenHeader title="Conta" />
 
       <ScrollView contentContainerStyle={styles.content}>
+        {/* Perfil */}
+        <Card style={styles.profile}>
+          <View style={styles.avatar}>
+            <Text style={styles.avatarText}>{initials(profile.name)}</Text>
+          </View>
+          <View style={styles.profileBody}>
+            <Text style={styles.profileName} numberOfLines={1}>{profile.name ?? '—'}</Text>
+            {profile.phone ? <Text style={styles.profileMeta}>{profile.phone}</Text> : null}
+            {activeTenant ? (
+              <Text style={styles.profileMeta} numberOfLines={1}>{activeTenant.name}</Text>
+            ) : null}
+          </View>
+        </Card>
 
-        {/* Meu perfil */}
-        <SectionTitle text="Meu perfil" styles={styles} />
-        <View style={styles.card}>
-          <InfoRow label="Nome" value={profile.name ?? '—'} styles={styles} />
-          {profile.phone ? (
-            <InfoRow label="Telefone" value={profile.phone} styles={styles} />
-          ) : null}
-        </View>
-
-        {/* Aparência */}
-        <SectionTitle text="Aparência" styles={styles} />
-        <View style={styles.card}>
-          <ThemeSelector preference={preference} onChange={setPreference} styles={styles} />
-        </View>
-
-        {/* Minha locadora */}
-        {activeTenant ? (
-          <>
-            <SectionTitle text="Minha locadora" styles={styles} />
-            <View style={styles.card}>
-              <InfoRow label="Empresa" value={activeTenant.name} styles={styles} />
-              {tenantPhone ? (
-                <ActionRow
-                  label="WhatsApp"
-                  sublabel={tenantPhone}
-                  onPress={() => openWhatsApp(tenantPhone)}
-                  accent
-                  styles={styles}
-                />
-              ) : null}
-              {tenantEmail ? (
-                <ActionRow
-                  label="E-mail"
-                  sublabel={tenantEmail}
-                  onPress={() => openMail(tenantEmail)}
-                  accent
-                  styles={styles}
-                />
-              ) : null}
-              {!tenantPhone && !tenantEmail ? (
-                <InfoRow label="Contato" value="Não informado" styles={styles} />
-              ) : null}
-            </View>
-          </>
+        {/* Locadora — só para quem é cliente de mais de uma */}
+        {tenants.length > 1 ? (
+          <View style={styles.section}>
+            <SectionHeader title="Locadora" />
+            <Card padded={false}>
+              <ListItem
+                icon="business-outline"
+                label={activeTenant?.name ?? '—'}
+                sublabel="Acessando agora"
+              />
+              <ListItem
+                icon="swap-horizontal-outline"
+                iconTone="neutral"
+                label="Trocar de locadora"
+                onPress={() => setTenantPickerOpen(true)}
+                last
+              />
+            </Card>
+          </View>
         ) : null}
 
-        {/* Sobre */}
-        <SectionTitle text="Sobre o app" styles={styles} />
-        <View style={styles.card}>
-          <InfoRow label="Versão" value={appVersion} styles={styles} />
+        {/* Aparência */}
+        <View style={styles.section}>
+          <SectionHeader title="Aparência" />
+          <SegmentedControl value={preference} options={THEME_OPTIONS} onChange={setPreference} />
         </View>
 
-        {/* Sair */}
-        <Pressable
-          style={({ pressed }) => [styles.signOutBtn, pressed && styles.signOutBtnPressed]}
-          onPress={handleSignOut}
-        >
-          <Text style={styles.signOutText}>Sair da conta</Text>
-        </Pressable>
+        {/* Fale com a locadora — só aparece se a locadora cadastrou contatos */}
+        {contacts.length > 0 ? (
+          <View style={styles.section}>
+            <SectionHeader title="Fale com a locadora" />
+            <Card padded={false}>
+              {contacts.map((contact, index) => (
+                <ListItem
+                  key={contact.id}
+                  icon={contactIcon(contact).icon}
+                  iconTone={contactIcon(contact).tone}
+                  label={contact.label}
+                  sublabel={contactSummary(contact)}
+                  caption={contact.business_hours ? `Atendimento: ${contact.business_hours}` : undefined}
+                  onPress={() => openContact(contact)}
+                  last={index === contacts.length - 1}
+                />
+              ))}
+            </Card>
+          </View>
+        ) : null}
 
+        {/* Sobre + sair */}
+        <View style={styles.section}>
+          <SectionHeader title="Sobre" />
+          <Card padded={false}>
+            <ListItem icon="information-circle-outline" iconTone="neutral" label="Versão do app" value={appVersion} last />
+          </Card>
+        </View>
+
+        <Card padded={false}>
+          <ListItem icon="log-out-outline" label="Sair da conta" onPress={handleSignOut} destructive last />
+        </Card>
       </ScrollView>
+
+      <Modal
+        visible={tenantPickerOpen}
+        animationType="slide"
+        presentationStyle="pageSheet"
+        onRequestClose={() => setTenantPickerOpen(false)}
+      >
+        <SafeAreaView style={styles.safe} edges={['top', 'bottom']}>
+          <ModalHeader
+            title="Escolha a locadora"
+            subtitle="Com qual deseja continuar?"
+            onClose={() => setTenantPickerOpen(false)}
+          />
+          <ScrollView contentContainerStyle={styles.content}>
+            <Card padded={false}>
+              {tenants.map((tenant, i) => {
+                const active = tenant.id === activeTenantId
+                const suspended = !!tenant.suspended_at
+                return (
+                  <ListItem
+                    key={tenant.id}
+                    icon="business-outline"
+                    iconTone={active ? 'primary' : 'neutral'}
+                    label={tenant.name}
+                    sublabel={active ? 'Acessando agora' : suspended ? 'Temporariamente indisponível' : undefined}
+                    trailing={
+                      active ? (
+                        <Icon name="checkmark-circle" size={20} color={theme.primary} />
+                      ) : suspended ? (
+                        <Badge label="Indisponível" size="sm" />
+                      ) : undefined
+                    }
+                    onPress={active || suspended ? undefined : () => handleSwitchTenant(tenant)}
+                    last={i === tenants.length - 1}
+                  />
+                )
+              })}
+            </Card>
+          </ScrollView>
+        </SafeAreaView>
+      </Modal>
     </SafeAreaView>
   )
 }
@@ -238,133 +281,44 @@ const createStyles = (theme: ThemeTokens) => StyleSheet.create({
     flex: 1,
     backgroundColor: theme.bg,
   },
-  header: {
-    paddingHorizontal: 20,
-    paddingTop: 12,
-    paddingBottom: 14,
-    borderBottomColor: theme.surfaceAlt,
-    borderBottomWidth: 1,
-  },
-  headerTitle: {
-    color: theme.text,
-    fontSize: 22,
-    fontWeight: '700',
-  },
   content: {
-    padding: 16,
+    paddingHorizontal: 16,
+    paddingTop: 4,
     paddingBottom: 48,
-    gap: 6,
+    gap: 24,
   },
-  sectionTitle: {
-    color: theme.textMute,
-    fontSize: 11,
+  section: {
+    gap: 10,
+  },
+  profile: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 14,
+  },
+  avatar: {
+    width: 56,
+    height: 56,
+    borderRadius: 28,
+    backgroundColor: theme.brand,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  avatarText: {
+    color: theme.brandText,
+    fontSize: 20,
     fontWeight: '700',
-    letterSpacing: 0.6,
-    textTransform: 'uppercase',
-    marginTop: 16,
-    marginBottom: 4,
-    marginLeft: 2,
   },
-  card: {
-    backgroundColor: theme.surface,
-    borderColor: theme.surfaceAlt,
-    borderWidth: 1,
-    borderRadius: 12,
-    overflow: 'hidden',
-  },
-  infoRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    paddingHorizontal: 14,
-    paddingVertical: 12,
-    borderBottomColor: theme.border,
-    borderBottomWidth: StyleSheet.hairlineWidth,
-  },
-  infoLabel: {
-    color: theme.textMute,
-    fontSize: 13,
-  },
-  infoValue: {
-    color: theme.text,
-    fontSize: 13,
-    fontWeight: '500',
-    maxWidth: '60%',
-    textAlign: 'right',
-  },
-  actionRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingHorizontal: 14,
-    paddingVertical: 12,
-    borderBottomColor: theme.border,
-    borderBottomWidth: StyleSheet.hairlineWidth,
-    gap: 8,
-  },
-  actionRowPressed: {
-    backgroundColor: theme.border,
-  },
-  actionRowLeft: {
+  profileBody: {
     flex: 1,
     gap: 2,
   },
-  actionRowLabel: {
+  profileName: {
     color: theme.text,
-    fontSize: 13,
-    fontWeight: '500',
-  },
-  actionRowLabelAccent: {
-    color: theme.primary,
-  },
-  actionRowSublabel: {
-    color: theme.textMute,
-    fontSize: 12,
-  },
-  actionRowChevron: {
-    color: theme.border,
     fontSize: 18,
+    fontWeight: '700',
   },
-  themeOptions: {
-    flexDirection: 'row',
-    gap: 8,
-    padding: 10,
-  },
-  themeOption: {
-    flex: 1,
-    alignItems: 'center',
-    paddingVertical: 10,
-    borderRadius: 8,
-    backgroundColor: theme.surfaceAlt,
-    borderColor: theme.border,
-    borderWidth: 1,
-  },
-  themeOptionActive: {
-    backgroundColor: theme.primaryTint,
-    borderColor: theme.primary,
-  },
-  themeOptionText: {
+  profileMeta: {
     color: theme.textSoft,
-    fontSize: 13,
-    fontWeight: '600',
-  },
-  themeOptionTextActive: {
-    color: theme.primary,
-  },
-  signOutBtn: {
-    marginTop: 24,
-    borderColor: theme.danger,
-    borderWidth: 1,
-    borderRadius: 12,
-    paddingVertical: 14,
-    alignItems: 'center',
-    backgroundColor: theme.dangerBg,
-  },
-  signOutBtnPressed: {
-    backgroundColor: theme.dangerBg,
-  },
-  signOutText: {
-    color: theme.warning,
-    fontSize: 15,
-    fontWeight: '600',
+    fontSize: 13.5,
   },
 })

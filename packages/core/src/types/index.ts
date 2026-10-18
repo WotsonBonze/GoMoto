@@ -52,8 +52,11 @@ export interface Vehicle {
   year_manufacture: string;
   year_model?: string;
   color: string;
-  renavam: string;
-  chassis: string;
+  /** moto ou carro — ver `VEHICLE_TYPE_LABELS` */
+  vehicle_type: 'motorcycle' | 'car';
+  /** opcional desde o cadastro simplificado */
+  renavam: string | null;
+  chassis: string | null;
   fuel?: string;
   engine_capacity?: string;
   previous_owner?: string;
@@ -236,6 +239,10 @@ export interface Customer {
   emergency_contact?: string | null;
   emergency_contact_name?: string | null;
   emergency_contact_phone?: string | null;
+  emergency_contact_name2?: string | null;
+  emergency_contact_phone2?: string | null;
+  emergency_contact_name3?: string | null;
+  emergency_contact_phone3?: string | null;
   // Endereço estruturado (novos campos)
   street?: string | null;
   street_number?: string | null;
@@ -412,6 +419,14 @@ export interface Rental {
   end_date?: string | null;
   /** @deprecated Use cycle_amount. */
   monthly_amount?: number | null;
+  /** Km do veículo na entrega, congelado na criação (Spec 0014, RF-004). `null` em locação anterior a esta feature. */
+  km_initial?: number | null;
+  /** Km do veículo na devolução, gravado no encerramento (Spec 0014). */
+  km_final?: number | null;
+  /** Multa por rescisão antecipada configurada para esta locação (Spec 0015). `null` = sem multa configurada (RN-003). */
+  early_termination_fine_amount?: number | null;
+  /** Prazo mínimo de vigência, em dias corridos a partir de start_date (Spec 0015, RN-001). `null` = sem prazo mínimo configurado. */
+  minimum_term_days?: number | null;
   status: 'active' | 'closed' | 'transferred';
   observations?: string | null;
   contract_template_id?: string | null;
@@ -445,6 +460,10 @@ export type ErrorCode =
   | 'EXTRACTION_FAILED'
   | 'INTERNAL'
   | 'INTERNAL_ERROR'
+  /** Spec 0016: id de cancelamento opcional fora do plano recarregado no servidor. */
+  | 'TERMINATION_ITEM_NOT_CANDIDATE'
+  /** Spec 0016: cobrança com pagamento ou crédito já aplicado (RN-001). */
+  | 'CHARGE_NOT_ELIGIBLE_FOR_TERMINATION'
 
 export type ActionResult<T> =
   | { ok: true; data: T }

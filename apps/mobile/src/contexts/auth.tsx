@@ -1,5 +1,5 @@
 import type { Session } from '@supabase/supabase-js'
-import { createContext, useContext, useEffect, useState, type ReactNode } from 'react'
+import { createContext, useContext, useEffect, useRef, useState, type ReactNode } from 'react'
 import * as Linking from 'expo-linking'
 import AsyncStorage from '@react-native-async-storage/async-storage'
 import { cpfShellEmail, normalizeCpf, validateCpfDigits } from '@gomoto/core'
@@ -12,6 +12,8 @@ export type TenantOption = {
   suspended_at: string | null
   contact_phone: string | null
   contact_email: string | null
+  /** Nome do cliente no cadastro DESTA locadora (um cadastro por locadora). */
+  customer_name: string | null
 }
 
 type AuthContextValue = {
@@ -35,11 +37,14 @@ const ACTIVE_TENANT_KEY = 'gomoto.activeTenantId'
 async function fetchCustomerTenants(userId: string): Promise<TenantOption[]> {
   // RLS de `customers.user_id = auth.uid()` + read policy nos tenants visíveis pelo
   // próprio link garantem que essa query só devolve tenants em que esse user é cliente.
-  const { data } = await supabase
+  const { data, error } = await supabase
     .from('customers')
-    .select('tenant_id, tenants:tenant_id ( id, name, suspended_at, contact_phone, contact_email )')
+    .select('tenant_id, name, tenants:tenant_id ( id, name, suspended_at, contact_phone, contact_email )')
     .eq('user_id', userId)
 
+  // Erro (rede, 5xx, timeout) precisa subir: devolver [] faria o chamador concluir
+  // "não é cliente" e encerrar a sessão por uma falha que não é do usuário.
+  if (error) throw error
   if (!data) return []
 
   const map = new Map<string, TenantOption>()
@@ -52,6 +57,7 @@ async function fetchCustomerTenants(userId: string): Promise<TenantOption[]> {
         suspended_at: tenant.suspended_at ?? null,
         contact_phone: tenant.contact_phone ?? null,
         contact_email: tenant.contact_email ?? null,
+        customer_name: row.name ?? null,
       })
     }
   }
@@ -76,6 +82,25 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [loading, setLoading] = useState(true)
   const [tenants, setTenants] = useState<TenantOption[]>([])
   const [activeTenantId, setActiveTenantId] = useState<string | null>(null)
+  // Sincronização em andamento/concluída por usuário. O bootstrap e o
+  // INITIAL_SESSION (e o login e o SIGNED_IN) disparam no mesmo instante e
+  // buscavam `customers` duas vezes; agora o segundo reaproveita a promessa.
+  const syncRef = useRef<{ userId: string; promise: Promise<TenantOption[]> } | null>(null)
+
+  function syncTenantsOnce(userId: string | null): Promise<TenantOption[]> {
+    if (!userId) {
+      syncRef.current = null
+      return syncTenantsFor(null)
+    }
+    if (syncRef.current?.userId === userId) return syncRef.current.promise
+    const promise = syncTenantsFor(userId)
+    syncRef.current = { userId, promise }
+    // Falhou: libera para o próximo evento de auth tentar de novo.
+    promise.catch(() => {
+      if (syncRef.current?.promise === promise) syncRef.current = null
+    })
+    return promise
+  }
 
   // Carrega tenants do cliente e resolve qual fica ativo. Chamada após cada
   // mudança de session (login, logout, refresh via magic link).
@@ -86,10 +111,18 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       await AsyncStorage.removeItem(ACTIVE_TENANT_KEY)
       return []
     }
-    const list = await fetchCustomerTenants(userId)
+    const stored = await AsyncStorage.getItem(ACTIVE_TENANT_KEY)
+    let list: TenantOption[]
+    try {
+      list = await fetchCustomerTenants(userId)
+    } catch (err) {
+      // Falha transitória: mantém a última locadora escolhida neste aparelho para
+      // o app seguir utilizável; o próximo evento de auth tenta sincronizar de novo.
+      if (stored) setActiveTenantId(stored)
+      throw err
+    }
     setTenants(list)
 
-    const stored = await AsyncStorage.getItem(ACTIVE_TENANT_KEY)
     if (list.length === 1) {
       // Único tenant — entra direto. Sobrescreve qualquer escolha antiga inválida.
       setActiveTenantId(list[0].id)
@@ -104,32 +137,57 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }
 
   useEffect(() => {
-    supabase.auth.getSession().then(async ({ data }) => {
-      if (data.session) {
-        const list = await syncTenantsFor(data.session.user.id)
-        if (list.length === 0) {
-          // Não é cliente em nenhum tenant — encerra a sessão.
-          await supabase.auth.signOut()
-          setSession(null)
-        } else {
-          setSession(data.session)
+    // try/finally: qualquer falha no bootstrap (rede, RLS, storage) precisa
+    // soltar o gate de loading — senão o app fica preso no spinner.
+    ;(async () => {
+      try {
+        const { data } = await supabase.auth.getSession()
+        if (data.session) {
+          let list: TenantOption[] | null = null
+          try {
+            list = await syncTenantsOnce(data.session.user.id)
+          } catch (err) {
+            // Não deu para confirmar o vínculo — isso não é o mesmo que "não é
+            // cliente". Mantém a sessão em vez de deslogar.
+            console.warn('[auth] falha ao carregar locadoras na abertura', err)
+          }
+          if (list && list.length === 0) {
+            // Confirmado: não é cliente em nenhum tenant — encerra a sessão deste aparelho.
+            await supabase.auth.signOut({ scope: 'local' })
+            setSession(null)
+          } else {
+            setSession(data.session)
+          }
         }
+      } catch (err) {
+        console.warn('[auth] falha ao restaurar sessão', err)
+      } finally {
+        setLoading(false)
       }
-      setLoading(false)
-    })
+    })()
 
     Linking.getInitialURL().then(consumeAuthCallback)
     const linkingSub = Linking.addEventListener('url', (event) => {
       void consumeAuthCallback(event.url)
     })
 
-    const { data: sub } = supabase.auth.onAuthStateChange(async (_event, next) => {
+    // O callback NÃO pode aguardar chamadas ao supabase: o auth-js aguarda os
+    // subscribers dentro do initialize(). Ao abrir o app com o access token
+    // vencido, o initialize() faz refresh e emite TOKEN_REFRESHED; se o callback
+    // aguardar uma query, a query chama getSession(), que aguarda o initialize(),
+    // que aguarda o callback → deadlock e spinner infinito (na 2ª abertura o
+    // token já foi renovado e salvo, por isso "funcionava"). O setTimeout tira
+    // o trabalho de dentro do ciclo de notificação, como a doc do Supabase manda.
+    const { data: sub } = supabase.auth.onAuthStateChange((event, next) => {
       setSession(next)
-      if (next?.user) {
-        await syncTenantsFor(next.user.id)
-      } else {
-        await syncTenantsFor(null)
-      }
+      // Renovação de token (~1 h) é a deixa para reler as locadoras — é assim
+      // que uma suspensa ou recém-adicionada aparece sem reabrir o app.
+      if (event === 'TOKEN_REFRESHED') syncRef.current = null
+      setTimeout(() => {
+        syncTenantsOnce(next?.user?.id ?? null).catch((err) => {
+          console.warn('[auth] falha ao sincronizar tenants', err)
+        })
+      }, 0)
     })
 
     return () => {
@@ -154,9 +212,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     if (error) return { error: 'CPF ou senha incorretos.' }
 
     if (data.user) {
-      const list = await syncTenantsFor(data.user.id)
+      let list: TenantOption[]
+      try {
+        list = await syncTenantsOnce(data.user.id)
+      } catch {
+        await supabase.auth.signOut({ scope: 'local' })
+        return { error: 'Não foi possível carregar sua conta. Verifique a conexão e tente de novo.' }
+      }
       if (list.length === 0) {
-        await supabase.auth.signOut()
+        await supabase.auth.signOut({ scope: 'local' })
         return { error: NOT_A_CUSTOMER_ERROR }
       }
     }
@@ -164,9 +228,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     return { error: null }
   }
 
+  // scope 'local': o padrão do auth-js é 'global', que revogaria a sessão do
+  // cliente em todos os aparelhos ao sair de um só.
   async function signOut() {
-    await supabase.auth.signOut()
-    await syncTenantsFor(null)
+    await supabase.auth.signOut({ scope: 'local' })
+    await syncTenantsOnce(null)
   }
 
   async function setPassword(password: string) {

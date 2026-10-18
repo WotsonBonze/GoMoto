@@ -8,8 +8,16 @@
 // Constantes
 // ---------------------------------------------------------------------------
 
-export const CONTRACT_TERMINATION_FINE_BRL = 1000
-
+/**
+ * Spec 0015: NÃO usar para calcular a multa por rescisão antecipada — desde
+ * essa Spec, multa e prazo mínimo são configuráveis por locação
+ * (`rentals.early_termination_fine_amount`/`minimum_term_days`, ver
+ * `isWithinConfiguredMinimumTerm`). Esta constante segue existindo só para a
+ * elegibilidade de transferência de propriedade do `rent_to_own` (o
+ * encerramento vira `status='transferred'` em vez de `'closed'` quando o
+ * cliente já pagou os 2 anos) — uma regra alheia à multa, que este PRD nunca
+ * pediu para mudar.
+ */
 export const RENTAL_MINIMUM_DURATION = {
   rental:      { months: 3 },
   rent_to_own: { years: 2 },
@@ -107,9 +115,58 @@ export function isParseableIsoDate(isoDate: string | null | undefined): boolean 
   return d.getFullYear() === y && d.getMonth() + 1 === m && d.getDate() === day
 }
 
+/**
+ * Último dia de uso coberto por um período de ciclo, para EXIBIÇÃO.
+ *
+ * `period_end` é a fronteira EXCLUSIVA do período — o mesmo valor do
+ * `due_date`, e é isso que faz uma linha do cronograma encaixar com a
+ * seguinte sem buraco (`period_end` de uma linha = `period_start` da
+ * próxima; mesma convenção `[início, fim)` da ADR 0036 para o período da
+ * locação inteira). Mostrar esse valor cru como "fim do período" ao lado de
+ * uma coluna "Vencimento" repete a mesma data duas vezes: um ciclo semanal
+ * de 23/12 a 30/12 cobra 7 dias (23 a 29) — o dia 30 é o instante em que o
+ * ciclo seguinte começa, não um dia a mais sendo cobrado.
+ *
+ * Só para texto. Nunca usar o resultado em cálculo ou em gravação — todo o
+ * encaixe de períodos depende de `period_end` continuar exclusivo.
+ */
+export function displayPeriodEnd(periodEndIso: string): string {
+  const d = parseIsoDate(periodEndIso)
+  d.setDate(d.getDate() - 1)
+  return formatIsoDate(d)
+}
+
+// ---------------------------------------------------------------------------
+// Registro de KM (Spec 0014)
+// ---------------------------------------------------------------------------
+
+/** RN-002 + RN-003: piso do km final — o maior entre o km atual do veículo e o km inicial da locação. */
+export function minimumFinalKm(vehicleKmCurrent: number, rentalKmInitial: number): number {
+  return Math.max(vehicleKmCurrent, rentalKmInitial)
+}
+
 // ---------------------------------------------------------------------------
 // Vigência de locações
 // ---------------------------------------------------------------------------
+
+/**
+ * Dois períodos de locação se cruzam? (ADR 0036)
+ *
+ * Mesma semântica do trigger `trg_rentals_vehicle_period`, que é quem vale —
+ * esta existe para a prévia avisar antes do clique. Período é `[início, fim)`:
+ * devolver e retirar a moto no MESMO dia não é sobreposição. Fim nulo é
+ * contrato em aberto, que ocupa tudo dali em diante. Fim anterior ao início
+ * (locação encerrada antes de começar) é período vazio, que não ocupa nada.
+ */
+export function rentalPeriodsOverlap(
+  aStart: string, aEnd: string | null,
+  bStart: string, bEnd: string | null,
+): boolean {
+  const aUpper = aEnd === null ? null : (aEnd > aStart ? aEnd : aStart)
+  const bUpper = bEnd === null ? null : (bEnd > bStart ? bEnd : bStart)
+  if (aUpper === aStart || bUpper === bStart) return false
+  return (bUpper === null || aStart < bUpper) && (aUpper === null || bStart < aUpper)
+}
 
 /** Data mínima de encerramento sem multa para o tipo de locação. */
 export function calculateMinimumEndDate(
@@ -234,8 +291,12 @@ function makeCycleDescription(
 ): string {
   const isProRata = Math.abs(amount - cycleAmount) > 0.01
   if (cycle === 'weekly') {
+    // periodEnd é o vencimento (fronteira exclusiva) — o último dia de uso é
+    // o dia anterior. Ver `displayPeriodEnd`.
+    const lastUsageDay = new Date(periodEnd)
+    lastUsageDay.setDate(lastUsageDay.getDate() - 1)
     const prefix = isProRata ? 'Aluguel proporcional' : 'Aluguel semanal'
-    return `${prefix} — ${fmtDay(periodStart)} a ${fmtDay(periodEnd)}`
+    return `${prefix} — ${fmtDay(periodStart)} a ${fmtDay(lastUsageDay)}`
   }
   const mon    = MONTHS_PT[periodEnd.getMonth()]!
   const year   = periodEnd.getFullYear()
@@ -370,6 +431,18 @@ export function generateCycleCharges(input: CycleChargeInput): CycleCharge[] {
     for (let i = 0; i < dueDates.length; i++) {
       const due = dueDates[i]!
       const periodStart = i === 0 ? start : dueDates[i - 1]!
+
+      // Período de duração zero não é ciclo, é artefato.
+      //
+      // Quando o contrato começa NO próprio dia de vencimento, `firstDueDate`
+      // devolve a data de início, e a primeira volta do laço montava
+      // `periodStart === periodEnd` cobrando o ciclo cheio. Um contrato mensal
+      // de 10/10 a 10/03 com vencimento dia 10 saía com 6 cobranças de R$ 600
+      // em vez de 5 — R$ 600 a mais, num arranjo trivial ("vence todo dia 10,
+      // começou dia 10"). O ramo com pro rata nunca teve o defeito: lá as
+      // fronteiras já descartam o vencimento que coincide com o início.
+      if (due.getTime() <= periodStart.getTime()) continue
+
       charges.push({
         due_date:     formatIsoDate(due),
         amount:       input.cycle_amount,
@@ -449,26 +522,52 @@ export function generateCycleCharges(input: CycleChargeInput): CycleCharge[] {
 // EarlyTerminationImpact
 // ---------------------------------------------------------------------------
 
+/**
+ * Spec 0015: multa e prazo mínimo por rescisão antecipada são configuráveis
+ * por locação — `null`/`undefined` em qualquer um dos dois significa "sem
+ * configuração" (RN-003: nunca exibe nem cobra). Independente de
+ * `isRentalTerminationWithinMinimum` (que segue servindo só à elegibilidade
+ * de transferência do `rent_to_own`, ver comentário de `RENTAL_MINIMUM_DURATION`).
+ */
+export function isWithinConfiguredMinimumTerm(
+  input: { start_date: string; minimum_term_days: number | null | undefined },
+  today: Date = new Date(),
+): boolean {
+  if (input.minimum_term_days == null) return false
+
+  const todayMidnight = new Date(today)
+  todayMidnight.setHours(0, 0, 0, 0)
+
+  const start = parseIsoDate(input.start_date)
+  const minEnd = new Date(start)
+  minEnd.setDate(minEnd.getDate() + input.minimum_term_days)
+
+  return todayMidnight < minEnd
+}
+
 export interface EarlyTerminationImpact {
   /** Cobranças pendentes com due_date < today (permanecerão abertas). */
   overdue_count: number
   /** Cobranças pendentes com due_date >= today (serão canceladas). */
   future_count: number
-  /** Encerramento dentro da vigência mínima (multa aplicável). */
+  /** Encerramento dentro do prazo mínimo configurado (multa aplicável). */
   within_minimum: boolean
-  /** Valor da multa (R$ 1.000 se within_minimum, 0 caso contrário). */
+  /** Valor da multa configurada na locação, ou 0 se não aplicável/configurada. */
   fine_amount: number
 }
 
 /**
  * Calcula o impacto do encerramento antecipado de uma locação.
- * Usado pelo UI antes da confirmação (RF-037, RF-039).
+ * Usado pelo UI antes da confirmação (RF-003). A elegibilidade e o valor
+ * finais são sempre recalculados de novo no banco (`terminate_rental`,
+ * Spec 0015) — este cálculo é só para feedback instantâneo, nunca fonte de
+ * verdade.
  */
 export function getEarlyTerminationImpact(
   charges: Array<{ due_date: string; status: string }>,
   today: Date,
   startDate: string,
-  rentalType: RentalType = 'rental',
+  fineConfig: { early_termination_fine_amount?: number | null; minimum_term_days?: number | null },
 ): EarlyTerminationImpact {
   const todayMidnight = new Date(today)
   todayMidnight.setHours(0, 0, 0, 0)
@@ -483,16 +582,18 @@ export function getEarlyTerminationImpact(
     c => parseIsoDate(c.due_date).getTime() >= todayMidnight.getTime(),
   ).length
 
-  const within_minimum = isRentalTerminationWithinMinimum(
-    { start_date: startDate, rental_type: rentalType },
+  const within_minimum = isWithinConfiguredMinimumTerm(
+    { start_date: startDate, minimum_term_days: fineConfig.minimum_term_days },
     today,
   )
+
+  const hasFineConfigured = fineConfig.early_termination_fine_amount != null
 
   return {
     overdue_count,
     future_count,
     within_minimum,
-    fine_amount: within_minimum ? CONTRACT_TERMINATION_FINE_BRL : 0,
+    fine_amount: within_minimum && hasFineConfigured ? fineConfig.early_termination_fine_amount! : 0,
   }
 }
 
@@ -501,6 +602,10 @@ export function getEarlyTerminationImpact(
 // ---------------------------------------------------------------------------
 
 /**
+ * @deprecated Desde a ADR 0024 o reajuste não reescreve documento emitido: ele
+ * altera linhas `scheduled` do cronograma, que já carregam o valor do ciclo.
+ * Sem chamadores desde a Spec 0014.
+ *
  * Recalcula o valor de uma cobrança pendente ao reajustar o ciclo (RN-027).
  * Cobranças de valor cheio escalam 1:1; cobranças pro rata mantêm a mesma
  * fração do novo valor (ex.: 60% do ciclo antigo vira 60% do ciclo novo).
@@ -545,6 +650,11 @@ export function previewRentalAdjustment(
 // ---------------------------------------------------------------------------
 
 /**
+ * @deprecated Desde a ADR 0035, quem decide o corte é `planPeriodAdjustment`
+ * (`rules/schedule.ts`), que trabalha sobre `rental_billing_schedules` e sobre
+ * as cobranças emitidas. Esta versão fala a linguagem de `billings`, tabela que
+ * a Spec 0014 derrubou — nenhum chamador restou.
+ *
  * Ponto de corte para regenerar o cronograma: a due_date mais recente entre
  * as cobranças "travadas" (pagas, canceladas, prejuízo, ou pendentes cuja
  * due_date já passou — vencida na prática, mesmo com status='pending' no

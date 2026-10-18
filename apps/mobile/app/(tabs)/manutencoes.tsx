@@ -1,7 +1,6 @@
 import { useMemo, useState } from 'react'
 import {
   ActivityIndicator,
-  Pressable,
   RefreshControl,
   ScrollView,
   StyleSheet,
@@ -26,6 +25,20 @@ import {
 import { useAuth } from '../../src/contexts/auth'
 import { RegisterMaintenanceModal } from '../../src/components/RegisterMaintenanceModal'
 import { useTheme, useStatusBarStyle, type ThemeTokens } from '../../src/theme'
+import {
+  Badge,
+  Button,
+  Card,
+  EmptyState,
+  Icon,
+  IconCircle,
+  Notice,
+  ScreenHeader,
+  SegmentedControl,
+  radius,
+  type IconName,
+  type Tone,
+} from '../../src/components/ui'
 
 const STATUS_ORDER: Record<MaintenanceStatus, number> = {
   overdue: 0,
@@ -41,16 +54,12 @@ const STATUS_LABEL: Record<MaintenanceStatus, string> = {
   completed: 'Concluída',
 }
 
-function getStatusTone(theme: ThemeTokens): Record<MaintenanceStatus, { bg: string; fg: string }> {
-  return {
-    overdue: { bg: theme.dangerBg, fg: theme.danger },
-    upcoming: { bg: theme.pendingBg, fg: theme.pending },
-    scheduled: { bg: theme.successBg, fg: theme.success },
-    completed: { bg: theme.surfaceAlt, fg: theme.textMute },
-  }
+const STATUS_TONE: Record<MaintenanceStatus, Tone> = {
+  overdue: 'danger',
+  upcoming: 'pending',
+  scheduled: 'primary',
+  completed: 'success',
 }
-
-type StatusTone = ReturnType<typeof getStatusTone>
 
 const TYPE_LABEL: Record<string, string> = {
   preventive: 'Preventiva',
@@ -88,10 +97,10 @@ export default function ManutencoesTab() {
   const customersQuery = useCustomers()
 
   const [selected, setSelected] = useState<Maintenance | null>(null)
+  const [tab, setTab] = useState<'upcoming' | 'history'>('upcoming')
   const theme = useTheme()
   const statusBarStyle = useStatusBarStyle()
   const styles = useMemo(() => createStyles(theme), [theme])
-  const statusTone = useMemo(() => getStatusTone(theme), [theme])
 
   const loading =
     maintenancesQuery.isLoading || vehiclesQuery.isLoading || customersQuery.isLoading
@@ -144,10 +153,7 @@ export default function ManutencoesTab() {
   return (
     <SafeAreaView style={styles.safe} edges={['top']}>
       <StatusBar style={statusBarStyle} />
-      <View style={styles.header}>
-        <Text style={styles.title}>Manutenções</Text>
-        <Text style={styles.subtitle}>Próximas e histórico do seu veículo</Text>
-      </View>
+      <ScreenHeader title="Manutenção" />
       <ScrollView
         style={styles.body}
         contentContainerStyle={styles.bodyContent}
@@ -163,51 +169,64 @@ export default function ManutencoesTab() {
           />
         }
       >
+        <SegmentedControl
+          value={tab}
+          onChange={setTab}
+          options={[
+            { value: 'upcoming', label: 'Próximas', count: upcoming.length },
+            { value: 'history', label: 'Histórico' },
+          ]}
+        />
+
         {loading ? (
           <View style={styles.loading}>
             <ActivityIndicator color={theme.primary} />
           </View>
         ) : error ? (
-          <View style={styles.errorCard}>
-            <Text style={styles.errorText}>Não foi possível carregar agora. Puxe pra baixo para tentar de novo.</Text>
-          </View>
+          <Notice
+            tone="danger"
+            icon="cloud-offline-outline"
+            title="Não foi possível carregar"
+            text="Puxe a tela para baixo para tentar de novo."
+          />
+        ) : tab === 'upcoming' ? (
+          upcoming.length === 0 ? (
+            <EmptyState
+              icon="shield-checkmark-outline"
+              tone="success"
+              title="Tudo em dia"
+              text="Nenhuma manutenção pendente — seu veículo está em dia."
+            />
+          ) : (
+            upcoming.map((m) => (
+              <MaintenanceCard
+                key={m.id}
+                item={m}
+                vehicle={vehiclesById.get(m.vehicle_id)}
+                pendingRecord={pendingByMaintenanceId.get(m.id)}
+                canRegister={!!customerId}
+                onRegister={() => setSelected(m)}
+                styles={styles}
+                theme={theme}
+              />
+            ))
+          )
+        ) : history.length === 0 ? (
+          <EmptyState
+            icon="time-outline"
+            title="Sem histórico ainda"
+            text="As manutenções concluídas do seu veículo aparecem aqui."
+          />
         ) : (
-          <>
-            <Section title={`Próximas (${upcoming.length})`} styles={styles}>
-              {upcoming.length === 0 ? (
-                <EmptyCard text="Nenhuma manutenção pendente — seu veículo está em dia." styles={styles} />
-              ) : (
-                upcoming.map((m) => (
-                  <MaintenanceCard
-                    key={m.id}
-                    item={m}
-                    vehicle={vehiclesById.get(m.vehicle_id)}
-                    pendingRecord={pendingByMaintenanceId.get(m.id)}
-                    canRegister={!!customerId}
-                    onRegister={() => setSelected(m)}
-                    styles={styles}
-                    statusTone={statusTone}
-                  />
-                ))
-              )}
-            </Section>
-
-            <Section title={`Histórico (${history.length})`} styles={styles}>
-              {history.length === 0 ? (
-                <EmptyCard text="Nenhuma manutenção concluída ainda." styles={styles} />
-              ) : (
-                history.map((m) => (
-                  <MaintenanceCard
-                    key={m.id}
-                    item={m}
-                    vehicle={vehiclesById.get(m.vehicle_id)}
-                    styles={styles}
-                    statusTone={statusTone}
-                  />
-                ))
-              )}
-            </Section>
-          </>
+          history.map((m) => (
+            <MaintenanceCard
+              key={m.id}
+              item={m}
+              vehicle={vehiclesById.get(m.vehicle_id)}
+              styles={styles}
+              theme={theme}
+            />
+          ))
         )}
       </ScrollView>
       {customerId ? (
@@ -222,23 +241,6 @@ export default function ManutencoesTab() {
   )
 }
 
-function Section({ title, children, styles }: { title: string; children: React.ReactNode; styles: Styles }) {
-  return (
-    <View style={styles.section}>
-      <Text style={styles.sectionTitle}>{title}</Text>
-      <View style={styles.sectionBody}>{children}</View>
-    </View>
-  )
-}
-
-function EmptyCard({ text, styles }: { text: string; styles: Styles }) {
-  return (
-    <View style={styles.emptyCard}>
-      <Text style={styles.emptyText}>{text}</Text>
-    </View>
-  )
-}
-
 function MaintenanceCard({
   item,
   vehicle,
@@ -246,7 +248,7 @@ function MaintenanceCard({
   canRegister,
   onRegister,
   styles,
-  statusTone,
+  theme,
 }: {
   item: MaintenanceWithStatus
   vehicle?: Vehicle
@@ -254,59 +256,79 @@ function MaintenanceCard({
   canRegister?: boolean
   onRegister?: () => void
   styles: Styles
-  statusTone: StatusTone
+  theme: ThemeTokens
 }) {
-  const tone = statusTone[item._status]
+  const tone = STATUS_TONE[item._status]
   const isOpen = item._status !== 'completed'
   const showRegisterCta = isOpen && !pendingRecord && canRegister && onRegister
   return (
-    <View style={styles.card}>
+    <Card style={item._status === 'overdue' ? { borderColor: theme.danger } : undefined}>
       <View style={styles.cardHeader}>
-        <Text style={styles.cardTitle} numberOfLines={1}>
-          {item.description || TYPE_LABEL[item.type] || item.type}
-        </Text>
-        <View style={[styles.statusPill, { backgroundColor: tone.bg }]}>
-          <Text style={[styles.statusText, { color: tone.fg }]}>{STATUS_LABEL[item._status]}</Text>
+        <IconCircle name={isOpen ? 'construct-outline' : 'checkmark-done'} tone={tone} />
+        <View style={styles.cardTitles}>
+          <Text style={styles.cardTitle} numberOfLines={2}>
+            {item.description || TYPE_LABEL[item.type] || item.type}
+          </Text>
+          <Text style={styles.cardMeta} numberOfLines={1}>
+            {vehicle ? `${vehicle.license_plate} · ${vehicle.make} ${vehicle.model}` : 'Veículo não identificado'}
+          </Text>
         </View>
+        <Badge label={STATUS_LABEL[item._status]} tone={tone} size="sm" />
       </View>
-      <Text style={styles.cardMeta}>
-        {vehicle ? `${vehicle.license_plate} — ${vehicle.make} ${vehicle.model}` : 'Veículo não identificado'}
-      </Text>
+
       <View style={styles.cardFields}>
         {item._status === 'completed' ? (
           <>
-            <Field label="Concluída em" value={formatDate(item.completed_date)} styles={styles} />
-            <Field label="KM no serviço" value={formatKm(item.actual_km)} styles={styles} />
+            <Field icon="calendar-outline" label="Concluída em" value={formatDate(item.completed_date)} styles={styles} theme={theme} />
+            <Field icon="speedometer-outline" label="KM no serviço" value={formatKm(item.actual_km)} styles={styles} theme={theme} />
           </>
         ) : (
           <>
-            <Field label="Prevista" value={formatDate(item.scheduled_date)} styles={styles} />
-            <Field label="KM previsto" value={formatKm(item.predicted_km)} styles={styles} />
+            <Field icon="calendar-outline" label="Prevista" value={formatDate(item.scheduled_date)} styles={styles} theme={theme} />
+            <Field icon="speedometer-outline" label="KM previsto" value={formatKm(item.predicted_km)} styles={styles} theme={theme} />
           </>
         )}
       </View>
+
       {isOpen && pendingRecord ? (
-        <View style={styles.pendingPill}>
-          <Text style={styles.pendingText}>Aguardando aprovação da locadora</Text>
+        <View style={styles.cardFooter}>
+          <Notice tone="pending" icon="hourglass-outline" text="Conclusão enviada — aguardando aprovação da locadora." />
         </View>
       ) : null}
       {showRegisterCta ? (
-        <Pressable
-          style={({ pressed }) => [styles.registerBtn, pressed && styles.registerBtnPressed]}
+        <Button
+          label="Registrar conclusão"
+          icon="checkmark-circle-outline"
+          variant={item._status === 'overdue' ? 'primary' : 'secondary'}
+          size="md"
           onPress={onRegister}
-        >
-          <Text style={styles.registerText}>Registrar conclusão</Text>
-        </Pressable>
+          style={styles.cardFooter}
+        />
       ) : null}
-    </View>
+    </Card>
   )
 }
 
-function Field({ label, value, styles }: { label: string; value: string; styles: Styles }) {
+function Field({
+  icon,
+  label,
+  value,
+  styles,
+  theme,
+}: {
+  icon: IconName
+  label: string
+  value: string
+  styles: Styles
+  theme: ThemeTokens
+}) {
   return (
     <View style={styles.field}>
-      <Text style={styles.fieldLabel}>{label}</Text>
-      <Text style={styles.fieldValue}>{value}</Text>
+      <Icon name={icon} size={16} color={theme.textMute} />
+      <View>
+        <Text style={styles.fieldLabel}>{label}</Text>
+        <Text style={styles.fieldValue}>{value}</Text>
+      </View>
     </View>
   )
 }
@@ -315,80 +337,23 @@ type Styles = ReturnType<typeof createStyles>
 
 const createStyles = (theme: ThemeTokens) => StyleSheet.create({
   safe: { flex: 1, backgroundColor: theme.bg },
-  header: {
-    paddingHorizontal: 20,
-    paddingTop: 12,
-    paddingBottom: 16,
-    borderBottomColor: theme.border,
-    borderBottomWidth: 1,
-  },
-  title: { color: theme.text, fontSize: 22, fontWeight: '700' },
-  subtitle: { color: theme.textMute, fontSize: 13, marginTop: 2 },
   body: { flex: 1 },
-  bodyContent: { padding: 20, paddingBottom: 40 },
+  bodyContent: { paddingHorizontal: 16, paddingTop: 4, paddingBottom: 40, gap: 14 },
   loading: { paddingVertical: 40, alignItems: 'center' },
-  errorCard: {
-    backgroundColor: theme.dangerBg,
-    borderRadius: 12,
-    padding: 16,
-  },
-  errorText: { color: theme.danger, fontSize: 13 },
-  section: { marginBottom: 24 },
-  sectionTitle: {
-    color: theme.textMute,
-    fontSize: 12,
-    fontWeight: '700',
-    letterSpacing: 0.5,
-    marginBottom: 10,
-    textTransform: 'uppercase',
-  },
-  sectionBody: { gap: 10 },
-  emptyCard: {
-    backgroundColor: theme.surface,
-    borderColor: theme.border,
-    borderWidth: 1,
-    borderRadius: 12,
-    padding: 16,
-  },
-  emptyText: { color: theme.textMute, fontSize: 13 },
-  card: {
-    backgroundColor: theme.surface,
-    borderColor: theme.border,
-    borderWidth: 1,
-    borderRadius: 12,
-    padding: 14,
-  },
-  cardHeader: {
+  cardHeader: { flexDirection: 'row', alignItems: 'flex-start', gap: 12 },
+  cardTitles: { flex: 1, gap: 2 },
+  cardTitle: { color: theme.text, fontSize: 15, fontWeight: '600' },
+  cardMeta: { color: theme.textSoft, fontSize: 13 },
+  cardFields: {
     flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    gap: 8,
-    marginBottom: 6,
+    gap: 12,
+    marginTop: 14,
+    backgroundColor: theme.surfaceAlt,
+    borderRadius: radius.md,
+    padding: 12,
   },
-  cardTitle: { color: theme.text, fontSize: 14, fontWeight: '600', flex: 1 },
-  cardMeta: { color: theme.textMute, fontSize: 12, marginBottom: 10 },
-  cardFields: { flexDirection: 'row', gap: 16 },
-  field: { flex: 1 },
-  fieldLabel: { color: theme.textMute, fontSize: 11 },
-  fieldValue: { color: theme.text, fontSize: 13, marginTop: 2 },
-  statusPill: { paddingHorizontal: 10, paddingVertical: 3, borderRadius: 999 },
-  statusText: { fontSize: 11, fontWeight: '700', letterSpacing: 0.3 },
-  pendingPill: {
-    marginTop: 12,
-    backgroundColor: theme.pendingBg,
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    borderRadius: 8,
-    alignSelf: 'flex-start',
-  },
-  pendingText: { color: theme.pending, fontSize: 12, fontWeight: '600' },
-  registerBtn: {
-    marginTop: 12,
-    backgroundColor: theme.primary,
-    paddingVertical: 10,
-    borderRadius: 8,
-    alignItems: 'center',
-  },
-  registerBtnPressed: { opacity: 0.85 },
-  registerText: { color: theme.primaryContrast, fontSize: 13, fontWeight: '700' },
+  field: { flex: 1, flexDirection: 'row', alignItems: 'center', gap: 8 },
+  fieldLabel: { color: theme.textMute, fontSize: 11.5 },
+  fieldValue: { color: theme.text, fontSize: 14, fontWeight: '600', marginTop: 1 },
+  cardFooter: { marginTop: 12 },
 })

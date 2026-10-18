@@ -677,13 +677,13 @@ Lista de `maintenance_records` do cliente:
     - Mas existe contract_maintenance_rule: categoria='oil', executor='customer', customer_payer_pct=100
     - Resolução: como categoria bate, override aplica → executor='customer', payer=100%
     - Mas operador notou que hoje a empresa pagou e levou: clica chip "Empresa 100%" e troca executor pra "Empresa"
-  Operador preenche: KM=21030, custo=R$ 60, oficina="Oficina do Careca", fotos
+  Operador preenche: KM=21030, custo=R$ 60, oficina="Oficina Central", fotos
   Salvar
 
 [Server Action]
   UPDATE maintenances SET
     completed=true, actual_km=21030, completed_date=hoje, cost=60,
-    workshop="Oficina do Careca",
+    workshop="Oficina Central",
     effective_executor='company', effective_customer_payer_pct=0
   INSERT maintenances (predicted_km=22030)
   UPDATE motorcycles SET km_current=21030

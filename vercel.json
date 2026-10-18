@@ -2,5 +2,11 @@
   "framework": "nextjs",
   "buildCommand": "pnpm build --filter=web",
   "outputDirectory": "apps/web/.next",
-  "installCommand": "pnpm install"
+  "installCommand": "pnpm install",
+  "crons": [
+    {
+      "path": "/api/cron/drain-gateway-events",
+      "schedule": "0 10 * * *"
+    }
+  ]
 }

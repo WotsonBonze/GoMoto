@@ -313,7 +313,7 @@ export function Sidebar() {
             <Bike className="w-3.5 h-3.5 text-primary-contrast" />
           </div>
           {expanded && (
-            <span className="text-fg text-[14px] font-bold whitespace-nowrap">GoMoto</span>
+            <span className="text-fg text-[14px] font-bold whitespace-nowrap">Locaw</span>
           )}
         </Link>
         <button

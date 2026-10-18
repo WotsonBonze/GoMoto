@@ -16,7 +16,23 @@ import { logAction } from '@/lib/audit'
 import { getCurrentTenantId } from '@/lib/auth/tenant'
 import { recordStatusTransition } from '@/lib/vehicle-status-history'
 import { saveVehicleObligations as saveObligations } from '@/lib/financial/vehicle-obligation'
-import { canChangeStatus } from '@gomoto/core'
+import { canChangeStatus, isVehicleModelYearCoherent, resolveKmEntryUpdate } from '@gomoto/core'
+
+/**
+ * Placa, RENAVAM e chassi são únicos por tenant. O nome da constraint vem na
+ * mensagem do Postgres (`vehicles_tenant_<campo>_key`) — é daí que sai o campo
+ * para o form abrir a seção certa e marcar o input.
+ */
+const UNIQUE_FIELD_MESSAGES: Record<string, string> = {
+  license_plate: 'Esta placa já está cadastrada.',
+  renavam:       'Este RENAVAM já está cadastrado em outro veículo.',
+  chassis:       'Este chassi já está cadastrado em outro veículo.',
+}
+function uniqueViolation(error: { code?: string; message: string }) {
+  if (error.code !== '23505') return null
+  const field = Object.keys(UNIQUE_FIELD_MESSAGES).find((f) => error.message.includes(`vehicles_tenant_${f}_key`))
+  return field ? { code: 'VALIDATION_ERROR' as const, message: UNIQUE_FIELD_MESSAGES[field], field } : null
+}
 
 async function getAuthenticatedContext() {
   const supabase = await createClient()
@@ -58,12 +74,8 @@ export async function createVehicle(
     .single()
 
   if (insertError) {
-    if (insertError.code === '23505' && insertError.message.includes('license_plate')) {
-      return {
-        ok: false,
-        error: { code: 'VALIDATION_ERROR', message: 'Esta placa já está cadastrada.', field: 'license_plate' },
-      }
-    }
+    const duplicate = uniqueViolation(insertError)
+    if (duplicate) return { ok: false, error: duplicate }
     // A mensagem do banco vai junto: engolir o motivo já custou horas de
     // depuração num bug idêntico no cadastro de multas. Se o insert quebra por
     // coluna removida ou constraint, quem está na tela precisa ver o quê.
@@ -154,8 +166,21 @@ export async function updateVehicle(
     }
   }
 
-  // km_entry é imutável (RF-015) — ignorar mesmo se enviado
-  const { km_entry: _ignored, ...updateData } = parsed.data
+  // km_entry é gravado uma vez só (RN-010): aceito enquanto o veículo não tem
+  // KM de entrada; depois disso, descartado. O trigger vehicles_km_entry_guard
+  // garante o mesmo no banco.
+  const { km_entry: requestedKmEntry, ...rest } = parsed.data
+  const kmEntry = resolveKmEntryUpdate(current.km_entry, requestedKmEntry)
+  const updateData = kmEntry !== undefined ? { ...rest, km_entry: kmEntry } : rest
+
+  // O refine de coerência dos anos vive em VehicleSchema, que `.partial()` não
+  // carrega — sem esta checagem a edição aceitaria 2025/2023.
+  if (!isVehicleModelYearCoherent(updateData.year_manufacture, updateData.year_model)) {
+    return {
+      ok: false,
+      error: { code: 'VALIDATION_ERROR', message: 'Ano modelo deve ser igual ao ano de fabricação ou o seguinte', field: 'year_model' },
+    }
+  }
 
   // Se moto está Locada, status não pode ser alterado (RN-002)
   if (current.status === 'rented' && updateData.status) {
@@ -173,7 +198,10 @@ export async function updateVehicle(
     .single()
 
   if (updateError) {
-    return { ok: false, error: { code: 'INTERNAL_ERROR', message: 'Erro ao atualizar veículo' } }
+    const duplicate = uniqueViolation(updateError)
+    if (duplicate) return { ok: false, error: duplicate }
+    console.error('[updateVehicle] update failed', updateError)
+    return { ok: false, error: { code: 'INTERNAL_ERROR', message: `Erro ao atualizar veículo: ${updateError.message}` } }
   }
 
   if (newStatus && newStatus !== previousStatus) {

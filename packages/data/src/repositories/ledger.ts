@@ -7,7 +7,7 @@
  */
 
 import type { SupabaseClient } from '@supabase/supabase-js'
-import { ACCOUNTS } from '@gomoto/core'
+import { ACCOUNTS, type ScheduleLineChargeRow, type TerminationChargeInfo } from '@gomoto/core'
 
 // ============================================================
 // Tipos das views
@@ -34,6 +34,8 @@ export type ChargeBalanceRow = {
   /** Política congelada na emissão. Sem ela a tela não tem como saber qual
    *  regra esta cobrança carrega, e acaba aplicando a vigente hoje a todas. */
   late_charge_policy_id: string | null
+  /** Origem da cobrança (`rental`, `down_payment`, `expense`, `early_termination_fine`…). */
+  source_module: string
 }
 
 export type ChargeItemRow = {
@@ -235,12 +237,17 @@ export async function listChargesForCockpit(
   const customerIds = [...new Set(rows.map((r) => r.customer_id))]
   const rentalIds = [...new Set(rows.map((r) => r.rental_id).filter(Boolean))] as string[]
 
-  type ItemRow = { charge_id: string; description: string; amount: number; credit_account_code: string }
+  type ItemRow = {
+    charge_id: string; description: string; amount: number
+    credit_account_code: string; source_module: string
+  }
   type CustomerRow = { id: string; name: string; phone: string | null }
 
   const [items, customers, rentals] = await Promise.all([
     fetchByIdsInChunks<ItemRow>(chargeIds, 'charge_id', (chunk) =>
-      client.from('charge_items').select('charge_id, description, amount, credit_account_code').in('charge_id', chunk)),
+      client.from('charge_items')
+        .select('charge_id, description, amount, credit_account_code, source_module')
+        .in('charge_id', chunk)),
     fetchByIdsInChunks<CustomerRow>(customerIds, 'customer_id', (chunk) =>
       client.from('customers').select('id, name, phone').in('id', chunk)),
     fetchByIdsInChunks<unknown>(rentalIds, 'rental_id', (chunk) =>
@@ -270,11 +277,16 @@ export async function listChargesForCockpit(
 
   return rows.map((r) => {
     const items = itemsByCharge.get(r.charge_id) ?? []
-    // Item de maior valor representa a cobrança na listagem.
     // Uma cobrança cobra uma coisa só (ADR 0024): a descrição é a do item, sem
-    // eleição por maior valor. O que pode haver a mais é o encargo por atraso,
-    // acessório da mesma dívida — e ele já aparece na coluna de valor devido.
-    const principal = items.find((i) => !i.description.startsWith('Encargo')) ?? items[0]
+    // eleição por maior valor. O que pode haver a mais são ACESSÓRIOS da mesma
+    // dívida — encargo por atraso e desconto —, que a trigger
+    // `fn_assert_charge_item_origin` já trata como a mesma categoria (nunca é
+    // "outra coisa sendo cobrada"). Filtrar por `source_module` em vez de
+    // prefixo de texto na descrição: um desconto cuja descrição comece
+    // diferente de "Encargo" passava no filtro antigo e, sem `ORDER BY`,
+    // podia virar a "descrição" exibida da cobrança.
+    const principal = items.find((i) => i.source_module !== 'late_charge' && i.source_module !== 'discount')
+      ?? items[0]
     const customer = customerById.get(r.customer_id)
 
     return {
@@ -446,10 +458,81 @@ export async function listRentalSchedule(
     .from('rental_billing_schedules')
     .select('*')
     .eq('rental_id', rentalId)
+    // Cronológica: depois de um ajuste de período (ADR 0035) a numeração das
+    // linhas novas continua de onde parou, então ela deixa de ser ordem de
+    // tempo.
+    .order('period_start', { ascending: true })
     .order('sequence_number', { ascending: true })
 
   if (error) throw error
   return (data ?? []) as ScheduleRow[]
+}
+
+/**
+ * Cobranças de ciclo emitidas de uma locação, com o saldo (`charge_balances`)
+ * de cada uma — inclusive `is_overdue`, que só a view sabe calcular
+ * (`fn_business_today`, não o relógio do browser).
+ *
+ * Mesmo vínculo que `loadPeriodAdjustmentContext` usa (apps/web): a origem da
+ * cobrança de ciclo é a LINHA do cronograma, não a locação —
+ * `charges.source_module='rental'` + `charges.source_id = <id da linha>`
+ * (migration `charge_single_origin`; `rental_billing_schedules.charge_id` foi
+ * derrubada na mesma migration).
+ *
+ * Usado junto com `useRentalSchedule` (que já traz TODAS as linhas, qualquer
+ * status) pela tela de Encerramento — `planRetroactiveTermination`
+ * (@gomoto/core) decide o que fazer com cada uma, não este repositório.
+ */
+export async function listRentalIssuedChargeInfo(
+  client: SupabaseClient,
+  rentalId: string,
+): Promise<TerminationChargeInfo[]> {
+  const [
+    { data: chargeRows, error: chargeError },
+    { data: balanceRows, error: balanceError },
+  ] = await Promise.all([
+    client
+      .from('charges')
+      .select('id, source_id, charge_number, due_date, status')
+      .eq('rental_id', rentalId)
+      .eq('source_module', 'rental'),
+    client
+      .from('charge_balances')
+      .select('charge_id, total_amount, paid_amount, is_overdue')
+      .eq('rental_id', rentalId),
+  ])
+
+  if (chargeError) throw chargeError
+  if (balanceError) throw balanceError
+
+  const balanceById = new Map(
+    ((balanceRows ?? []) as Array<{ charge_id: string; total_amount: number; paid_amount: number; is_overdue: boolean }>)
+      .map((b) => [b.charge_id, b]),
+  )
+
+  return (
+    (chargeRows ?? []) as Array<{
+      id: string
+      source_id: string | null
+      charge_number: number
+      due_date: string
+      status: ScheduleLineChargeRow['status']
+    }>
+  )
+    .filter((c) => c.source_id !== null)
+    .map((c) => {
+      const balance = balanceById.get(c.id)
+      return {
+        schedule_line_id: c.source_id!,
+        charge_id:        c.id,
+        charge_number:    Number(c.charge_number),
+        due_date:         c.due_date,
+        total_amount:     Number(balance?.total_amount ?? 0),
+        paid_amount:      Number(balance?.paid_amount ?? 0),
+        status:           c.status,
+        is_overdue:       Boolean(balance?.is_overdue ?? false),
+      }
+    })
 }
 
 // ============================================================
@@ -490,13 +573,16 @@ export type LateChargePolicyRow = {
  */
 export async function listLateChargePolicies(
   client: SupabaseClient,
+  tenantId?: string | null,
 ): Promise<LateChargePolicyRow[]> {
-  const { data, error } = await client
+  let q = client
     .from('late_charge_policies')
     .select('id, version, effective_from, fee_type, fee_value, daily_interest_rate, grace_period_days, min_amount')
     .order('effective_from', { ascending: false })
     .order('version', { ascending: false })
+  if (tenantId) q = q.eq('tenant_id', tenantId)
 
+  const { data, error } = await q
   if (error) throw error
   return (data ?? []) as LateChargePolicyRow[]
 }
@@ -581,26 +667,116 @@ export type ProviderAccountRow = {
   id: string
   provider: string
   external_account_id: string
+  account_label: string | null
   is_default: boolean
   active: boolean
 }
 
 /**
- * Contas de provedor do tenant.
+ * Contas de gateway do tenant (ADR 0030).
  *
- * `credentials` fica FORA do select: a coluna não tem GRANT para
- * `authenticated`, só service_role a lê.
+ * Inclui as INATIVAS: a tela precisa mostrar "Mercado Pago — desconectado" com
+ * botão de reconectar, e não fingir que a integração nunca existiu. As
+ * EXCLUÍDAS (ADR 0039) ficam de fora: saíram da tela e da unicidade, e o que
+ * resta delas é história — lida por `listGatewayHistory`. Quem filtra
+ * por `is_default AND active` é quem vai cobrar, não quem vai desenhar.
+ *
+ * `secret_id` fica fora do select e fora do GRANT: a credencial mora no Vault e
+ * só sai por `fn_provider_credentials`, server-side. `account_label` entrou —
+ * era gravado pelo callback e ninguém podia ler, então a tela exibia o
+ * identificador interno da conta no lugar do rótulo.
  */
 export async function listProviderAccounts(
   client: SupabaseClient,
 ): Promise<ProviderAccountRow[]> {
   const { data, error } = await client
     .from('payment_provider_accounts')
-    .select('id, provider, external_account_id, is_default, active')
-    .eq('active', true)
+    .select('id, provider, external_account_id, account_label, is_default, active')
+    .is('deleted_at', null)
+    .order('is_default', { ascending: false })
+    .order('provider', { ascending: true })
 
   if (error) throw error
   return (data ?? []) as ProviderAccountRow[]
+}
+
+/** Uma alteração de integração, como a trilha do banco a registrou (ADR 0039). */
+export type GatewayHistoryEntry = {
+  id: string
+  action:
+    | 'gateway_connected' | 'gateway_reconnected' | 'gateway_activated'
+    | 'gateway_deactivated' | 'gateway_disconnected' | 'gateway_deleted'
+  created_at: string
+  provider: string
+  account_label: string | null
+  external_account_id: string | null
+  /** E-mail de quem fez, gravado no momento. `null` quando foi o sistema. */
+  actor_email: string | null
+  /** `system:…` quando não houve usuário (migration, rotina). */
+  actor_system: string | null
+}
+
+const GATEWAY_ACTIONS = [
+  'gateway_connected', 'gateway_reconnected', 'gateway_activated',
+  'gateway_deactivated', 'gateway_disconnected', 'gateway_deleted',
+] as const
+
+/**
+ * Quem alterou as integrações de pagamento, e quando (ADR 0039).
+ *
+ * A fonte é `audit_logs`, escrita por TRIGGER na mesma transação da mudança —
+ * não pela aplicação. Inclui integrações já excluídas: é justamente o que a
+ * lista de contas não mostra mais. A RLS de `audit_logs` limita ao tenant.
+ */
+export async function listGatewayHistory(
+  client: SupabaseClient,
+  limit = 100,
+): Promise<GatewayHistoryEntry[]> {
+  const { data, error } = await client
+    .from('audit_logs')
+    .select('id, action, created_at, actor_system, new_data')
+    .eq('table_name', 'payment_provider_accounts')
+    .in('action', GATEWAY_ACTIONS as unknown as string[])
+    .order('created_at', { ascending: false })
+    .limit(limit)
+
+  if (error) throw error
+  return (data ?? []).map((row) => {
+    const n = (row.new_data ?? {}) as Record<string, unknown>
+    const str = (v: unknown) => (typeof v === 'string' && v ? v : null)
+    return {
+      id: row.id as string,
+      action: row.action as GatewayHistoryEntry['action'],
+      created_at: row.created_at as string,
+      provider: str(n.provider) ?? '',
+      account_label: str(n.account_label),
+      external_account_id: str(n.external_account_id),
+      actor_email: str(n.actor_email),
+      actor_system: str(row.actor_system),
+    }
+  })
+}
+
+/**
+ * Status de uma tentativa de pagamento.
+ *
+ * Sinal mais barato e mais direto de "o cliente pagou": é esta linha que
+ * `fn_confirm_gateway_payment` marca como `paid`, na mesma transação que grava
+ * o recebimento e lança no razão. Uma leitura de linha única por chave, contra
+ * recarregar a cobrança inteira (saldo + itens + política) a cada 5 segundos.
+ */
+export async function getPaymentIntentStatus(
+  client: SupabaseClient,
+  intentId: string,
+): Promise<string | null> {
+  const { data, error } = await client
+    .from('payment_intents')
+    .select('status')
+    .eq('id', intentId)
+    .maybeSingle()
+
+  if (error) throw error
+  return (data as { status: string } | null)?.status ?? null
 }
 
 /**

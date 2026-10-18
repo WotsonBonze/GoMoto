@@ -14,7 +14,7 @@ export const metadata: Metadata = {
   manifest: '/mobile-manifest.webmanifest',
   appleWebApp: {
     capable: true,
-    title: 'GoMoto Vistoria',
+    title: 'Locaw Vistoria',
     statusBarStyle: 'black-translucent',
   },
   icons: {
@@ -79,7 +79,7 @@ export default async function MobileLayout({ children }: MobileLayoutProps) {
             <div className="w-6 h-6 flex-shrink-0 bg-primary rounded-full flex items-center justify-center">
               <Bike className="w-3.5 h-3.5 text-primary-contrast" />
             </div>
-            <span className="text-[13px] font-bold text-fg truncate">GoMoto</span>
+            <span className="text-[13px] font-bold text-fg truncate">Locaw</span>
           </div>
           <div className="flex items-center gap-2 min-w-0">
             {userName && (

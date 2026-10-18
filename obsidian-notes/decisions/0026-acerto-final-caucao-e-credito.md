@@ -5,7 +5,18 @@
 - **Autores:** Alan + agente IA
 - **Substitui:** —
 - **Substituída por:** —
-- **Relacionada:** [[decisions/0024-ledger-financeiro-com-contrapartida|ADR 0024]], [[Specs/0014-redesenho-financeiro]], [[Checklist de Testes Manuais — Financeiro]]
+- **Relacionada:** [[decisions/0024-ledger-financeiro-com-contrapartida|ADR 0024]], [[Specs/0014-redesenho-financeiro]], [[Checklist de Testes Manuais — Financeiro]], [[Specs/0017-abatimento-caucao-credito]]
+
+> **Atualização (2026-09-21, Spec 0017):** a *decisão* daqui segue de pé — abater
+> vem antes de devolver, reter só existe contra dívida, motivo obrigatório para
+> abater caução, sem gate por papel. O que mudou foi o *mecanismo*: o abatimento
+> deixou de ser agregado (`closeRentalFinancial` e `applyCreditToRentalDebt`, que
+> espalhavam o valor da cobrança mais antiga para a mais nova, em chamadas
+> separadas e não atômicas) e passou a ser **dirigido** — o operador informa quanto
+> de caução e de crédito vai para cada dívida — e a rodar **dentro** de
+> `terminate_rental`, na mesma transação que fecha a locação. As duas actions
+> foram removidas; a devolução da sobra virou `returnRemainingDeposit`. O texto
+> abaixo descreve o mecanismo anterior e vale como histórico.
 
 ## Contexto
 

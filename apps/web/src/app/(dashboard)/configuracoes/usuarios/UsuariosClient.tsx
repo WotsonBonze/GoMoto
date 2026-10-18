@@ -1,10 +1,9 @@
 'use client'
 
 import { useMemo, useState, useTransition } from 'react'
-import { Eye, EyeOff, KeyRound, RotateCcw, Search, UserPlus, UserX } from 'lucide-react'
+import { Eye, EyeOff, KeyRound, RotateCcw, Search, UserPlus, UserX, UsersRound } from 'lucide-react'
 import { isSelfPromotion, wouldLeaveZeroActiveOwners, type TenantMemberRole } from '@gomoto/core'
 
-import { PageTitle } from '@/components/layout/PageTitle'
 import { Button } from '@/components/ui/Button'
 import { Modal } from '@/components/ui/Modal'
 import { Input, Select } from '@/components/ui/Input'
@@ -16,6 +15,7 @@ import {
   reactivateTenantMember,
   resetTenantMemberPassword,
 } from './actions'
+import { SettingsHeader } from '../_components/SettingsHeader'
 
 export type TenantMemberRow = {
   id: string
@@ -179,13 +179,14 @@ export function UsuariosClient({ initialRows, loadError, currentUserId, currentR
   }
 
   return (
-    <div className="flex flex-col min-h-full">
-      <PageTitle
+    <div>
+      <SettingsHeader
+        icon={UsersRound}
         title="Usuários"
-        subtitle="Convide, gerencie papéis e controle o acesso das pessoas da sua empresa ao GoMoto."
+        description="Convide, gerencie papéis e controle o acesso das pessoas da sua empresa ao Locaw."
       />
 
-      <div className="p-6 space-y-4 max-w-5xl">
+      <div className="space-y-4">
         <div className="flex items-center justify-between gap-3">
           <div className="relative w-72">
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-fg-mute" />

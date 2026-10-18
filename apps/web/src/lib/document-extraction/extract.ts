@@ -37,8 +37,25 @@ export async function extractFields<T extends ExtractionDocumentType>(
     const { output } = await generateText({
       model: MODEL,
       timeout: EXTRACTION_TIMEOUT_MS,
-      // RNF-005 — só vale com credenciais gerenciadas do AI Gateway (ADR 0023 §2).
-      providerOptions: { gateway: { disallowPromptTraining: true } },
+      // Extração, não criação: mesma imagem deve dar a mesma leitura.
+      temperature: 0,
+      providerOptions: {
+        gateway: {
+          // RNF-005 — só vale com credenciais gerenciadas do AI Gateway (ADR 0023 §2).
+          disallowPromptTraining: true,
+          // Só Google AI Studio. O gateway roteava `google/gemini-*` entre
+          // `google` e `vertex`, e a Vertex rasteriza PDF com menos detalhe
+          // (2841 tokens × 1369 na mesma CNH Digital): em teste real
+          // (2026-10-15) a Vertex leu a categoria errada em 100% das chamadas
+          // e trocou CPF por Nº Registro em ~1/3; o AI Studio acertou todas.
+          // Era a causa das falhas INTERMITENTES — a rota mudava por sessão.
+          // `order: ['google', 'vertex']` não resolve: a afinidade de sessão
+          // do gateway promove a Vertex por cima da ordem pedida. Sem fallback
+          // de provedor: se o AI Studio cair, a extração falha e o operador
+          // preenche à mão (RNF-002) — melhor que preencher errado com "high".
+          only: ['google'],
+        },
+      },
       // Registry guarda o schema por documentType como união (RN-005); TS não
       // correlaciona isso com o T genérico aqui — narrow explícito, seguro
       // porque `entry` vem de indexar pelo próprio `documentType: T`.
@@ -54,7 +71,14 @@ export async function extractFields<T extends ExtractionDocumentType>(
       ],
     })
 
-    return summarize(documentType, output as RegistryFieldsOf<T>)
+    // Normalização + dígito verificador no código (o modelo não conta dígitos
+    // de forma confiável) — valor que não confere vira confiança "low".
+    const fields = output as RegistryFieldsOf<T>
+    // Mesmo narrow do schema acima: a entrada foi indexada pelo próprio `documentType`.
+    const postProcess = 'postProcess' in entry
+      ? (entry.postProcess as unknown as (f: RegistryFieldsOf<T>) => RegistryFieldsOf<T>)
+      : null
+    return summarize(documentType, postProcess ? postProcess(fields) : fields)
   } catch (err) {
     // Metadado operacional, nunca conteúdo do documento/valores extraídos (§7.1).
     console.error('[extractFields] provider_call_failed', {

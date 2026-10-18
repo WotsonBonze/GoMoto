@@ -5,22 +5,67 @@ import { useRouter } from 'next/navigation'
 import Link from 'next/link'
 import { AlertTriangle, ChevronRight, Bike, CalendarX2, ReceiptText } from 'lucide-react'
 
-import { useRentalOpenCharges, useDepositBalance, useRentalSchedule, useCustomerCreditBalance } from '@gomoto/data'
+import {
+  useRentalOpenCharges,
+  useDepositBalance,
+  useCustomerCreditBalance,
+  useRentalTerminationPlan,
+} from '@gomoto/data'
 import {
   getEarlyTerminationImpact,
-  CONTRACT_TERMINATION_FINE_BRL,
+  isRentalTerminationWithinMinimum,
+  minimumFinalKm,
+  computeDebtDistribution,
+  buildTerminationAllocations,
+  clampAllocationInput,
+  formatAllocationInput,
+  FINE_DEBT_ID,
 } from '@gomoto/core'
-import type { Rental } from '@gomoto/core'
+import type { Rental, DistributionDebt } from '@gomoto/core'
 import { formatCurrency, formatDate } from '@/lib/utils'
-import { terminateRental, closeRentalFinancial, applyCreditToRentalDebt } from '../actions'
+import { terminateRental, returnRemainingDeposit } from '../actions'
 import { settleCustomerCredit } from '../../clientes/[id]/actions'
 
 interface TerminateFormProps {
   rental: Rental
 }
 
-type CreditAction  = 'keep' | 'apply' | 'apply_and_settle' | 'settle'
-type DepositAction = 'full_return' | 'partial_return' | 'full_retention'
+/** Destino da SOBRA depois da distribuição (RF-008/RF-009): devolver em dinheiro, ou deixar como está. */
+type LeftoverChoice = 'return' | 'keep'
+
+/**
+ * Origem da dívida em texto de tela — `source_module` cru ("down_payment") não
+ * serve a um operador. Só rótulo de UI: a regra de qual dívida entra na lista
+ * não depende disto.
+ */
+const SOURCE_LABELS: Record<string, string> = {
+  rental:                 'Ciclo',
+  down_payment:           'Entrada',
+  deposit:                'Caução',
+  expense:                'Despesa',
+  maintenance:            'Manutenção',
+  fine:                   'Multa de trânsito',
+  early_termination_fine: 'Multa de rescisão',
+  late_charge:            'Encargo por atraso',
+  manual:                 'Manual',
+}
+
+const round2 = (n: number): number => Math.round(n * 100) / 100
+
+/**
+ * Quantas linhas de "Fora do período" a tela mostra antes do botão "Exibir mais".
+ * Um contrato longo encerrado cedo cancela dezenas de parcelas: todas na tela
+ * empurram a decisão que importa (a distribuição de caução e crédito) para
+ * muito longe. O total e o valor a cancelar seguem inteiros na Apuração.
+ */
+const OUTSIDE_PERIOD_PREVIEW = 5
+
+/** "12,50" digitado → 12.5. Vazio e lixo viram 0; `computeDebtDistribution` saneia de novo. */
+function toNumericMap(inputs: Record<string, string>): Record<string, number> {
+  return Object.fromEntries(
+    Object.entries(inputs).map(([id, v]) => [id, Number(v.replace(',', '.')) || 0]),
+  )
+}
 
 /**
  * Hoje no fuso do operador.
@@ -60,17 +105,86 @@ export function TerminateForm({ rental }: TerminateFormProps) {
   )
   const [error, setError] = useState('')
 
+  // Spec 0016 (revisão): cancelamento OPCIONAL de linha que, por estar dentro
+  // do período, sobreviveria por padrão — chave é `schedule_line_id` (serve
+  // tanto para cobrança já emitida quanto para linha ainda não emitida).
+  // Zera sempre que a data muda — mudar a data muda quem é "dentro" e "fora"
+  // (RN-002), então uma marcação feita para a data anterior não deve
+  // sobreviver em silêncio.
+  const [extraSelected, setExtraSelected] = useState<Set<string>>(new Set())
+
+  // "Fora do período" mostra só as primeiras linhas até o operador pedir o resto.
+  const [showAllOutside, setShowAllOutside] = useState(false)
+
+  function handleTerminationDateChange(value: string) {
+    setTerminationDate(value)
+    setExtraSelected(new Set())
+    // Mudar a data muda quais cobranças serão canceladas — e, com isso, quais
+    // dívidas existem na lista. Valores digitados para a lista anterior não
+    // devem sobreviver em silêncio.
+    setDepositInputs({})
+    setCreditInputs({})
+  }
+
+  // Km final (Spec 0014, RN-002 + RN-003 + RN-004) — obrigatório em todo
+  // encerramento, mesmo de locação anterior a esta feature (km_initial nulo
+  // entra como 0 no piso). Atualiza vehicles.km_current na mesma transação.
+  const [kmFinal, setKmFinal] = useState('')
+  const pisoKm = minimumFinalKm(rental.vehicle?.km_current ?? 0, rental.km_initial ?? 0)
+  const kmFinalNumero = kmFinal === '' ? null : Number(kmFinal)
+  const kmFinalInvalido = kmFinalNumero === null || isNaN(kmFinalNumero) || kmFinalNumero < pisoKm
+
   // Spec 0014: a apuração passa a olhar três coisas distintas — o que foi
   // emitido e não pago, o saldo de caução, e o cronograma ainda não emitido.
   // Antes, `useBillings` misturava documento e plano numa lista só.
-  const chargesQuery  = useRentalOpenCharges(rental.id)
-  const depositQuery  = useDepositBalance(rental.id)
-  const scheduleQuery = useRentalSchedule(rental.id)
+  const chargesQuery = useRentalOpenCharges(rental.id)
+  const depositQuery = useDepositBalance(rental.id)
+
+  // Spec 0016 (revisão): TODA linha viva do cronograma — vencida, emitida ou
+  // planejada —, classificada como fora do período (sempre cancelada, ou
+  // bloqueada por já ter valor reduzido) ou dentro dele (mantida, com opção
+  // de cancelar mesmo assim).
+  const terminationPlanQuery = useRentalTerminationPlan(rental.id, terminationDate)
+  const terminationPlan = useMemo(() => terminationPlanQuery.data ?? [], [terminationPlanQuery.data])
+
+  const outsidePeriod = useMemo(() => terminationPlan.filter((l) => l.is_outside_period), [terminationPlan])
+
+  // Só resume quando esconde AO MENOS DUAS: um botão para revelar uma única
+  // linha é pior do que mostrá-la.
+  const outsideResumida = outsidePeriod.length > OUTSIDE_PERIOD_PREVIEW + 1
+  const outsideVisiveis = outsideResumida && !showAllOutside
+    ? outsidePeriod.slice(0, OUTSIDE_PERIOD_PREVIEW)
+    : outsidePeriod
+  const outsideEscondidas = outsidePeriod.length - outsideVisiveis.length
+  // `keep_locked` (já paga ou com crédito aplicado) nunca tem nada a decidir
+  // aqui — mostrar só polui a lista com o que já está resolvido e continua
+  // exatamente igual, dentro ou fora desta tela.
+  const insidePeriod = useMemo(
+    () => terminationPlan.filter((l) => !l.is_outside_period && l.action !== 'keep_locked'),
+    [terminationPlan],
+  )
+
+  // Ids (schedule_line_id) que serão cancelados de fato: toda `cancel_auto`
+  // (fora do período, sem escolha) + o que o operador marcou por opção dentro
+  // dele. `chargeIdsSendoCancelados` é o recorte financeiro (só o que já é
+  // documento) usado para excluir do valor em aberto abaixo (RF-004).
+  const chargeIdsSendoCancelados = useMemo(() => new Set(
+    terminationPlan
+      .filter((l) => l.charge_id && (l.action === 'cancel_auto' || (l.action === 'keep_optional' && extraSelected.has(l.schedule_line_id))))
+      .map((l) => l.charge_id!),
+  ), [terminationPlan, extraSelected])
 
   // Consulta por LOCAÇÃO, não por cliente: antes o valor em aberto dependia de
   // `rental.customer_id` estar presente, e sem ele a apuração mostrava zero e o
   // encerramento falhava sem explicação.
-  const openCharges = useMemo(() => chargesQuery.data ?? [], [chargesQuery.data])
+  //
+  // RF-004: cobrança que será cancelada sai daqui ANTES de qualquer conta
+  // abaixo (caução, crédito, multa, botão de confirmar) ser calculada — um
+  // único filtro na origem em vez de repetir a exclusão em cada `useMemo`.
+  const openCharges = useMemo(
+    () => (chargesQuery.data ?? []).filter((c) => !chargeIdsSendoCancelados.has(c.charge_id)),
+    [chargesQuery.data, chargeIdsSendoCancelados],
+  )
 
   const openAmount     = openCharges.reduce((s, c) => s + c.open_amount, 0)
   const depositBalance = depositQuery.data ?? 0
@@ -110,131 +224,200 @@ export function TerminateForm({ rental }: TerminateFormProps) {
   const creditBalance = useCustomerCreditBalance(rental.customer_id).data ?? 0
 
   /**
-   * O que o encerramento REALMENTE cancela, com o mesmo critério da RPC:
-   * `status = 'scheduled' AND period_start > p_termination_date`.
-   *
-   * Duas coisas estavam erradas aqui. O alerta contava cobranças já EMITIDAS e
-   * anunciava que seriam canceladas — o oposto do que acontece, e o oposto do
-   * que o checkbox ao lado afirma. E o valor vinha de `contracted_backlog`,
-   * que é todo o cronograma não emitido, sem olhar a data escolhida.
-   *
-   * Encerrando na data de fim do contrato, todos os períodos já começaram e
-   * NADA é cancelado — a tela prometia três parcelas e cancelava zero. Como a
-   * data é editável, os dois números precisam responder a ela.
+   * O que será cancelado de fato, separado por já ter virado documento ou não
+   * — a Apuração financeira e o bloco "Ao confirmar" falam desses dois números
+   * separadamente (RF-001..RF-005). Fora do período entra inteiro (sem
+   * escolha); dentro, só o que foi marcado por opção.
    */
-  const cancelable = useMemo(() => {
-    const lines = (scheduleQuery.data?.lines ?? [])
-      .filter(l => l.status === 'scheduled' && l.period_start > terminationDate)
-    return { count: lines.length, total: lines.reduce((s, l) => s + l.amount, 0) }
-  }, [scheduleQuery.data, terminationDate])
+  const willCancel = useMemo(() => {
+    const linhas = terminationPlan.filter((l) =>
+      l.action === 'cancel_auto' || (l.action === 'keep_optional' && extraSelected.has(l.schedule_line_id)),
+    )
+    const planejadas = linhas.filter((l) => !l.is_issued)
+    const emitidas    = linhas.filter((l) => l.is_issued)
+    const soma = (ls: typeof linhas) => ls.reduce((s, l) => s + l.total_amount, 0)
+    return {
+      planejadas: { count: planejadas.length, total: soma(planejadas) },
+      emitidas:    { count: emitidas.length,   total: soma(emitidas)   },
+    }
+  }, [terminationPlan, extraSelected])
 
+  // Spec 0015: multa e prazo mínimo agora são configuráveis por locação —
+  // `getEarlyTerminationImpact` lê a config da própria locação, não mais uma
+  // constante por contract_type. Só para feedback instantâneo: o valor e a
+  // elegibilidade finais são sempre recalculados de novo na RPC.
   const impact = useMemo(() => {
     if (!rental.start_date) return null
     return getEarlyTerminationImpact(
       openCharges.map(c => ({ due_date: c.due_date, status: 'pending' })),
       new Date(),
       rental.start_date,
-      rental.contract_type ?? 'rental',
+      {
+        early_termination_fine_amount: rental.early_termination_fine_amount,
+        minimum_term_days: rental.minimum_term_days,
+      },
     )
-  }, [openCharges, rental.start_date, rental.contract_type])
+  }, [openCharges, rental.start_date, rental.early_termination_fine_amount, rental.minimum_term_days])
+
+  const multaAplicavel = !!impact?.within_minimum && (impact?.fine_amount ?? 0) > 0
+  const multaValor = impact?.fine_amount ?? 0
 
   /** Encerrar com débito em aberto exige confirmação explícita (F-08). */
   const [force, setForce] = useState(false)
-  // Destino da caução. A locação encerra e o dinheiro do cliente precisa ir a
-  // algum lugar — sem isto o passivo fica em aberto para sempre, sem caminho
-  // no produto para devolver nem para reter.
-  /**
-   * `null` = ainda não escolhido; o default sai dos saldos (ADR 0026: abater vem
-   * antes de devolver). Derivado pelo mesmo motivo do crédito — os saldos vêm de
-   * hook e chegam depois do primeiro render, então um estado inicializado no
-   * mount travaria em "devolver" e o default nunca apareceria.
-   */
-  const [depositEscolhido, setDepositAction] = useState<DepositAction | null>(null)
-  const [retainedAmount, setRetainedAmount] = useState('')
-  const [retentionReason, setRetentionReason] = useState('')
+
+  // Spec 0017 — distribuição dirigida de caução e crédito, dívida a dívida.
+  // Strings porque o operador está DIGITANDO ("12," ainda não é número); a
+  // conversão e a conta ficam em `computeDebtDistribution` (@gomoto/core).
+  const [depositInputs, setDepositInputs] = useState<Record<string, string>>({})
+  const [creditInputs, setCreditInputs] = useState<Record<string, string>>({})
+
+  // Motivo ÚNICO do abatimento de caução (ADR 0026): explica ao cliente por que
+  // o dinheiro dele virou pagamento. Um para a tela toda, não um por dívida.
+  const [depositReason, setDepositReason] = useState('')
 
   /**
-   * Destino do crédito (ADR 0026, fase 2). Mesma forma da caução: quanto abater
-   * e o que fazer com a sobra.
-   *
-   * `keep` é o default seguro e continua sendo a decisão certa em boa parte dos
-   * casos — crédito é do CLIENTE e sobrevive ao contrato. O que muda é ele
-   * deixar de ser a única saída: antes a tela só informava e mandava o operador
-   * para outra tela, onde o abatimento nem existia.
+   * Destino da SOBRA depois da distribuição. `null` = ainda não escolhido; o
+   * efetivo sai de `depositLeftoverEfetivo`/`creditLeftoverEfetivo` abaixo —
+   * derivado, e não fixado no mount, porque os saldos vêm de hook e chegam
+   * depois do primeiro render.
    */
-  const [creditEscolhido, setCreditAction] = useState<CreditAction | null>(null)
+  const [depositLeftover, setDepositLeftover] = useState<LeftoverChoice | null>(null)
+  const [creditLeftover, setCreditLeftover] = useState<LeftoverChoice | null>(null)
 
+  // Elegibilidade de transferência do rent_to_own (compra programada) — regra
+  // FIXA de 2 anos, independente da multa configurável (Spec 0015). Não usa
+  // `impact` (que agora é sobre a multa): repurpose-ar essa checagem quebraria
+  // a transferência de qualquer rent_to_own sem multa configurada.
   const newStatus =
-    rental.contract_type === 'rent_to_own' && impact && !impact.within_minimum
+    rental.contract_type === 'rent_to_own' &&
+    rental.start_date &&
+    !isRentalTerminationWithinMinimum({ start_date: rental.start_date, rental_type: 'rent_to_own' }, new Date())
       ? 'transferred'
       : 'closed'
 
   /**
-   * Reter só existe contra dívida (ADR 0026, fase 3): sem dívida a caução é
-   * devolvida, e a opção de abater nem é oferecida. Quem precisa reter por
-   * avaria lança a despesa com rateio, que emite a cobrança.
+   * Multa por rescisão antecipada (Spec 0015). RF-004: decisão explícita de
+   * cobrar ou não, antes de confirmar. `null` = ainda não decidido — o botão
+   * de confirmar fica bloqueado até o operador escolher (mesmo padrão de
+   * `force` para débito em aberto).
    */
-  const podeAbaterCaucao = openAmount > 0
-  const depositAction: DepositAction =
-    depositEscolhido && (podeAbaterCaucao || depositEscolhido === 'full_return')
-      ? depositEscolhido
-      : podeAbaterCaucao ? 'full_retention' : 'full_return'
+  const [multaDecisao, setMultaDecisao] = useState<'charge' | 'skip' | null>(null)
+
+  // Spec 0016 (revisão): dentro do período, decisão explícita por linha —
+  // manter (padrão) ou cancelar mesmo assim —, ou todas as elegíveis de uma
+  // vez. A bloqueada (`keep_locked`) nunca entra no atalho.
+  function setLineDecision(scheduleLineId: string, decision: 'keep' | 'cancel') {
+    setExtraSelected((prev) => {
+      const next = new Set(prev)
+      if (decision === 'cancel') next.add(scheduleLineId)
+      else next.delete(scheduleLineId)
+      return next
+    })
+  }
+
+  const optionalLineIds = useMemo(
+    () => insidePeriod.filter((l) => l.action === 'keep_optional').map((l) => l.schedule_line_id),
+    [insidePeriod],
+  )
+  const allOptionalMarked = optionalLineIds.length > 0
+    && optionalLineIds.every((id) => extraSelected.has(id))
+
+  function toggleMarkAllOptional() {
+    setExtraSelected(allOptionalMarked ? new Set() : new Set(optionalLineIds))
+  }
 
   /**
-   * O ACERTO, na ordem que a ADR 0026 fixou: abater vem antes de devolver.
+   * A lista de dívidas da distribuição (RF-001): as cobranças em aberto DESTA
+   * locação — `openCharges` já exclui o que será cancelado (Spec 0016), então
+   * nunca se oferece caução a uma dívida que deixa de existir na mesma
+   * confirmação — mais a multa, quando o operador decide cobrá-la.
    *
-   * Fase 1 é só leitura — nenhuma escrita mudou aqui. O que muda é a tela parar
-   * de pedir "encerrar mesmo com R$ 1.200,00 em aberto" de um cliente cujo
-   * dinheiro a empresa está segurando: a conta que importa é quanto sobra
-   * DEPOIS de usar o que já está em custódia, e ela era feita de cabeça.
-   *
-   * Duas quantias, dois status diferentes nesta fase:
-   *  - caução: esta tela já abate, quando o operador escolhe abater;
-   *  - crédito: ainda não — hoje se abate cobrança por cobrança. Por isso ele
-   *    aparece como "disponível", não como já descontado. Prometer abatimento
-   *    que a tela não faz seria pior que não mostrar.
+   * A multa é linha VIRTUAL: o `charge_id` dela só nasce dentro da RPC (Spec
+   * 0015). Na tela é uma dívida como as outras (RN-007); no payload, os valores
+   * dela seguem nos dois campos escalares (`buildTerminationAllocations`).
    */
-  const caucaoParaAbater = useMemo(() => {
-    if (depositAction === 'full_return') return 0
-    const escolhido = depositAction === 'full_retention'
-      ? depositBalance
-      : Math.round((Number(retainedAmount.replace(',', '.')) || 0) * 100) / 100
-    // O que EXCEDE a dívida não vira abatimento: não há cobrança para alocar.
-    return Math.max(0, Math.min(escolhido, openAmount))
-  }, [depositAction, retainedAmount, depositBalance, openAmount])
+  const multaEntraNaLista = multaAplicavel && multaDecisao === 'charge'
 
-  const emAbertoDepoisDaCaucao = Math.round(Math.max(0, openAmount - caucaoParaAbater) * 100) / 100
+  const debts = useMemo<DistributionDebt[]>(() => [
+    ...openCharges.map((c) => ({ id: c.charge_id, amount_due: c.open_amount })),
+    ...(multaEntraNaLista ? [{ id: FINE_DEBT_ID, amount_due: multaValor }] : []),
+  ], [openCharges, multaEntraNaLista, multaValor])
 
-  /** Quanto da caução sai do caixa como devolução, conforme a escolha. */
-  const caucaoParaDevolver = useMemo(() => {
-    if (depositAction === 'full_return') return depositBalance
-    if (depositAction === 'full_retention') return 0
-    const retido = Math.round((Number(retainedAmount.replace(',', '.')) || 0) * 100) / 100
-    return Math.round(Math.max(0, depositBalance - retido) * 100) / 100
-  }, [depositAction, retainedAmount, depositBalance])
-  const creditoAbativel       = Math.min(creditBalance, emAbertoDepoisDaCaucao)
-  const sobraDoCredito        = Math.round(Math.max(0, creditBalance - creditoAbativel) * 100) / 100
+  const debtMeta = useMemo(() => {
+    const m = new Map<string, { label: string; origin: string; dueDate: string | null; overdue: boolean }>()
+    for (const c of openCharges) {
+      m.set(c.charge_id, {
+        label: `Cobrança #${c.charge_number}`,
+        origin: SOURCE_LABELS[c.source_module] ?? c.source_module,
+        dueDate: c.due_date,
+        overdue: c.is_overdue,
+      })
+    }
+    m.set(FINE_DEBT_ID, { label: 'Multa por rescisão', origin: 'ao confirmar', dueDate: null, overdue: false })
+    return m
+  }, [openCharges])
+
+  // Só soma e compara, para mostrar alocado/restante sem ir ao servidor a cada
+  // dígito. Quem recusa de verdade é `terminate_rental`, sob trava.
+  const distribution = useMemo(() => computeDebtDistribution({
+    debts,
+    deposit_balance: depositBalance,
+    credit_balance: creditBalance,
+    deposit_allocations: toNumericMap(depositInputs),
+    credit_allocations: toNumericMap(creditInputs),
+  }), [debts, depositBalance, creditBalance, depositInputs, creditInputs])
+
+  const temSaldo = depositBalance > 0 || creditBalance > 0
+
+  // O motivo e o "encerrar com dívida em aberto" falam das dívidas que JÁ
+  // existiam; a multa tem cobrança própria e nunca pediu motivo.
+  const linhasReais = distribution.lines.filter((l) => l.id !== FINE_DEBT_ID)
+  const caucaoEmDividasReais = round2(linhasReais.reduce((sum, l) => sum + l.deposit, 0))
+  const creditoEmDividasReais = round2(linhasReais.reduce((sum, l) => sum + l.credit, 0))
+  const restanteReal = round2(linhasReais.reduce((sum, l) => sum + l.remaining, 0))
+
+  const restanteTotal = distribution.debt_remaining
+  const sobraCaucao = distribution.deposit_remaining
+  const sobraCredito = distribution.credit_remaining
 
   /**
-   * Default: havendo dívida, abater (ADR 0026 — abater vem antes de devolver).
-   *
-   * Derivado, não em `useState`: os saldos vêm de hooks e chegam depois do
-   * primeiro render. Um estado inicializado no mount travaria em "deixar" e o
-   * default nunca apareceria. `null` significa "o operador ainda não escolheu".
+   * Nunca devolve dinheiro por inércia enquanto o cliente ainda deve (ADR 0026:
+   * abater vem antes de devolver): com dívida em aberto o operador PRECISA
+   * escolher; sem dívida, devolver é o padrão. Crédito é do CLIENTE e sobrevive
+   * ao contrato, então deixar é o padrão seguro.
    */
-  const creditAction: CreditAction = creditEscolhido ?? (creditoAbativel > 0 ? 'apply' : 'keep')
+  const depositLeftoverEfetivo: LeftoverChoice | null =
+    depositLeftover ?? (restanteTotal > 0 ? null : 'return')
+  const creditLeftoverEfetivo: LeftoverChoice = creditLeftover ?? 'keep'
 
-  /** Quanto o crédito abate de fato, conforme a escolha. */
-  const creditoParaAbater = creditAction === 'apply' || creditAction === 'apply_and_settle'
-    ? creditoAbativel
-    : 0
+  const caucaoParaDevolver  = depositLeftoverEfetivo === 'return' ? sobraCaucao : 0
+  const creditoParaDevolver = creditLeftoverEfetivo === 'return' ? sobraCredito : 0
 
-  /** Quanto sai do caixa como devolução de crédito. */
-  const creditoParaDevolver =
-    creditAction === 'settle'           ? creditBalance :
-    creditAction === 'apply_and_settle' ? sobraDoCredito : 0
+  const violationMessages = distribution.violations.map((v) => {
+    if (v.code === 'LINE_EXCEEDS_DEBT') {
+      return `${debtMeta.get(v.id)?.label ?? 'Dívida'}: caução e crédito somam ${formatCurrency(v.excess)} a mais do que ela deve.`
+    }
+    if (v.code === 'DEPOSIT_EXCEEDS_BALANCE') {
+      return `A caução alocada passa do saldo em ${formatCurrency(v.excess)}.`
+    }
+    return `O crédito alocado passa do saldo em ${formatCurrency(v.excess)}.`
+  })
 
-  const emAbertoFinal = Math.round(Math.max(0, emAbertoDepoisDaCaucao - creditoParaAbater) * 100) / 100
+  /**
+   * Nem caução nem crédito passam do que cabe: nem do saldo que as OUTRAS
+   * linhas ainda deixam, nem do que a dívida ainda deve depois da OUTRA fonte
+   * já aplicada na mesma linha (`max_deposit`/`max_credit`, @gomoto/core).
+   * Digitar, colar ou usar a setinha dá no mesmo — e é o que faz "usar o
+   * crédito primeiro, depois a caução" funcionar sem conta de cabeça: maxar o
+   * crédito de uma linha (bloco de baixo) faz a caução da MESMA linha mostrar
+   * na hora quanto sobrou, em vez de aceitar um valor que só falha ao confirmar.
+   */
+  function setAllocation(kind: 'deposit' | 'credit', debtId: string, value: string) {
+    const line = distribution.lines.find((l) => l.id === debtId)
+    const teto = kind === 'deposit' ? (line?.max_deposit ?? 0) : (line?.max_credit ?? 0)
+    const set = kind === 'deposit' ? setDepositInputs : setCreditInputs
+    set((prev) => ({ ...prev, [debtId]: clampAllocationInput(value, teto) }))
+  }
 
   function handleConfirm() {
     setError('')
@@ -247,65 +430,83 @@ export function TerminateForm({ rental }: TerminateFormProps) {
       return
     }
 
-    // Abater caução exige justificativa — `CloseRentalFinancialSchema` recusa
-    // com menos de 5 caracteres. Sem esta guarda a locação encerrava e a caução
-    // ficava por liquidar, com o erro chegando depois do fato consumado: o
-    // encerramento é irreversível, a liquidação não aconteceu, e o operador
-    // descobre pela mensagem.
-    if (depositBalance > 0 && depositAction !== 'full_return' && retentionReason.trim().length < 5) {
+    if (kmFinalInvalido || kmFinalNumero === null) {
+      setError(`Informe o km final — não pode ser menor que ${pisoKm.toLocaleString('pt-BR')} km.`)
+      return
+    }
+
+    // RF-004 (Spec 0015): a decisão de cobrar ou não a multa é explícita — sem
+    // default, sem silêncio (RN-004: não pode ser desfeita depois de confirmada).
+    if (multaAplicavel && multaDecisao === null) {
+      setError('Decida se a multa por rescisão antecipada será cobrada.')
+      return
+    }
+
+    // A RPC recusa tudo isto também, mas depois do clique — e o encerramento é
+    // irreversível. Aqui o operador descobre antes.
+    if (!distribution.is_valid) {
+      setError('A distribuição passa de um limite — corrija os valores destacados na lista de dívidas.')
+      return
+    }
+
+    // Abater caução exige justificativa (ADR 0026) — `TerminateRentalSchema`
+    // recusa com menos de 5 caracteres.
+    if (caucaoEmDividasReais > 0 && depositReason.trim().length < 5) {
       setError('Informe o motivo do abatimento da caução — ele explica ao cliente por que o dinheiro dele virou pagamento.')
       return
     }
 
+    if (sobraCaucao > 0 && depositLeftoverEfetivo === null) {
+      setError(`Decida o que fazer com a caução que sobrou (${formatCurrency(sobraCaucao)}): o cliente ainda deve ${formatCurrency(restanteTotal)}.`)
+      return
+    }
+
+    const alloc = buildTerminationAllocations(distribution)
+
     startTransition(async () => {
+      // A distribuição inteira vai NESTA chamada: a RPC a aplica na mesma
+      // transação que fecha a locação, e qualquer recusa desfaz tudo — o
+      // operador nunca fica com a locação encerrada e o acerto pela metade.
       const result = await terminateRental({
         lease_id:         rental.id,
         termination_date: terminationDate,
         new_status:       newStatus,
         force,
+        km_final:         kmFinalNumero,
+        charge_fine:          multaEntraNaLista,
+        fine_deposit_amount:  alloc.fine_deposit_amount,
+        fine_credit_amount:   alloc.fine_credit_amount,
+        deposit_allocations:  alloc.deposit_allocations,
+        credit_allocations:   alloc.credit_allocations,
+        deposit_reason:       caucaoEmDividasReais > 0 ? depositReason.trim() : undefined,
+        extra_charge_ids_to_cancel: terminationPlan
+          .filter((l) => l.charge_id && l.action === 'keep_optional' && extraSelected.has(l.schedule_line_id))
+          .map((l) => l.charge_id!),
+        extra_schedule_line_ids_to_cancel: terminationPlan
+          .filter((l) => !l.charge_id && l.action === 'keep_optional' && extraSelected.has(l.schedule_line_id))
+          .map((l) => l.schedule_line_id),
       })
       if (!result.ok) { setError(result.error.message); return }
 
-      // Liquidação da caução, quando há saldo. `closeRentalFinancial` já existia
-      // com toda a lógica — e sem nenhum chamador: a tela mostrava o saldo e
-      // não oferecia como resolvê-lo.
-      if (depositBalance > 0) {
-        const retido = Number(retainedAmount.replace(',', '.')) || 0
-
-        const payload =
-          depositAction === 'full_return'
-            ? { rental_id: rental.id, deposit_action: 'full_return' as const, return_date: terminationDate }
-            : depositAction === 'full_retention'
-              ? { rental_id: rental.id, deposit_action: 'full_retention' as const, retention_reason: retentionReason }
-              : {
-                  rental_id: rental.id,
-                  deposit_action: 'partial_return' as const,
-                  retained_amount: retido,
-                  returned_amount: Math.round((depositBalance - retido) * 100) / 100,
-                  retention_reason: retentionReason,
-                  return_date: terminationDate,
-                }
-
-        const dep = await closeRentalFinancial(payload)
-        if (!dep.ok) { setError(`Locação encerrada, mas a caução não foi liquidada: ${dep.error.message}`); return }
-      }
-
-      // Crédito DEPOIS da caução: a ordem da ADR 0026 é caução primeiro, e o
-      // abatimento do crédito precisa ver a dívida já reduzida por ela — senão
-      // consumiria crédito numa dívida que a caução acabou de cobrir.
-      if (creditoParaAbater > 0) {
-        const ap = await applyCreditToRentalDebt({
+      // O que sobrou. Daqui em diante a locação JÁ está encerrada: uma falha vira
+      // aviso, não desfaz nada (tolerância herdada — PRD 0017). O menor entre o
+      // que o operador viu e o que o razão diz que resta: nunca devolve mais do
+      // que foi confirmado na tela.
+      const devolverCaucao = round2(Math.min(caucaoParaDevolver, result.data.deposit_remaining))
+      if (devolverCaucao > 0) {
+        const dep = await returnRemainingDeposit({
           rental_id:   rental.id,
-          customer_id: rental.customer_id,
-          amount:      creditoParaAbater,
+          amount:      devolverCaucao,
+          return_date: terminationDate,
         })
-        if (!ap.ok) { setError(`Locação encerrada, mas o crédito não foi abatido: ${ap.error.message}`); return }
+        if (!dep.ok) { setError(`Locação encerrada, mas a caução não foi devolvida: ${dep.error.message}`); return }
       }
 
-      if (creditoParaDevolver > 0) {
+      const devolverCredito = round2(Math.min(creditoParaDevolver, result.data.credit_remaining))
+      if (devolverCredito > 0) {
         const dev = await settleCustomerCredit({
           customer_id: rental.customer_id,
-          amount:      creditoParaDevolver,
+          amount:      devolverCredito,
           notes:       `Devolução no encerramento da locação ${rental.vehicle?.license_plate ?? ''}`.trim(),
         })
         if (!dev.ok) { setError(`Locação encerrada, mas o crédito não foi devolvido: ${dev.error.message}`); return }
@@ -334,14 +535,14 @@ export function TerminateForm({ rental }: TerminateFormProps) {
         <button
           type="button"
           onClick={handleConfirm}
-          disabled={isPending || !terminationDate || (openAmount > 0 && !force)}
+          disabled={isPending || !terminationDate || kmFinalInvalido || (openAmount > 0 && !force) || (multaAplicavel && multaDecisao === null) || !distribution.is_valid}
           className="inline-flex h-8 items-center rounded-full bg-danger-bg px-5 text-[13px] font-bold text-danger transition-opacity hover:opacity-80 disabled:opacity-60"
         >
           {isPending ? 'Encerrando…' : 'Confirmar Encerramento'}
         </button>
       </div>
 
-      <div className="mx-auto max-w-5xl px-6 py-8">
+      <div className="mx-auto max-w-6xl px-6 py-8">
 
         {/* Identificação — o que está sendo encerrado, antes de qualquer decisão.
             Era um bloco cinza de três linhas soltas, com o mesmo peso visual do
@@ -378,7 +579,7 @@ export function TerminateForm({ rental }: TerminateFormProps) {
                   type="date"
                   value={terminationDate}
                   max={hoje}
-                  onChange={e => setTerminationDate(e.target.value)}
+                  onChange={e => handleTerminationDateChange(e.target.value)}
                   className="h-9 w-full rounded-lg border border-border bg-surface-2 px-3 text-[13px] text-fg outline-none transition-all focus:border-primary"
                 />
                 <p className="mt-2 text-[12px] leading-relaxed text-fg-mute">
@@ -388,163 +589,479 @@ export function TerminateForm({ rental }: TerminateFormProps) {
               </div>
             </section>
 
-            {depositBalance > 0 && (
-              <section>
-                <h2 className="mb-3 text-[14px] font-bold text-primary">Destino da caução</h2>
-                <div className="rounded-xl border border-divider bg-surface p-4">
-                  <p className="text-[12px] leading-relaxed text-fg-mute">
-                    O dinheiro do cliente está em custódia. Encerrar sem decidir o destino
-                    deixaria o passivo em aberto.
+            <section>
+              <h2 className="mb-3 text-[14px] font-bold text-primary">Km final</h2>
+              <div className="rounded-xl border border-divider bg-surface p-4">
+                <input
+                  type="number"
+                  min={pisoKm}
+                  step="1"
+                  placeholder={`Mínimo ${pisoKm.toLocaleString('pt-BR')}`}
+                  value={kmFinal}
+                  onChange={e => setKmFinal(e.target.value)}
+                  className="h-9 w-full rounded-lg border border-border bg-surface-2 px-3 text-[13px] text-fg outline-none transition-all focus:border-primary"
+                />
+                <p className="mt-2 text-[12px] leading-relaxed text-fg-mute">
+                  Km do veículo na devolução. Não pode ser menor que{' '}
+                  <strong className="font-medium text-fg-soft">{pisoKm.toLocaleString('pt-BR')} km</strong>
+                  {' '}(o maior entre o km atual do veículo e o km registrado na entrega desta locação).
+                </p>
+                {kmFinal !== '' && kmFinalInvalido && (
+                  <p className="mt-1 text-[12px] text-danger">
+                    Km não pode ser menor que {pisoKm.toLocaleString('pt-BR')}.
                   </p>
+                )}
+              </div>
+            </section>
 
-                  <div className="mt-3 flex flex-col gap-1">
-                    {/* "Reter" some do rótulo: reter É abater a dívida do cliente
-                        (`deposit_retained` + `allocateWithoutCash`). O nome antigo
-                        soava como "a empresa fica com o dinheiro" — ADR 0026. */}
-                    {([
-                      podeAbaterCaucao && [
-                        'full_retention', `Abater da dívida (${formatCurrency(Math.min(depositBalance, openAmount))})`,
-                      ],
-                      podeAbaterCaucao && [
-                        'partial_return', 'Abater parte da dívida e devolver o resto',
-                      ],
-                      ['full_return', `Devolver tudo (${formatCurrency(depositBalance)})`],
-                    ].filter(Boolean) as [DepositAction, string][]).map(([valor, rotulo]) => (
-                      <label
-                        key={valor}
-                        className={`flex h-9 cursor-pointer items-center gap-2.5 rounded-lg px-3 text-[13px] transition-colors ${
-                          depositAction === valor ? 'bg-surface-2 text-fg' : 'text-fg-soft hover:bg-surface-2'
-                        }`}
-                      >
-                        <input
-                          type="radio"
-                          name="deposit_action"
-                          value={valor}
-                          checked={depositAction === valor}
-                          onChange={() => setDepositAction(valor)}
-                          className="accent-primary"
-                        />
-                        {rotulo}
-                      </label>
-                    ))}
-                  </div>
-
-                  {/* Reter é abater, e abater exige dívida. Sem ela a única saída é
-                      devolver — e a tela diz qual é o caminho para reter de fato,
-                      em vez de deixar o operador procurar uma opção que sumiu. */}
-                  {!podeAbaterCaucao && (
-                    <p className="mt-3 text-[12px] leading-relaxed text-fg-mute">
-                      Sem dívida em aberto, a caução só pode ser devolvida. Para reter por avaria ou
-                      diária em aberto, lance a despesa em{' '}
-                      <Link href="/despesas" className="underline underline-offset-2">Despesas</Link>{' '}
-                      com rateio ao cliente: isso emite a cobrança, e aí a caução tem o que abater.
-                    </p>
-                  )}
-
-                  {depositAction === 'full_retention' && depositBalance > openAmount && (
-                    <p className="mt-3 rounded-lg border border-warning bg-warning-bg px-3 py-2 text-[12px] leading-relaxed text-warning">
-                      A caução é maior que a dívida: abater tudo seria reter {formatCurrency(depositBalance - openAmount)}
-                      {' '}sem cobrança onde alocar, e o encerramento vai recusar.
-                      Use <strong>abater parte e devolver o resto</strong>, retendo no máximo{' '}
-                      {formatCurrency(openAmount)}.
-                    </p>
-                  )}
-
-                  {depositAction === 'partial_return' && (
-                    <div className="mt-3">
-                      <label className="text-[12px] text-fg-mute" htmlFor="retido">Valor retido (R$)</label>
-                      <input
-                        id="retido"
-                        type="number"
-                        step="0.01"
-                        min="0"
-                        max={Math.min(depositBalance, openAmount)}
-                        value={retainedAmount}
-                        onChange={(e) => setRetainedAmount(e.target.value)}
-                        className="mt-1 h-9 w-full rounded-lg border border-border bg-bg px-3 text-[13px] text-fg outline-none focus:border-primary"
-                        placeholder="0,00"
-                      />
-                      <p className="mt-1.5 text-[12px] text-fg-mute">
-                        Devolve {formatCurrency(Math.max(0, depositBalance - (Number(retainedAmount.replace(',', '.')) || 0)))} ao cliente.
-                      </p>
+            {/* Spec 0016 (revisão): TODA linha viva do cronograma — vencida,
+                emitida ou planejada —, dividida entre o que fica fora do
+                período (sempre cancelada, sem escolha) e o que fica dentro
+                dele (mantida por padrão, com opção de cancelar mesmo assim). */}
+            {outsidePeriod.length > 0 && (
+              <section>
+                <h2 className="mb-3 text-[14px] font-bold text-primary">Fora do período — serão canceladas</h2>
+                <div className="overflow-hidden rounded-xl border border-divider bg-surface">
+                  {outsideVisiveis.map((l) => (
+                    <div
+                      key={l.schedule_line_id}
+                      className="flex items-center justify-between gap-3 border-b border-divider px-4 py-3 text-[13px] last:border-b-0"
+                    >
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-baseline justify-between gap-3">
+                          <span className="font-medium text-fg">
+                            {l.is_issued ? `Cobrança #${l.charge_number}` : 'Parcela ainda não emitida'}
+                            {l.is_overdue && (
+                              <span className="ml-2 rounded-full bg-danger-bg px-2 py-0.5 text-[11px] font-medium text-danger">
+                                atrasada
+                              </span>
+                            )}
+                          </span>
+                          <span className="tabular-nums text-fg">{formatCurrency(l.total_amount)}</span>
+                        </div>
+                        <p className="mt-0.5 text-[12px] text-fg-mute">
+                          Período {formatDate(l.period_start)} a {formatDate(l.period_end)}
+                        </p>
+                        {l.action === 'blocked' ? (
+                          <p className="mt-1 text-[12px] text-warning">
+                            Já paga ou com crédito aplicado ({formatCurrency(l.paid_amount)}) — não pode ser
+                            cancelada por aqui.
+                          </p>
+                        ) : (
+                          <p className="mt-1 text-[12px] text-danger">Será cancelada.</p>
+                        )}
+                      </div>
                     </div>
-                  )}
+                  ))}
 
-                  {depositAction !== 'full_return' && (
-                    <div className="mt-3">
-                      <label className="text-[12px] text-fg-mute" htmlFor="motivo">Motivo da retenção</label>
-                      <input
-                        id="motivo"
-                        value={retentionReason}
-                        onChange={(e) => setRetentionReason(e.target.value)}
-                        className="mt-1 h-9 w-full rounded-lg border border-border bg-bg px-3 text-[13px] text-fg outline-none focus:border-primary"
-                        placeholder="Avaria no para-choque, diária em aberto…"
-                      />
-                    </div>
+                  {outsideResumida && (
+                    <button
+                      type="button"
+                      onClick={() => setShowAllOutside((v) => !v)}
+                      aria-expanded={showAllOutside}
+                      className="flex h-9 w-full items-center justify-center border-t border-divider text-[13px] font-medium text-primary transition-colors hover:bg-surface-2"
+                    >
+                      {showAllOutside ? 'Exibir menos' : `Exibir mais ${outsideEscondidas} cobranças`}
+                    </button>
                   )}
                 </div>
               </section>
             )}
 
-            {creditBalance > 0 && (
+            {insidePeriod.length > 0 && (
               <section>
-                <h2 className="mb-3 text-[14px] font-bold text-primary">Destino do crédito</h2>
+                <div className="mb-3 flex items-center justify-between gap-3">
+                  <h2 className="text-[14px] font-bold text-primary">Dentro do período</h2>
+                  {optionalLineIds.length > 0 && (
+                    <button
+                      type="button"
+                      onClick={toggleMarkAllOptional}
+                      className="text-[12px] font-medium text-primary underline underline-offset-2 hover:opacity-80"
+                    >
+                      {allOptionalMarked ? 'Manter todas' : 'Cancelar todas mesmo assim'}
+                    </button>
+                  )}
+                </div>
+                <div className="overflow-hidden rounded-xl border border-divider bg-surface">
+                  {insidePeriod.map((l) => {
+                    const marcada = extraSelected.has(l.schedule_line_id)
+                    return (
+                      <div
+                        key={l.schedule_line_id}
+                        className="flex items-center justify-between gap-3 border-b border-divider px-4 py-3 text-[13px] last:border-b-0"
+                      >
+                        <div className="min-w-0 flex-1">
+                          <div className="flex items-baseline justify-between gap-3">
+                            <span className="font-medium text-fg">
+                              {l.is_issued ? `Cobrança #${l.charge_number}` : 'Parcela ainda não emitida'}
+                              {l.is_overdue && (
+                                <span className="ml-2 rounded-full bg-danger-bg px-2 py-0.5 text-[11px] font-medium text-danger">
+                                  atrasada
+                                </span>
+                              )}
+                            </span>
+                            <span className="tabular-nums text-fg">{formatCurrency(l.total_amount)}</span>
+                          </div>
+                          <p className="mt-0.5 text-[12px] text-fg-mute">
+                            Período {formatDate(l.period_start)} a {formatDate(l.period_end)}
+                          </p>
+                        </div>
+                        <div className="flex shrink-0 overflow-hidden rounded-lg border border-border">
+                          <button
+                            type="button"
+                            onClick={() => setLineDecision(l.schedule_line_id, 'keep')}
+                            className={`h-8 px-3 text-[12px] font-medium transition-colors ${
+                              !marcada ? 'bg-surface-2 text-fg' : 'text-fg-mute hover:bg-surface-2'
+                            }`}
+                          >
+                            Manter
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setLineDecision(l.schedule_line_id, 'cancel')}
+                            className={`h-8 px-3 text-[12px] font-medium transition-colors ${
+                              marcada ? 'bg-danger-bg text-danger' : 'text-fg-mute hover:bg-surface-2'
+                            }`}
+                          >
+                            Cancelar
+                          </button>
+                        </div>
+                      </div>
+                    )
+                  })}
+                </div>
+              </section>
+            )}
+
+            {multaAplicavel && (
+              <section>
+                <h2 className="mb-3 text-[14px] font-bold text-primary">Multa por rescisão antecipada</h2>
                 <div className="rounded-xl border border-divider bg-surface p-4">
                   <p className="text-[12px] leading-relaxed text-fg-mute">
-                    O cliente tem <strong className="font-medium text-fg-soft">{formatCurrency(creditBalance)}</strong>{' '}
-                    de crédito — dívida da empresa com ele. Diferente da caução, o crédito é do CLIENTE
-                    e sobrevive ao contrato: pode ficar para abater a próxima locação.
+                    Esta locação está dentro do prazo mínimo configurado — multa de{' '}
+                    <strong className="font-medium text-fg-soft">{formatCurrency(multaValor)}</strong> aplicável.
                   </p>
 
                   <div className="mt-3 flex flex-col gap-1">
-                    {([
-                      creditoAbativel > 0 && sobraDoCredito === 0 && [
-                        'apply', `Abater a dívida (${formatCurrency(creditoAbativel)})`,
-                      ],
-                      creditoAbativel > 0 && sobraDoCredito > 0 && [
-                        'apply', `Abater a dívida (${formatCurrency(creditoAbativel)}) e manter o resto como crédito`,
-                      ],
-                      creditoAbativel > 0 && sobraDoCredito > 0 && [
-                        'apply_and_settle', `Abater a dívida e devolver a sobra (${formatCurrency(sobraDoCredito)})`,
-                      ],
-                      ['settle', `Devolver tudo em dinheiro (${formatCurrency(creditBalance)})`],
-                      ['keep', 'Deixar como crédito do cliente'],
-                    ].filter(Boolean) as [typeof creditAction, string][]).map(([valor, rotulo]) => (
-                      <label
-                        key={valor}
-                        className={`flex min-h-9 cursor-pointer items-center gap-2.5 rounded-lg px-3 py-1.5 text-[13px] transition-colors ${
-                          creditAction === valor ? 'bg-surface-2 text-fg' : 'text-fg-soft hover:bg-surface-2'
-                        }`}
-                      >
-                        <input
-                          type="radio"
-                          name="credit_action"
-                          value={valor}
-                          checked={creditAction === valor}
-                          onChange={() => setCreditAction(valor)}
-                          className="accent-primary"
-                        />
-                        {rotulo}
-                      </label>
-                    ))}
+                    <label
+                      className={`flex h-9 cursor-pointer items-center gap-2.5 rounded-lg px-3 text-[13px] transition-colors ${
+                        multaDecisao === 'charge' ? 'bg-surface-2 text-fg' : 'text-fg-soft hover:bg-surface-2'
+                      }`}
+                    >
+                      <input
+                        type="radio"
+                        name="multa_decisao"
+                        checked={multaDecisao === 'charge'}
+                        onChange={() => setMultaDecisao('charge')}
+                        className="accent-primary"
+                      />
+                      Cobrar a multa
+                    </label>
+                    <label
+                      className={`flex h-9 cursor-pointer items-center gap-2.5 rounded-lg px-3 text-[13px] transition-colors ${
+                        multaDecisao === 'skip' ? 'bg-surface-2 text-fg' : 'text-fg-soft hover:bg-surface-2'
+                      }`}
+                    >
+                      <input
+                        type="radio"
+                        name="multa_decisao"
+                        checked={multaDecisao === 'skip'}
+                        onChange={() => setMultaDecisao('skip')}
+                        className="accent-primary"
+                      />
+                      Não cobrar a multa
+                    </label>
                   </div>
 
-                  {creditAction === 'keep' && emAbertoDepoisDaCaucao > 0 && (
-                    <p className="mt-3 rounded-lg border border-warning bg-warning-bg px-3 py-2 text-[12px] leading-relaxed text-warning">
-                      O cliente fica devendo {formatCurrency(emAbertoDepoisDaCaucao)} e credor de{' '}
-                      {formatCurrency(creditBalance)} ao mesmo tempo. É escolha válida — só raramente
-                      é a intenção.
+                  {/* RN-007: a multa não tem mais um fluxo de abatimento só dela —
+                      quanto de caução e crédito ela recebe se decide na lista de
+                      dívidas, como em qualquer outra. */}
+                  {multaDecisao === 'charge' && (
+                    <p className="mt-3 border-t border-divider pt-3 text-[12px] leading-relaxed text-fg-mute">
+                      {temSaldo
+                        ? 'A multa entra na lista de dívidas abaixo, com as demais — é lá que você decide quanto de caução e crédito aplicar nela. O que não for alocado vira cobrança em aberto.'
+                        : 'A multa vira uma cobrança em aberto do cliente.'}
                     </p>
                   )}
+                </div>
+              </section>
+            )}
 
-                  {creditAction === 'keep' && emAbertoDepoisDaCaucao === 0 && (
-                    <p className="mt-3 text-[12px] leading-relaxed text-fg-mute">
-                      Sem dívida a abater, o crédito fica no saldo do cliente. Se ele não tem outra
-                      locação, considere devolver — ou ele vai embora credor.{' '}
-                      <Link href={`/clientes/${rental.customer_id}`} className="underline underline-offset-2">
-                        Ficha do cliente
-                      </Link>
-                    </p>
+            {temSaldo && (
+              <section>
+                <h2 className="mb-3 text-[14px] font-bold text-primary">Distribuição de caução e crédito</h2>
+                <div className="overflow-hidden rounded-xl border border-divider bg-surface">
+                  <p className="border-b border-divider px-4 py-3 text-[12px] leading-relaxed text-fg-mute">
+                    O dinheiro do cliente quita a dívida que você escolher, valor a valor. Nada é aplicado
+                    antes de <strong className="font-medium text-fg-soft">Confirmar Encerramento</strong> — e o que
+                    você não distribuir aqui continua em aberto.
+                  </p>
+
+                  {debts.length === 0 ? (
+                    <div className="px-4 py-3 text-[13px] leading-relaxed text-fg-mute">
+                      Não há dívida em aberto para receber caução ou crédito.
+                      {depositBalance > 0 && (
+                        <>
+                          {' '}Para reter por avaria ou diária em aberto, lance a despesa em{' '}
+                          <Link href="/despesas" className="underline underline-offset-2">Despesas</Link>{' '}
+                          com rateio ao cliente: isso emite a cobrança, e aí há o que distribuir.
+                        </>
+                      )}
+                    </div>
+                  ) : (
+                    <div className="overflow-x-auto">
+                    <table className="w-full text-[13px]">
+                      <thead>
+                        <tr className="h-9 border-b border-divider text-left text-fg-mute">
+                          <th className="px-4 font-medium">Dívida</th>
+                          <th className="px-2 text-right font-medium">Devido</th>
+                          {depositBalance > 0 && <th className="px-2 text-right font-medium">Caução</th>}
+                          {creditBalance > 0 && <th className="px-2 text-right font-medium">Crédito</th>}
+                          <th className="px-4 text-right font-medium">Resta</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {distribution.lines.map((line) => {
+                          const meta = debtMeta.get(line.id)
+                          const label = meta?.label ?? 'Dívida'
+                          return (
+                            <tr key={line.id} className="h-9 border-b border-divider last:border-0">
+                              {/* Uma linha só (h-9): o vencimento fica no `title` — quem precisa
+                                  da data por dívida a tem na ficha da cobrança, e "atrasada" já
+                                  diz o que importa para decidir onde aplicar o dinheiro. */}
+                              <td
+                                className="whitespace-nowrap px-4 text-fg"
+                                title={`${label} · ${meta?.origin ?? ''}${meta?.dueDate ? ` · vence ${formatDate(meta.dueDate)}` : ''}`}
+                              >
+                                <span className="font-medium">{label}</span>
+                                <span className="ml-1.5 text-fg-mute">· {meta?.origin}</span>
+                                {meta?.overdue && (
+                                  <span className="ml-1.5 text-[12px] font-medium text-danger">atrasada</span>
+                                )}
+                              </td>
+                              <td className="px-2 text-right tabular-nums text-fg">{formatCurrency(line.amount_due)}</td>
+                              {depositBalance > 0 && (
+                                <td className="px-2">
+                                  <div className="flex items-center justify-end gap-1">
+                                    {/* Mesmo atalho do crédito: aplica nesta dívida o máximo de
+                                        caução que cabe agora — o menor entre o que ela ainda
+                                        deve depois do crédito e o saldo que as outras linhas
+                                        deixaram. */}
+                                    <button
+                                      type="button"
+                                      id={`caucao-max-${line.id}`}
+                                      onClick={() => setAllocation('deposit', line.id, formatAllocationInput(line.max_deposit))}
+                                      disabled={line.max_deposit <= 0 || line.deposit >= line.max_deposit}
+                                      title={line.max_deposit > 0
+                                        ? `Aplicar ${formatCurrency(line.max_deposit)} de caução em ${label}`
+                                        : 'Não há caução ou dívida disponível nesta linha'}
+                                      aria-label={`Aplicar o máximo de caução em ${label}`}
+                                      className="h-7 shrink-0 rounded-lg border border-border px-2 text-[12px] font-medium text-primary transition-colors hover:bg-surface-2 disabled:cursor-not-allowed disabled:text-fg-mute disabled:opacity-50 disabled:hover:bg-transparent"
+                                    >
+                                      Máx.
+                                    </button>
+                                    <input
+                                      id={`caucao-${line.id}`}
+                                      type="number"
+                                      inputMode="decimal"
+                                      step="0.01"
+                                      min="0"
+                                      max={line.max_deposit}
+                                      aria-label={`Caução em ${label}`}
+                                      value={depositInputs[line.id] ?? ''}
+                                      onChange={(e) => setAllocation('deposit', line.id, e.target.value)}
+                                      placeholder="0,00"
+                                      className="h-7 w-24 rounded-lg border border-border bg-bg px-2 text-right text-[13px] tabular-nums text-fg outline-none focus:border-primary"
+                                    />
+                                  </div>
+                                </td>
+                              )}
+                              {creditBalance > 0 && (
+                                <td className="px-2">
+                                  <div className="flex items-center justify-end gap-1">
+                                    {/* Mesmo atalho da caução, do outro lado da mesma conta —
+                                        ação do operador numa linha, não sugestão automática:
+                                        nada é preenchido sozinho em nenhuma linha. */}
+                                    <button
+                                      type="button"
+                                      id={`credito-max-${line.id}`}
+                                      onClick={() => setAllocation('credit', line.id, formatAllocationInput(line.max_credit))}
+                                      disabled={line.max_credit <= 0 || line.credit >= line.max_credit}
+                                      title={line.max_credit > 0
+                                        ? `Aplicar ${formatCurrency(line.max_credit)} de crédito em ${label}`
+                                        : 'Não há crédito ou dívida disponível nesta linha'}
+                                      aria-label={`Aplicar o máximo de crédito em ${label}`}
+                                      className="h-7 shrink-0 rounded-lg border border-border px-2 text-[12px] font-medium text-primary transition-colors hover:bg-surface-2 disabled:cursor-not-allowed disabled:text-fg-mute disabled:opacity-50 disabled:hover:bg-transparent"
+                                    >
+                                      Máx.
+                                    </button>
+                                    <input
+                                      id={`credito-${line.id}`}
+                                      type="number"
+                                      inputMode="decimal"
+                                      step="0.01"
+                                      min="0"
+                                      max={line.max_credit}
+                                      aria-label={`Crédito em ${label}`}
+                                      value={creditInputs[line.id] ?? ''}
+                                      onChange={(e) => setAllocation('credit', line.id, e.target.value)}
+                                      placeholder="0,00"
+                                      className="h-7 w-24 rounded-lg border border-border bg-bg px-2 text-right text-[13px] tabular-nums text-fg outline-none focus:border-primary"
+                                    />
+                                  </div>
+                                </td>
+                              )}
+                              <td className={`px-4 text-right tabular-nums ${line.remaining > 0 ? 'text-fg' : 'text-success'}`}>
+                                {formatCurrency(line.remaining)}
+                              </td>
+                            </tr>
+                          )
+                        })}
+                      </tbody>
+                    </table>
+                    </div>
+                  )}
+
+                  {/* RF-002: quanto de cada saldo já foi alocado e quanto ainda resta. */}
+                  <div className="border-t border-divider">
+                    {depositBalance > 0 && (
+                      <div className="flex items-baseline justify-between gap-3 px-4 py-2.5 text-[13px]">
+                        <span className="text-fg-mute">Caução</span>
+                        <span className="tabular-nums text-fg">
+                          {formatCurrency(distribution.deposit_allocated)} de {formatCurrency(depositBalance)} alocados
+                          {' · '}resta <strong className="font-semibold">{formatCurrency(sobraCaucao)}</strong>
+                        </span>
+                      </div>
+                    )}
+                    {creditBalance > 0 && (
+                      <div className="flex items-baseline justify-between gap-3 px-4 py-2.5 text-[13px]">
+                        <span className="text-fg-mute">Crédito</span>
+                        <span className="tabular-nums text-fg">
+                          {formatCurrency(distribution.credit_allocated)} de {formatCurrency(creditBalance)} alocados
+                          {' · '}resta <strong className="font-semibold">{formatCurrency(sobraCredito)}</strong>
+                        </span>
+                      </div>
+                    )}
+                  </div>
+
+                  {violationMessages.length > 0 && (
+                    <ul role="alert" className="space-y-1 border-t border-danger bg-danger-bg px-4 py-2.5 text-[12px] text-danger">
+                      {violationMessages.map((m) => <li key={m}>{m}</li>)}
+                    </ul>
+                  )}
+
+                  {caucaoEmDividasReais > 0 && (
+                    <div className="border-t border-divider px-4 py-3">
+                      <label className="text-[12px] text-fg-mute" htmlFor="motivo">Motivo do abatimento da caução</label>
+                      <input
+                        id="motivo"
+                        value={depositReason}
+                        onChange={(e) => setDepositReason(e.target.value)}
+                        className="mt-1 h-9 w-full rounded-lg border border-border bg-bg px-3 text-[13px] text-fg outline-none focus:border-primary"
+                        placeholder="Avaria no para-choque, diária em aberto…"
+                      />
+                      <p className="mt-1.5 text-[12px] text-fg-mute">
+                        Um motivo para toda a caução distribuída acima — ele explica ao cliente por que o dinheiro dele virou pagamento.
+                      </p>
+                    </div>
+                  )}
+
+                  {/* RF-008: o que sobrou da caução. Reter já aconteceu, dívida a dívida,
+                      na lista acima — aqui só resta devolver ou deixar. */}
+                  {sobraCaucao > 0 && (
+                    <div className="border-t border-divider px-4 py-3">
+                      <p className="text-[13px] font-medium text-fg">
+                        Sobra de caução: <span className="tabular-nums">{formatCurrency(sobraCaucao)}</span>
+                      </p>
+                      <div className="mt-2 flex flex-col gap-1">
+                        {([
+                          ['return', `Devolver ${formatCurrency(sobraCaucao)} ao cliente`],
+                          ['keep', 'Deixar em custódia (não devolver agora)'],
+                        ] as [LeftoverChoice, string][]).map(([valor, rotulo]) => (
+                          <label
+                            key={valor}
+                            className={`flex h-9 cursor-pointer items-center gap-2.5 rounded-lg px-3 text-[13px] transition-colors ${
+                              depositLeftoverEfetivo === valor ? 'bg-surface-2 text-fg' : 'text-fg-soft hover:bg-surface-2'
+                            }`}
+                          >
+                            <input
+                              type="radio"
+                              name="deposit_leftover"
+                              value={valor}
+                              checked={depositLeftoverEfetivo === valor}
+                              onChange={() => setDepositLeftover(valor)}
+                              className="accent-primary"
+                            />
+                            {rotulo}
+                          </label>
+                        ))}
+                      </div>
+                      {depositLeftoverEfetivo === null && (
+                        <p className="mt-2 rounded-lg border border-warning bg-warning-bg px-3 py-2 text-[12px] leading-relaxed text-warning">
+                          O cliente ainda deve {formatCurrency(restanteTotal)}. Distribua a caução nas dívidas acima,
+                          ou decida aqui o que fazer com a sobra.
+                        </p>
+                      )}
+                      {depositLeftoverEfetivo === 'return' && restanteTotal > 0 && (
+                        <p className="mt-2 rounded-lg border border-warning bg-warning-bg px-3 py-2 text-[12px] leading-relaxed text-warning">
+                          Você vai devolver {formatCurrency(sobraCaucao)} a um cliente que ainda deve{' '}
+                          {formatCurrency(restanteTotal)}. É escolha válida — só raramente é a intenção.
+                        </p>
+                      )}
+                      {depositLeftoverEfetivo === 'keep' && (
+                        <p className="mt-2 text-[12px] leading-relaxed text-fg-mute">
+                          O saldo continua registrado como passivo da locação encerrada.
+                        </p>
+                      )}
+                    </div>
+                  )}
+
+                  {/* RF-009: o que sobrou do crédito. Diferente da caução, o crédito é
+                      do CLIENTE e sobrevive ao contrato — deixar é o padrão. */}
+                  {sobraCredito > 0 && (
+                    <div className="border-t border-divider px-4 py-3">
+                      <p className="text-[13px] font-medium text-fg">
+                        Sobra de crédito: <span className="tabular-nums">{formatCurrency(sobraCredito)}</span>
+                      </p>
+                      <div className="mt-2 flex flex-col gap-1">
+                        {([
+                          ['keep', 'Deixar como crédito do cliente'],
+                          ['return', `Devolver ${formatCurrency(sobraCredito)} em dinheiro`],
+                        ] as [LeftoverChoice, string][]).map(([valor, rotulo]) => (
+                          <label
+                            key={valor}
+                            className={`flex h-9 cursor-pointer items-center gap-2.5 rounded-lg px-3 text-[13px] transition-colors ${
+                              creditLeftoverEfetivo === valor ? 'bg-surface-2 text-fg' : 'text-fg-soft hover:bg-surface-2'
+                            }`}
+                          >
+                            <input
+                              type="radio"
+                              name="credit_leftover"
+                              value={valor}
+                              checked={creditLeftoverEfetivo === valor}
+                              onChange={() => setCreditLeftover(valor)}
+                              className="accent-primary"
+                            />
+                            {rotulo}
+                          </label>
+                        ))}
+                      </div>
+                      {creditLeftoverEfetivo === 'keep' && restanteTotal > 0 && (
+                        <p className="mt-2 rounded-lg border border-warning bg-warning-bg px-3 py-2 text-[12px] leading-relaxed text-warning">
+                          O cliente fica devendo {formatCurrency(restanteTotal)} e credor de{' '}
+                          {formatCurrency(sobraCredito)} ao mesmo tempo. É escolha válida — só raramente é a intenção.
+                        </p>
+                      )}
+                      {creditLeftoverEfetivo === 'keep' && restanteTotal === 0 && (
+                        <p className="mt-2 text-[12px] leading-relaxed text-fg-mute">
+                          Sem dívida a abater, o crédito fica no saldo do cliente. Se ele não tem outra
+                          locação, considere devolver — ou ele vai embora credor.{' '}
+                          <Link href={`/clientes/${rental.customer_id}`} className="underline underline-offset-2">
+                            Ficha do cliente
+                          </Link>
+                        </p>
+                      )}
+                    </div>
                   )}
                 </div>
               </section>
@@ -570,8 +1087,8 @@ export function TerminateForm({ rental }: TerminateFormProps) {
                         esta frase só descontava a caução; quando o crédito passou a
                         abater, a tela ficou com dois números para a mesma coisa —
                         R$ 300 aqui, R$ 50 ao lado. */}
-                    {(caucaoParaAbater > 0 || creditoParaAbater > 0) && (
-                      <> Depois do acerto desta tela ficam <strong>{formatCurrency(emAbertoFinal)}</strong>.</>
+                    {(caucaoEmDividasReais > 0 || creditoEmDividasReais > 0) && (
+                      <> Depois do acerto desta tela ficam <strong>{formatCurrency(restanteReal)}</strong>.</>
                     )}
                     {' '}As cobranças continuam cobráveis após o encerramento.
                   </span>
@@ -637,75 +1154,81 @@ export function TerminateForm({ rental }: TerminateFormProps) {
 
                 <div className="px-4 py-3">
                   <div className="flex items-baseline justify-between gap-3">
-                    <span className="text-[13px] text-fg-mute">Cronograma a cancelar</span>
-                    <span className={`text-[13px] font-semibold tabular-nums ${cancelable.total > 0 ? 'text-fg' : 'text-fg-mute'}`}>
-                      {formatCurrency(cancelable.total)}
+                    <span className="text-[13px] text-fg-mute">Parcelas ainda não emitidas a cancelar</span>
+                    <span className={`text-[13px] font-semibold tabular-nums ${willCancel.planejadas.total > 0 ? 'text-fg' : 'text-fg-mute'}`}>
+                      {formatCurrency(willCancel.planejadas.total)}
                     </span>
                   </div>
                   <p className="mt-1 text-[12px] text-fg-mute">
-                    {cancelable.count > 0
-                      ? `${cancelable.count} parcela${cancelable.count !== 1 ? 's' : ''} ainda não emitida${cancelable.count !== 1 ? 's' : ''}`
-                      : 'nenhuma parcela agendada depois desta data'}
+                    {willCancel.planejadas.count > 0
+                      ? `${willCancel.planejadas.count} parcela${willCancel.planejadas.count !== 1 ? 's' : ''}`
+                      : 'nenhuma'}
+                  </p>
+                </div>
+
+                <div className="px-4 py-3">
+                  <div className="flex items-baseline justify-between gap-3">
+                    <span className="text-[13px] text-fg-mute">Cobranças já emitidas a cancelar</span>
+                    <span className={`text-[13px] font-semibold tabular-nums ${willCancel.emitidas.total > 0 ? 'text-fg' : 'text-fg-mute'}`}>
+                      {formatCurrency(willCancel.emitidas.total)}
+                    </span>
+                  </div>
+                  <p className="mt-1 text-[12px] text-fg-mute">
+                    {willCancel.emitidas.count > 0
+                      ? `${willCancel.emitidas.count} cobrança${willCancel.emitidas.count !== 1 ? 's' : ''}`
+                      : 'nenhuma'}
                   </p>
                 </div>
               </div>
             </section>
 
             {/* O ACERTO — ADR 0026. A apuração acima diz o que existe; este bloco
-                diz no que isso resulta. Sem ele, "encerrar mesmo com R$ 1.200,00
-                em aberto" era o único número da tela, de um cliente cujo dinheiro
-                a empresa está segurando. */}
-            {openAmount > 0 && (depositBalance > 0 || creditBalance > 0) && (
+                diz no que isso resulta, com a distribuição que o operador montou.
+                Sem ele, "encerrar mesmo com R$ 1.200,00 em aberto" era o único
+                número da tela, de um cliente cujo dinheiro a empresa está segurando. */}
+            {debts.length > 0 && temSaldo && (
               <section>
                 <h2 className="mb-3 text-[14px] font-bold text-primary">Acerto final</h2>
                 <div className="overflow-hidden rounded-xl border border-divider bg-surface">
 
                   <div className="flex items-baseline justify-between gap-3 px-4 py-2.5">
                     <span className="text-[13px] text-fg-mute">Dívida do cliente</span>
-                    <span className="text-[13px] tabular-nums text-fg">{formatCurrency(openAmount)}</span>
+                    <span className="text-[13px] tabular-nums text-fg">{formatCurrency(distribution.debt_total)}</span>
                   </div>
 
                   {depositBalance > 0 && (
                     <div className="flex items-baseline justify-between gap-3 px-4 py-2.5">
-                      <span className="text-[13px] text-fg-mute">
-                        Caução abatida
-                        {caucaoParaAbater === 0 && <span className="ml-1 text-[12px]">(escolheu devolver)</span>}
-                      </span>
-                      <span className={`text-[13px] tabular-nums ${caucaoParaAbater > 0 ? 'text-fg' : 'text-fg-mute'}`}>
-                        − {formatCurrency(caucaoParaAbater)}
+                      <span className="text-[13px] text-fg-mute">Caução abatida</span>
+                      <span className={`text-[13px] tabular-nums ${distribution.deposit_allocated > 0 ? 'text-fg' : 'text-fg-mute'}`}>
+                        − {formatCurrency(distribution.deposit_allocated)}
                       </span>
                     </div>
                   )}
 
                   {creditBalance > 0 && (
                     <div className="flex items-baseline justify-between gap-3 border-t border-divider px-4 py-2.5">
-                      <span className="text-[13px] text-fg-mute">
-                        Crédito abatido
-                        {creditoParaAbater === 0 && creditoAbativel > 0 && (
-                          <span className="ml-1 text-[12px]">(disponível {formatCurrency(creditoAbativel)})</span>
-                        )}
-                      </span>
-                      <span className={`text-[13px] tabular-nums ${creditoParaAbater > 0 ? 'text-fg' : 'text-fg-mute'}`}>
-                        − {formatCurrency(creditoParaAbater)}
+                      <span className="text-[13px] text-fg-mute">Crédito abatido</span>
+                      <span className={`text-[13px] tabular-nums ${distribution.credit_allocated > 0 ? 'text-fg' : 'text-fg-mute'}`}>
+                        − {formatCurrency(distribution.credit_allocated)}
                       </span>
                     </div>
                   )}
 
                   <div className="flex items-baseline justify-between gap-3 border-t border-divider bg-surface-2 px-4 py-2.5">
                     <span className="text-[13px] font-medium text-fg">Restante a receber</span>
-                    <span className={`text-[13px] font-bold tabular-nums ${emAbertoFinal > 0 ? 'text-fg' : 'text-success'}`}>
-                      {formatCurrency(emAbertoFinal)}
+                    <span className={`text-[13px] font-bold tabular-nums ${restanteTotal > 0 ? 'text-fg' : 'text-success'}`}>
+                      {formatCurrency(restanteTotal)}
                     </span>
                   </div>
 
                   {/* Devolução é a única linha que tira dinheiro do caixa — e o
-                      encerramento passou a poder fazer as duas de uma vez. */}
+                      encerramento pode fazer as duas de uma vez. */}
                   {(caucaoParaDevolver > 0 || creditoParaDevolver > 0) && (
                     <div className="border-t border-divider px-4 py-2.5">
                       <div className="flex items-baseline justify-between gap-3">
                         <span className="text-[13px] text-fg-mute">Sai do caixa</span>
                         <span className="text-[13px] font-semibold tabular-nums text-danger">
-                          {formatCurrency(Math.round((caucaoParaDevolver + creditoParaDevolver) * 100) / 100)}
+                          {formatCurrency(round2(caucaoParaDevolver + creditoParaDevolver))}
                         </span>
                       </div>
                       <p className="mt-1 text-[12px] text-fg-mute">
@@ -736,13 +1259,24 @@ export function TerminateForm({ rental }: TerminateFormProps) {
                   </span>
                 </li>
 
-                {cancelable.count > 0 && (
+                {willCancel.planejadas.count > 0 && (
                   <li className="flex items-start gap-3 px-4 py-3 text-[13px] text-fg-soft">
                     <CalendarX2 className="mt-0.5 h-4 w-4 shrink-0 text-fg-mute" />
                     <span>
-                      {cancelable.count} parcela{cancelable.count !== 1 ? 's' : ''} ainda não emitida
-                      {cancelable.count !== 1 ? 's' : ''} ser{cancelable.count !== 1 ? 'ão' : 'á'} cancelada
-                      {cancelable.count !== 1 ? 's' : ''}.
+                      {willCancel.planejadas.count} parcela{willCancel.planejadas.count !== 1 ? 's' : ''} ainda não emitida
+                      {willCancel.planejadas.count !== 1 ? 's' : ''} ser{willCancel.planejadas.count !== 1 ? 'ão' : 'á'} cancelada
+                      {willCancel.planejadas.count !== 1 ? 's' : ''}.
+                    </span>
+                  </li>
+                )}
+
+                {willCancel.emitidas.count > 0 && (
+                  <li className="flex items-start gap-3 px-4 py-3 text-[13px] text-danger">
+                    <ReceiptText className="mt-0.5 h-4 w-4 shrink-0" />
+                    <span>
+                      {willCancel.emitidas.count} cobrança{willCancel.emitidas.count !== 1 ? 's' : ''} já emitida
+                      {willCancel.emitidas.count !== 1 ? 's' : ''} ser{willCancel.emitidas.count !== 1 ? 'ão' : 'á'} cancelada
+                      {willCancel.emitidas.count !== 1 ? 's' : ''} — o cliente deixa de dever esse período.
                     </span>
                   </li>
                 )}
@@ -753,18 +1287,24 @@ export function TerminateForm({ rental }: TerminateFormProps) {
                     <span>
                       {openCharges.length} cobrança{openCharges.length !== 1 ? 's' : ''} já emitida
                       {openCharges.length !== 1 ? 's' : ''} continua{openCharges.length !== 1 ? 'm' : ''}{' '}
-                      {openCharges.length !== 1 ? 'cobráveis' : 'cobrável'} — o encerramento não cancela
-                      documento emitido.
+                      {openCharges.length !== 1 ? 'cobráveis' : 'cobrável'}.
                     </span>
                   </li>
                 )}
 
-                {impact?.within_minimum && (
+                {multaAplicavel && (
                   <li className="flex items-start gap-3 px-4 py-3 text-[13px] text-warning">
                     <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
                     <span>
-                      Rescisão dentro da vigência mínima —{' '}
-                      <strong>multa contratual de {formatCurrency(CONTRACT_TERMINATION_FINE_BRL)} aplicável</strong>.
+                      Rescisão dentro do prazo mínimo configurado — multa de{' '}
+                      <strong>
+                        {formatCurrency(multaValor)}{' '}
+                        {multaDecisao === 'charge'
+                          ? 'será cobrada'
+                          : multaDecisao === 'skip'
+                            ? 'não será cobrada'
+                            : 'aplicável — decida ao lado'}
+                      </strong>.
                     </span>
                   </li>
                 )}

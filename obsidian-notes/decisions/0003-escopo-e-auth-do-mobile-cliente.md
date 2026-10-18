@@ -28,6 +28,8 @@ Cada app olha **apenas a sua tabela de papel** ao autenticar:
 
 - **`apps/web`** considera autenticado quem tem linha em `tenant_members`. Se o `auth.uid()` não está lá, faz `signOut()` e devolve o login com mensagem genérica.
 - **`apps/mobile`** considera autenticado quem tem linha em `customers` com `user_id = auth.uid()`. Caso contrário, `signOut()` + login.
+  - **Sessão por aparelho (2026-10-16):** todo `signOut` do mobile usa `scope: 'local'`. O padrão do auth-js é `'global'` e, antes, sair em um aparelho revogava a sessão do cliente em todos os outros (eles caíam no login na renovação seguinte do token). O mesmo usuário pode estar logado em vários aparelhos ao mesmo tempo.
+  - **Falha ao ler `customers` ≠ "não é cliente":** a query de vínculo lança erro em vez de devolver `[]`. Na abertura do app, um erro mantém a sessão (com a última locadora salva no aparelho); só a lista vazia confirmada desloga. No login, um erro desfaz a sessão local e mostra uma mensagem de conexão.
 
 Não há constraint cruzada no banco. Se um mesmo `auth.users` aparecer nas duas tabelas, cada app simplesmente ignora a presença na outra: o web só enxerga o universo administrativo, o mobile só enxerga o universo cliente. Isso é o suficiente porque (a) nenhum dado vaza — RLS filtra por papel, não por identidade global; (b) a UX "muito bem distinta" exigida pelo stakeholder está garantida pela separação de **apps**, não de **contas**; (c) não acrescentamos trigger nem fail-mode de "email já existe como admin, não pode ser cliente". Reversível se o stakeholder decidir endurecer depois — só adicionar trigger.
 
@@ -64,6 +66,10 @@ WHERE c.user_id = auth.uid();
 
 Todas as queries do mobile filtram pelo tenant ativo. RLS faz o reforço server-side (vê §5).
 
+> **Implementado em 2026-10-16** (até então nenhuma das duas frases acima valia):
+> - **Filtro por locadora ativa:** a RLS de cliente usa `current_customer_ids()`, que devolve o cadastro do usuário em **todas** as locadoras — ela isola cliente de cliente, não locadora de locadora para o mesmo cliente. Sem filtro no app, quem era cliente de duas via a mesma placa no Início e as cobranças misturadas, qualquer que fosse a escolha. Agora o `SupabaseProvider` do mobile liga `scopeReadsToTenant`, e os hooks de lista (`useRentals`, `useVehicles`, `useMaintenances`, `useMaintenanceRecords`, `useCustomers`, `useMyCharges`, `useMyPaidCharges`, vistorias do cliente) filtram por `tenant_id` via `useReadScope()` e levam a locadora na queryKey. O web não liga o escopo — comportamento inalterado.
+> - **Troca na aba Conta:** seção "Locadora", visível só com 2+ locadoras: mostra a locadora ativa e o item "Trocar de locadora", que abre um modal com a lista (✓ na atual, suspensas desabilitadas); tocar numa locadora troca via `selectTenant()` e volta ao Início.
+
 ### 4. Convite e onboarding do cliente
 
 O admin no web é quem dispara o acesso:
@@ -98,7 +104,7 @@ O bloqueio "admin não loga no mobile" também roda no client (após login, chec
 | **Cobranças** | Lista (em aberto / pagas), valor, vencimento, histórico |
 | **Manutenções da moto** | Próxima prevista, histórico de concluídas |
 | **Suporte** | Telefone / WhatsApp do operador do tenant (vem de `companies`) |
-| **Sair** | `signOut()` + volta pro login |
+| **Sair** | `signOut({ scope: 'local' })` + volta pro login (só este aparelho) |
 
 Fora do MVP: pagar cobrança no app, abrir chamado, push notifications, edição de dados pessoais.
 

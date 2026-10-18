@@ -2,6 +2,8 @@
 
 Snapshot em **2026-06-25**.
 
+> **Marca (2026-10-15):** o sistema web exibe **Locaw** em todo texto visível — login, sidebar, títulos de página, landing `/home`, PWA de vistoria, descrições de cobrança enviadas aos gateways e nome do webhook no Asaas. "GoMoto" continua como nome **interno** do projeto: pacotes `@gomoto/*`, comentários, prefixo `gomoto:` do `externalReference` do Asaas (a Edge Function reconhece cobranças por ele — não trocar), scheme `gomoto://` do app mobile, chave de localStorage e domínios de e-mail de fallback.
+
 ## ✅ Funcionando end-to-end
 
 - Autenticação (login/logout via Supabase, cookie httpOnly)
@@ -19,6 +21,7 @@ Snapshot em **2026-06-25**.
 - Processos (Q&A interno com ordenação)
 - Configurações da empresa
 - **Audit logs populados em todas as 7 telas de dashboard** (Fase 5 — gap fechado em 2026-06-12)
+- **Pagamento online por gateway (ADRs 0030/0031/0032)** — o tenant conecta quantos quiser e elege UM para cobrar. Três provedores em produção: **Mercado Pago** e **Cora** (OAuth2, geram Pix) e **InfinitePay** (InfiniteTag digitada, gera link de checkout com Pix e cartão). Ciclo completo validado ao vivo nos três: código gerado, pago, webhook confirmou, cobrança fechada e razão balanceado. Escrita da conta por RPC `SECURITY DEFINER`, credencial no Vault, confirmação por RPC transacional sobre o padrão inbox
 - **Multi-tenancy:** `tenant_id` injetado server-side em todas as escritas
 
 Ver [[Telas]] para documentação detalhada de cada rota.
@@ -40,7 +43,7 @@ Detalhes e tradeoffs registrados em [[decisions/0002-padrao-canonico-pagina-serv
 | PDF de contratos | Botão "PDF" gera via docx-preview + print dialog (commit `683a233`) |
 | Geolocalização de motos | Lat/lng simulados no mapa; GPS real comentado como "futuro" |
 | Emails transacionais | Settings preparado, mas não envia |
-| Webhooks/notificações | Não implementado |
+| Notificações ao usuário | Não implementado. **Webhooks de gateway existem e rodam em produção** — três Edge Functions (`mercadopago-webhook`, `cora-webhook`, `infinitepay-webhook`) sobre `_shared/inbox.ts` |
 | App mobile | Login CPF + listagem de manutenções + registro de conclusão + **BillingsScreen** (cobranças do cliente, filtros, modal de detalhe). Outras telas pendentes |
 | `packages/data` cobre só leituras | Mutações vivem em `actions.ts` por tela (decisão registrada na ADR 0002) |
 
@@ -143,6 +146,159 @@ encerramento.
 
 ## 🧱 Dívida técnica registrada
 
+**Miudezas de portão e ambiente** (2026-09-06, achadas durante a ADR 0032)
+
+Nenhuma vale um ADR, mas todas custam tempo de quem tropeça:
+
+- **`apps/web/tsconfig.json` tem `exclude: ['tests']`** — as specs E2E **nunca passam pelo typecheck**. Um campo novo obrigatório num descritor diverge em silêncio entre teste e produção, e só aparece quando a suíte roda.
+- **`api-payment-intent.spec.ts` insere `is_default: true` direto**, em vez de passar por `fn_set_default_provider_account`. Qualquer dev que conecte um gateway de verdade no banco local quebra a suíte com `duplicate key ... idx_provider_accounts_one_default`.
+- **`MERCADOPAGO_CLIENT_SECRET` está Non-sensitive na Vercel** — decisão consciente enquanto se testa, precisa virar Sensitive antes de usuários reais. (`INFINITEPAY_WEBHOOK_URL` já nasceu Sensitive, porque embute o segredo do webhook no path.)
+- **Cora, homologação:** o `client_secret` passou pelo transcript de uma conversa e precisa ser rotacionado; e falta pedir a liberação de `http://localhost:3000/*` como `redirect_uri` (produção já funciona).
+
+**Auditabilidade e privilégio no caminho do dinheiro — [[decisions/0034-auditabilidade-do-caminho-do-dinheiro|ADR 0034]]** (2026-09-06)
+
+🔴 **CORREÇÃO CRÍTICA AGUARDANDO DEPLOY.** Enquanto as migrations não subirem
+para a cloud, produção segue exposta.
+
+Com a **chave anônima** — a que viaja no bundle do navegador de toda página
+publicada — e mais nada, era possível lançar no razão de **qualquer empresa**:
+
+```
+POST /rest/v1/rpc/post_financial_transaction  → HTTP 200
+```
+
+Reproduzido ao vivo e corrigido em duas camadas. A causa é um
+`ALTER DEFAULT PRIVILEGES ... GRANT ALL ... TO anon` de 2026-06-27: **toda
+tabela e toda função criada depois nasce concedida a `anon`**. Medido antes da
+correção: 67 das 71 rotinas de `public` executáveis por `anon`, 37 delas
+`SECURITY DEFINER`. As outras funções de dinheiro escaparam por acidente — elas
+consultam `get_user_tenants()`, que para `anon` é vazio;
+`post_financial_transaction` recebia o tenant por parâmetro e não perguntava
+nada.
+
+Implementado (Fases 1, 2 e 2b): o elo `gateway_events → payments → razão` virou
+FK; `received_by_system` (`gateway:<provedor>`) distingue máquina de pessoa;
+"aceito sem verificar" (ADR 0033) ganhou coluna própria; o `tenant_id` do
+evento é carimbado ANTES do trabalho arriscado, então a fila de replay deixa de
+ser invisível para quem agiria. Fechados: credencial de gateway fora do alcance
+de `authenticated`, `payment_intents` só escrevível por RPC, `INSERT` direto no
+razão revogado, e `reversed_at` só aceito depois de o estorno existir no razão.
+
+**Segundo achado crítico, na verificação do primeiro (Fase 2c):** as três
+funções de administração da plataforma guardavam com
+`IF get_platform_role() <> 'owner'`. Para quem não é admin isso é
+`NULL <> 'owner'` = **NULL**, e `IF NULL THEN` não executa — a guarda era pulada
+exatamente para quem ela existe para barrar. Reproduzido: um `operator` comum de
+tenant promoveu uma segunda conta a `platform_admin` **owner**, que enxerga todos
+os tenants. Corrigido com `IS DISTINCT FROM` (NULL-safe, já usado no resto do
+schema) + `SET search_path`.
+
+Na mesma varredura: existiam **dois** caminhos concedendo ao `anon` — o
+`ALTER DEFAULT PRIVILEGES` e o default do próprio PostgreSQL, que concede
+`EXECUTE` a `PUBLIC` em todo `CREATE FUNCTION`. A Fase 2b fechou só o primeiro.
+Agora `anon` está fora do schema `public` inteiro, e a migration **se
+autoverifica**: falha se sobrar rotina alcançável por anon ou se `authenticated`
+perder acesso.
+
+Verificado em banco limpo: suíte E2E **257 passando, 0 falhas**.
+
+**Fase 3 entregue (visibilidade):** views `gateway_event_audit` e
+`financial_reconciliation`, e a tela **Configurações → Integrações →
+Diagnóstico** (Owner/Admin). A reconciliação — "existe documento que não virou
+lançamento?" — deixa de existir só como teste de CI e passa a ser respondível
+sobre os dados reais.
+
+**Fase 3b: o dreno da fila (fecha a Questão 2 da ADR 0033).**
+`idx_gateway_events_unprocessed` sempre foi chamado de fila de replay e nunca
+teve consumidor — como respondemos 200 antes de processar, o provedor nunca
+reenvia. Agora tem: os processadores saíram dos webhooks para
+`_shared/{cora,mercadopago,infinitepay}.ts`, e a Edge Function `gateway-replay`
+chama **a mesma função** que a entrega original. Isso é possível porque cada
+processador lê só do payload GRAVADO — o replay não pode divergir do webhook
+porque não é outro código.
+
+Achado ao testar: `markFailed` gravava `attempts: 1` fixo. Com uma entrega só
+ninguém notava; com o dreno, reprocessar dez vezes deixava o contador em 1.
+Agora conta.
+
+⚠️ A suíte **não executa** funções Deno. O refactor foi verificado à mão com
+`supabase functions serve` + mock da API da Cora servido como função na mesma
+rede: ciclo com dinheiro fechou (evento parado → confirmado, R$ 250,00, razão
+somando zero). **Os quatro webhooks precisam de deploy.**
+
+**Fase 4 — vigilância ativa.** `GET /api/cron/drain-gateway-events`, cron da
+Vercel **diário** (`0 10 * * *` = 07:00 BRT — o Hobby não aceita mais frequente),
+drena a fila sozinha: `attempts < 5`, evento com mais de 2 minutos (o webhook
+ainda pode estar processando em `waitUntil`), lote de 50.
+
+Com cadência diária o **botão "Reprocessar" da tela é o caminho normal** para
+urgência; o cron é a rede que pega o que ninguém viu.
+Ficou na aplicação e não no `pg_cron` porque é orquestração HTTP, não SQL — e
+assim nenhum segredo novo entra no banco; usa o `CRON_SECRET` que a emissão
+manual já usa.
+
+Alerta vai para o log estruturado: `drain.needs_human` (esgotou as tentativas),
+`drain.accepted_unverified` (ADR 0033, últimas 24h) e `drain.reconciliation`.
+Não foi criado canal de notificação — seria infraestrutura nova, e escolher
+destinatário no lugar do humano seria decidir por ele.
+
+⚠️ **Defeito achado ao testar, que valeu a Fase inteira:** faltava
+`cache: 'no-store'` na chamada à Edge Function. A rota relatava
+`ainda_falhando: 2` **sem ter chamado a função uma vez** — o Next servia a
+resposta anterior do cache. A drenagem se declarava saudável sem fazer nada, e
+o botão da tela tinha o mesmo defeito num segundo clique.
+
+`CRON_SECRET` **criado em produção** (Sensitive) — não existia, o que significa
+que o disparo manual da emissão de cobranças (`/api/cron/issue-charges`) também
+estava morto lá, respondendo 500. A Vercel injeta o valor no header
+`Authorization` do cron automaticamente.
+
+**Fase 5 — a trilha do tenant passa a ver dinheiro. ADR 0034 CONCLUÍDA.**
+`payment_confirmed` e `token_refreshed` estavam no vocabulário de
+`lib/audit.ts` desde sempre **sem um único escritor** — a causa era estrutural,
+não descuido: a confirmação roda em Deno com `service_role` e `logAction` vive
+em `apps/web`.
+
+A trilha do dinheiro passou a ser escrita pelo BANCO, por trigger em `payments`,
+na mesma transação. Alcança os três caminhos (webhook, recebimento manual,
+abatimento por crédito) sem que nenhum precise lembrar de chamar nada — e não
+tem como ser perdida: se o registro falhar, o pagamento não acontece.
+
+`audit_logs.user_id` deixou de ser NOT NULL e ganhou `actor_system`
+(`gateway:<provedor>`), com CHECK de exatamente um autor. Papel de máquina não
+se disfarça de pessoa. `token_refreshed` sai de `fn_store_provider_credentials`,
+sem jamais registrar a credencial.
+
+A trilha virou **imutável inclusive para `service_role`** — as policies eram
+SELECT/INSERT, mas RLS é contornada por `SECURITY DEFINER`, que é justamente
+como a trilha do dinheiro é escrita.
+
+Defeito achado no caminho: **`logAction` nunca conferia o erro do INSERT**. Uma
+gravação recusada pela RLS passava sem deixar nada, nem no log.
+
+**Dinheiro para cobrança cancelada — [[decisions/0033-dinheiro-para-cobranca-cancelada|ADR 0033]]** (2026-09-06)
+
+🟡 **Proposta, nada implementado.** Vale para os três gateways, é anterior à
+InfinitePay, e foi ela que tornou visível.
+
+Cancelar uma cobrança **não expira o `payment_intent` pendente**, então o código
+de pagamento continua vivo no provedor. Se alguém pagar,
+`fn_confirm_gateway_payment` não olha o status da cobrança: credita normalmente
+e, como a emissão já foi revertida no razão, **`contas_a_receber` fica
+negativo** — os livros passam a dizer que a locadora deve ao cliente.
+
+Duas metades. A mecânica (cancelar expira os intents, como
+`fn_disconnect_provider_account` já faz) não tem decisão pendente. A outra é
+**decisão do humano**: dinheiro que chega para cobrança cancelada vira crédito
+do cliente (recomendado) ou continua recebível? Recusar viola a ADR 0024.
+
+Cancelar no provedor — MP e Cora têm endpoint, InfinitePay **não tem** — reduz a
+probabilidade, mas não elimina o caso (corrida, falha de rede, janela de status).
+
+Registrada junto: **nada drena a fila de replay** (`gateway_events` com
+`processed_at IS NULL`). Como respondemos antes de processar, o provedor não
+reenvia — a fila depende de alguém olhar.
+
 **Leitura do cliente sobre o razão — [[decisions/0027-como-o-cliente-le-saldo-derivado-do-razao|ADR 0027]]** (2026-08-31)
 
 **Portão decidido e implementado; uma questão em aberto.** As views de saldo são
@@ -235,6 +391,9 @@ Spec 0004 (locação e cobranças) — ✅ backend + core + mobile fechados em 2
 
 ## ✅ Recentemente entregue
 
+- **Um veículo, uma locação — [[decisions/0036-um-veiculo-uma-locacao|ADR 0036]]** (2026-09-10) — O banco não impedia duas locações ativas na mesma moto: a checagem se perdeu na reescrita da Spec 0014, e a própria suíte E2E criava até seis locações ativas num veículo e passava. Agora são duas regras no banco: índice único parcial (uma `active` por veículo, para qualquer caminho de escrita) e trigger de sobreposição de período `[início, fim)`, que fecha o caminho aberto pela ADR 0035 (antecipar o início para antes da devolução da anterior). A migration falha listando as placas se já houver duplicidade. **Rodar a pré-checagem em produção antes do `db push`.**
+- **Ajuste de período e condições da locação — [[decisions/0035-ajuste-de-periodo-da-locacao|ADR 0035]]** (2026-09-10) — `/locacoes/[id]/ajustar` passa a ser a dona única dos seis parâmetros do cronograma (início, fim, ciclo, dia de vencimento, valor, pro rata). Antes, `start_date`/`cycle`/`due_day`/`use_pro_rata` não tinham fluxo nenhum — a orientação era "encerre e crie outra locação" — e `end_date` tinha **dois** donos com regras divergentes (Renovar recusava encurtar, Encerrar fechava o contrato). `/reajustar` e `/renovar` viraram redirects. A decisão inteira é `planPeriodAdjustment` (`@gomoto/core`), a MESMA chamada da prévia e da gravação: a tela mostra, antes do clique, quais cobranças emitidas serão canceladas, quais parcelas do plano serão substituídas e quais nascem — marcando as que emitem imediatamente e as que nascem vencidas. `fn_adjust_rental_period` reconfere sob o lock da locação que nenhuma linha a substituir tem cobrança viva (`LINE_HAS_LIVE_CHARGE`) — entre a leitura da tela e a escrita cabem o job de emissão e um webhook. Cobrança **paga** na faixa é impedimento, não cancelamento. **Bug pré-existente achado e corrigido no caminho:** com `use_pro_rata: false`, contrato que começava no próprio dia de vencimento gerava uma cobrança de período ZERO pelo valor cheio — um mensal de 10/10 a 10/03 saía com 6 × R$ 600 em vez de 5; dois testes existentes codificavam o defeito (contavam vencimentos, não períodos) e foram corrigidos junto.
+- **Multi-gateway de pagamento — ADRs [[decisions/0030-multiplos-gateways-de-pagamento|0030]], [[decisions/0031-integracao-cora-parceria|0031]] e [[decisions/0032-integracao-infinitepay-checkout|0032]]** (2026-09-04 a 09-06, branch `feat/multiplos-gateways-pagamento`) — A 0030 trocou "o código escolhe o gateway" por "a conta ELEITA diz o provedor", e no caminho corrigiu o G-01: `authenticated` não tinha INSERT/UPDATE em `payment_provider_accounts` desde a Spec 0014, ou seja, conectar gateway **nunca funcionou em runtime**. A 0031 somou a Cora (OAuth2, token de 24h com refresh rotativo, centavos, Pix só com EMV). A 0032 somou a InfinitePay, primeiro provedor sem código de pagamento — devolve URL de checkout, método `payment_link`, credencial é um handle público. Três ciclos fechados em produção com dinheiro real. Duas correções transversais no caminho: o método default passou a vir do gateway eleito (era `'pix'` cravado em dois chamadores) e o meio REAL do pagamento passou a chegar ao razão (`p_method`, que a RPC já esperava e ninguém preenchia). Aberto: [[decisions/0033-dinheiro-para-cobranca-cancelada|ADR 0033]].
 - **Spec 0004 — locação e cobranças (backend + core + mobile)** (2026-06-25) — Rename completo `contracts` → `rentals` em toda a codebase. 4 migrations: schema `rentals` com `cycle`/`cycle_amount`/`due_day`/`rental_type`/`minimum_months`; extensões em `billings` (`original_amount`, `discount_amount`, `billing_type`, status `prejudice`); 3 RPCs atômicos com `SELECT FOR UPDATE NOWAIT` (sem dupla locação para mesma moto); tabela `queue_entries`. `@gomoto/core` atualizado: `RentalSchema`, `generateCycleCharges` (pro-rata, mensal, semanal), `canRegisterPayment`, `canApplyDiscount`, `calculateFinalAmount` — 163 testes passando. `@gomoto/data`: hooks `useRentals`, `useRentalById`, `useBillingsForCustomer`. 8 Server Actions em `locacoes/actions.ts`. Mobile `BillingsScreen` com grupos por locação, filtros, modal de detalhe, pull-to-refresh, banner offline. E2E stubs em `locacoes.spec.ts` e `billings-rentals.spec.ts`. Tela web `/locacoes` é placeholder — UI completa é próximo passo.
 - **PRD 0003 V1 — fechada** (2026-06-20) — F1 a F5 entregues. Smoke test end-to-end no DB local confirma o bootstrap: plano default com 5 itens → moto criada → 5 maintenances `preventive`/`inspection` materializadas. F2 (planos + wizard passo 3) já estava em código quando reabrimos a auditoria — só faltava marcar como concluída nas notas.
 - **PRD 0003 F5 — manutenção mobile + aprovação web** (4 commits, 2026-06-20) — `87c84ac` cria `maintenance_records` com RLS (operador via `tenant_isolation`, cliente via `customer_self_select/insert`). `899e42a` adiciona modal de registro no mobile (KM, oficina, custo, foto de hodômetro obrigatória, foto de nota opcional) — upload via `arrayBuffer()` (`fetch().blob()` no RN gera arquivo vazio na Storage). `1764f85` adiciona rota `/aprovacoes` no web com aprovação inline preenchendo `effective_executor`/`effective_customer_payer_pct` no `maintenances` e marcando o record. `bd3b5bb` corrige warn de `MediaTypeOptions` deprecado (substituído por `mediaTypes: ['images']`). `36b4dd0` adiciona badge de pendentes na sidebar + realtime cross-tab via publication `supabase_realtime`. **F3, F4 e F5 do PRD 0003 concluídas.**
@@ -248,7 +407,7 @@ Spec 0004 (locação e cobranças) — ✅ backend + core + mobile fechados em 2
 - `pnpm build` sem erros (Turbo cobre `web` + `core` + `data`).
 - Dev server: `http://localhost:3000`
 - Supabase local: `http://127.0.0.1:54321`
-- Projeto Supabase cloud: `hcnxbqunescfanqzmsha`
+- Projeto Supabase cloud: `oskgooflepkkjdwxuouj`
 
 ## Últimos commits relevantes (2026-06-20)
 

@@ -1,4 +1,4 @@
-import { useCallback, useMemo } from 'react'
+import { useMemo } from 'react'
 import {
   ActivityIndicator,
   Image,
@@ -10,7 +10,7 @@ import {
   View,
 } from 'react-native'
 import { SafeAreaView } from 'react-native-safe-area-context'
-import { useFocusEffect, useRouter } from 'expo-router'
+import { useRouter } from 'expo-router'
 import {
   useMyCharges,
   useMaintenances,
@@ -25,7 +25,21 @@ import {
   type Vehicle,
 } from '@gomoto/core'
 import { useAuth } from '../../src/contexts/auth'
+import { useRefreshOnFocus } from '../../src/hooks/useRefreshOnFocus'
 import { useTheme, type ThemeTokens } from '../../src/theme'
+import {
+  Badge,
+  Button,
+  Card,
+  EmptyState,
+  Icon,
+  IconCircle,
+  ScreenHeader,
+  SectionHeader,
+  radius,
+  type IconName,
+  type Tone,
+} from '../../src/components/ui'
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -36,6 +50,12 @@ function greeting(): string {
   if (h < 12) return 'Bom dia'
   if (h < 18) return 'Boa tarde'
   return 'Boa noite'
+}
+
+/** Só o primeiro nome: "Boa noite, Maria" cabe no cabeçalho; o nome completo não. */
+function firstName(name: string | null | undefined): string | null {
+  const first = name?.trim().split(/\s+/)[0]
+  return first ? first : null
 }
 
 function formatCurrency(value: number | null | undefined): string {
@@ -49,114 +69,188 @@ function formatDate(iso: string | null | undefined): string {
   return `${d}/${m}/${y}`
 }
 
+/**
+ * Hoje no fuso do APARELHO. `toISOString()` devolve UTC: depois das 21h no
+ * Brasil já é "amanhã", e a cobrança que vence hoje aparecia como vencida.
+ */
+function localTodayIso(): string {
+  const d = new Date()
+  const mm = String(d.getMonth() + 1).padStart(2, '0')
+  const dd = String(d.getDate()).padStart(2, '0')
+  return `${d.getFullYear()}-${mm}-${dd}`
+}
+
+function daysUntil(isoDate: string): number {
+  const today = new Date()
+  today.setHours(0, 0, 0, 0)
+  const due = new Date(isoDate + 'T00:00:00')
+  return Math.round((due.getTime() - today.getTime()) / 86_400_000)
+}
+
+function dueLabel(isoDate: string): string {
+  const days = daysUntil(isoDate)
+  if (days === 0) return 'Vence hoje'
+  if (days === 1) return 'Vence amanhã'
+  return `Vence em ${days} dias · ${formatDate(isoDate)}`
+}
+
 const CYCLE_LABEL: Record<string, string> = {
   monthly: '/mês',
   weekly: '/semana',
 }
 
-function getMaintenanceStatusTone(theme: ThemeTokens): Record<string, { bg: string; fg: string }> {
-  return {
-    overdue:   { bg: theme.dangerBg, fg: theme.danger },
-    upcoming:  { bg: theme.pendingBg, fg: theme.pending },
-    scheduled: { bg: theme.successBg, fg: theme.success },
-    completed: { bg: theme.surfaceAlt, fg: theme.textMute },
-  }
+const MAINTENANCE_STATUS: Record<string, { label: string; tone: Tone }> = {
+  overdue:   { label: 'Vencida',   tone: 'danger' },
+  upcoming:  { label: 'Próxima',   tone: 'pending' },
+  scheduled: { label: 'Agendada',  tone: 'success' },
+  completed: { label: 'Concluída', tone: 'neutral' },
 }
 
-type StatusTone = ReturnType<typeof getMaintenanceStatusTone>
 type Styles = ReturnType<typeof createStyles>
-
-const MAINTENANCE_STATUS_LABEL: Record<string, string> = {
-  overdue:   'Vencida',
-  upcoming:  'Próxima',
-  scheduled: 'Agendada',
-  completed: 'Concluída',
-}
 
 // ---------------------------------------------------------------------------
 // Sub-components
 // ---------------------------------------------------------------------------
 
-function SectionLabel({ text, styles }: { text: string; styles: Styles }) {
-  return <Text style={styles.sectionLabel}>{text}</Text>
-}
-
-function RentalHeroCard({ rental, styles }: { rental: Rental; styles: Styles }) {
-  const vehicle = rental.vehicle
+/** Placa no formato Mercosul — reconhecível de relance. */
+function Plate({ value, styles }: { value: string; styles: Styles }) {
   return (
-    <View style={styles.heroCard}>
-      {vehicle?.photo_url ? (
-        <Image source={{ uri: vehicle.photo_url }} style={styles.heroPhoto} resizeMode="cover" />
-      ) : (
-        <View style={styles.heroPhotoPlaceholder}>
-          <Text style={styles.heroPhotoPlaceholderText}>Sem foto</Text>
-        </View>
-      )}
-      <View style={styles.heroInfo}>
-        <Text style={styles.heroPlate}>{vehicle?.license_plate ?? '—'}</Text>
-        <Text style={styles.heroModel}>
-          {vehicle ? `${vehicle.make} ${vehicle.model}` : '—'}
-        </Text>
-        <View style={styles.heroBadge}>
-          <Text style={styles.heroBadgeText}>Ativo</Text>
-        </View>
+    <View style={styles.plate}>
+      <View style={styles.plateStrip}>
+        <Text style={styles.plateStripText}>BRASIL</Text>
       </View>
+      <Text style={styles.plateText}>{value}</Text>
     </View>
   )
 }
 
-function OverdueBillingAlert({
-  billing,
-  onPress,
-  styles,
-}: {
-  billing: MyChargeRow
-  onPress: () => void
-  styles: Styles
-}) {
-  const amount = billing.amount_due
+/** Veículo + contrato, na superfície de marca: o "cartão" da locação. */
+function RentalHeroCard({ rental, styles, theme }: { rental: Rental; styles: Styles; theme: ThemeTokens }) {
+  const vehicle = rental.vehicle
+  const cycleLabel = CYCLE_LABEL[rental.cycle ?? ''] ?? ''
+  const stats: { label: string; value: string }[] = [
+    ...(rental.cycle_amount ? [{ label: 'Valor', value: `${formatCurrency(rental.cycle_amount)}${cycleLabel}` }] : []),
+    { label: 'Início', value: formatDate(rental.start_date) },
+    ...(rental.end_date ? [{ label: 'Término', value: formatDate(rental.end_date) }] : []),
+  ]
+
   return (
-    <Pressable style={styles.alertCard} onPress={onPress}>
-      <View style={styles.alertLeft}>
-        <Text style={styles.alertTitle}>Cobrança vencida</Text>
-        <Text style={styles.alertDesc} numberOfLines={1}>
-          {billing.description ?? 'Cobrança'}
-        </Text>
-        <Text style={styles.alertDue}>Venceu em {formatDate(billing.due_date)}</Text>
+    <Card variant="brand" padded={false}>
+      {vehicle?.photo_url ? (
+        <Image source={{ uri: vehicle.photo_url }} style={styles.heroPhoto} resizeMode="cover" />
+      ) : null}
+      <View style={styles.heroBody}>
+        <View style={styles.heroTop}>
+          <View style={styles.heroTitles}>
+            <View style={styles.heroStatus}>
+              <View style={[styles.heroStatusDot, { backgroundColor: theme.brandPositive }]} />
+              <Text style={[styles.heroStatusText, { color: theme.brandPositive }]}>Locação ativa</Text>
+            </View>
+            <Text style={styles.heroModel} numberOfLines={1}>
+              {vehicle ? `${vehicle.make} ${vehicle.model}` : 'Meu veículo'}
+            </Text>
+          </View>
+          {vehicle?.license_plate ? <Plate value={vehicle.license_plate} styles={styles} /> : null}
+        </View>
+
+        <View style={styles.heroStats}>
+          {stats.map((s, i) => (
+            <View key={s.label} style={[styles.heroStat, i > 0 && styles.heroStatDivider]}>
+              <Text style={styles.heroStatLabel}>{s.label}</Text>
+              <Text style={styles.heroStatValue} numberOfLines={1} adjustsFontSizeToFit>{s.value}</Text>
+            </View>
+          ))}
+        </View>
       </View>
-      <View style={styles.alertRight}>
-        <Text style={styles.alertAmount}>{formatCurrency(amount)}</Text>
-        <Text style={styles.alertCta}>Ver cobranças →</Text>
-      </View>
-    </Pressable>
+    </Card>
   )
 }
 
-function NextBillingCard({
-  billing,
+/** Situação financeira: vencidas têm precedência sobre o próximo pagamento. */
+function PaymentCard({
+  overdue,
+  next,
+  onPress,
+  styles,
+  theme,
+}: {
+  overdue: MyChargeRow[]
+  next: MyChargeRow | undefined
+  onPress: () => void
+  styles: Styles
+  theme: ThemeTokens
+}) {
+  if (overdue.length > 0) {
+    const total = overdue.reduce((s, b) => s + b.amount_due, 0)
+    return (
+      <Card style={{ borderColor: theme.danger }}>
+        <View style={styles.cardRow}>
+          <IconCircle name="alert-circle" tone="danger" />
+          <View style={styles.cardBody}>
+            <Text style={[styles.cardEyebrow, { color: theme.danger }]}>
+              {overdue.length > 1 ? `${overdue.length} cobranças vencidas` : 'Cobrança vencida'}
+            </Text>
+            <Text style={[styles.cardAmount, { color: theme.danger }]}>{formatCurrency(total)}</Text>
+            <Text style={styles.cardMeta} numberOfLines={1}>
+              Desde {formatDate(overdue[0]!.due_date)} · encargos podem ser acrescidos
+            </Text>
+          </View>
+        </View>
+        <Button label="Regularizar agora" variant="danger" onPress={onPress} style={styles.cardButton} />
+      </Card>
+    )
+  }
+
+  if (next) {
+    return (
+      <Card onPress={onPress}>
+        <View style={styles.cardRow}>
+          <IconCircle name="calendar-outline" tone="primary" />
+          <View style={styles.cardBody}>
+            <Text style={styles.cardEyebrow}>Próximo pagamento</Text>
+            <Text style={styles.cardAmount}>{formatCurrency(next.amount_due)}</Text>
+            <Text style={styles.cardMeta} numberOfLines={1}>{dueLabel(next.due_date)}</Text>
+          </View>
+          <Icon name="chevron-forward" size={20} color={theme.textMute} />
+        </View>
+      </Card>
+    )
+  }
+
+  return (
+    <Card onPress={onPress}>
+      <View style={styles.cardRow}>
+        <IconCircle name="checkmark-circle" tone="success" />
+        <View style={styles.cardBody}>
+          <Text style={styles.cardTitle}>Pagamentos em dia</Text>
+          <Text style={styles.cardMeta}>Nenhuma cobrança em aberto agora.</Text>
+        </View>
+        <Icon name="chevron-forward" size={20} color={theme.textMute} />
+      </View>
+    </Card>
+  )
+}
+
+function QuickAction({
+  icon,
+  label,
   onPress,
   styles,
 }: {
-  billing: MyChargeRow
+  icon: IconName
+  label: string
   onPress: () => void
   styles: Styles
 }) {
-  const amount = billing.amount_due
   return (
-    <Pressable style={styles.infoCard} onPress={onPress}>
-      <View style={styles.infoCardRow}>
-        <View style={styles.infoCardLeft}>
-          <Text style={styles.infoCardTitle}>Próximo pagamento</Text>
-          <Text style={styles.infoCardDesc} numberOfLines={1}>
-            {billing.description ?? 'Cobrança'}
-          </Text>
-          <Text style={styles.infoCardMeta}>Vence em {formatDate(billing.due_date)}</Text>
-        </View>
-        <View style={styles.infoCardRight}>
-          <Text style={styles.infoCardAmount}>{formatCurrency(amount)}</Text>
-          <Text style={styles.infoCardCta}>Pagar →</Text>
-        </View>
-      </View>
+    <Pressable
+      style={({ pressed }) => [styles.quick, pressed && styles.pressed]}
+      onPress={onPress}
+      accessibilityRole="button"
+      accessibilityLabel={label}
+    >
+      <IconCircle name={icon} tone="primary" size={44} />
+      <Text style={styles.quickLabel} numberOfLines={1}>{label}</Text>
     </Pressable>
   )
 }
@@ -166,13 +260,13 @@ function MaintenanceCard({
   vehicle,
   onPress,
   styles,
-  statusTone,
+  theme,
 }: {
   maintenance: Maintenance
   vehicle: Vehicle | undefined
   onPress: () => void
   styles: Styles
-  statusTone: StatusTone
+  theme: ThemeTokens
 }) {
   const status = calculateMaintenanceStatus({
     completed: maintenance.completed,
@@ -180,81 +274,25 @@ function MaintenanceCard({
     scheduled_date: maintenance.scheduled_date,
     current_km: vehicle?.km_current ?? 0,
   })
-  const tone = statusTone[status]
+  const meta = MAINTENANCE_STATUS[status] ?? MAINTENANCE_STATUS.scheduled!
   return (
-    <Pressable style={styles.infoCard} onPress={onPress}>
-      <View style={styles.infoCardRow}>
-        <View style={styles.infoCardLeft}>
-          <Text style={styles.infoCardTitle}>Próxima manutenção</Text>
-          <Text style={styles.infoCardDesc} numberOfLines={1}>
-            {maintenance.description}
-          </Text>
+    <Card onPress={onPress}>
+      <View style={styles.cardRow}>
+        <IconCircle name="construct-outline" tone={meta.tone === 'success' ? 'primary' : meta.tone} />
+        <View style={styles.cardBody}>
+          <Text style={styles.cardTitle} numberOfLines={1}>{maintenance.description}</Text>
           {maintenance.scheduled_date ? (
-            <Text style={styles.infoCardMeta}>
-              Prevista: {formatDate(maintenance.scheduled_date)}
-            </Text>
+            <Text style={styles.cardMeta}>Prevista para {formatDate(maintenance.scheduled_date)}</Text>
           ) : maintenance.predicted_km ? (
-            <Text style={styles.infoCardMeta}>
-              KM previsto: {maintenance.predicted_km.toLocaleString('pt-BR')} km
+            <Text style={styles.cardMeta}>
+              Aos {maintenance.predicted_km.toLocaleString('pt-BR')} km
             </Text>
           ) : null}
         </View>
-        <View style={[styles.statusPill, { backgroundColor: tone.bg }]}>
-          <Text style={[styles.statusPillText, { color: tone.fg }]}>
-            {MAINTENANCE_STATUS_LABEL[status]}
-          </Text>
-        </View>
+        <Badge label={meta.label} tone={meta.tone} size="sm" />
+        <Icon name="chevron-forward" size={20} color={theme.textMute} />
       </View>
-    </Pressable>
-  )
-}
-
-function ContractDetailsCard({ rental, styles }: { rental: Rental; styles: Styles }) {
-  const cycleLabel = CYCLE_LABEL[rental.cycle ?? ''] ?? ''
-  return (
-    <View style={styles.detailsCard}>
-      <Text style={styles.detailsTitle}>Detalhes do contrato</Text>
-      <View style={styles.detailsGrid}>
-        <DetailRow label="Início" value={formatDate(rental.start_date)} styles={styles} />
-        {rental.end_date ? (
-          <DetailRow label="Término previsto" value={formatDate(rental.end_date)} styles={styles} />
-        ) : null}
-        {rental.cycle_amount ? (
-          <DetailRow
-            label="Valor"
-            value={`${formatCurrency(rental.cycle_amount)}${cycleLabel}`}
-            styles={styles}
-          />
-        ) : null}
-        {rental.cycle ? (
-          <DetailRow
-            label="Ciclo"
-            value={rental.cycle === 'monthly' ? 'Mensal' : 'Semanal'}
-            styles={styles}
-          />
-        ) : null}
-      </View>
-    </View>
-  )
-}
-
-function DetailRow({ label, value, styles }: { label: string; value: string; styles: Styles }) {
-  return (
-    <View style={styles.detailRow}>
-      <Text style={styles.detailLabel}>{label}</Text>
-      <Text style={styles.detailValue}>{value}</Text>
-    </View>
-  )
-}
-
-function NoRentalCard({ styles }: { styles: Styles }) {
-  return (
-    <View style={styles.emptyCard}>
-      <Text style={styles.emptyTitle}>Sem contrato ativo</Text>
-      <Text style={styles.emptyText}>
-        Quando você tiver uma locação ativa, os detalhes aparecerão aqui.
-      </Text>
-    </View>
+    </Card>
   )
 }
 
@@ -267,21 +305,13 @@ export default function HomeTab() {
   const { tenants, activeTenantId } = useAuth()
   const theme = useTheme()
   const styles = useMemo(() => createStyles(theme), [theme])
-  const statusTone = useMemo(() => getMaintenanceStatusTone(theme), [theme])
 
-  const rentalsQuery    = useRentals({ status: 'active' })
-  const billingsQuery   = useMyCharges(true)
+  const rentalsQuery      = useRentals({ status: 'active' })
+  const billingsQuery     = useMyCharges(true)
   const maintenancesQuery = useMaintenances()
-  const vehiclesQuery   = useVehicles()
+  const vehiclesQuery     = useVehicles()
 
-  useFocusEffect(
-    useCallback(() => {
-      void rentalsQuery.refetch()
-      void billingsQuery.refetch()
-      void maintenancesQuery.refetch()
-      void vehiclesQuery.refetch()
-    }, [rentalsQuery.refetch, billingsQuery.refetch, maintenancesQuery.refetch, vehiclesQuery.refetch]),
-  )
+  useRefreshOnFocus([rentalsQuery, billingsQuery, maintenancesQuery, vehiclesQuery])
 
   const isLoading = rentalsQuery.isLoading || billingsQuery.isLoading
 
@@ -298,7 +328,7 @@ export default function HomeTab() {
     ])
   }
 
-  // Locadora ativa
+  // Locadora ativa — o nome do cliente vem do cadastro dele nesta locadora
   const activeTenant = tenants.find((t) => t.id === activeTenantId)
 
   // Locação ativa (primeira — clientes normalmente têm uma)
@@ -311,21 +341,19 @@ export default function HomeTab() {
     return m
   }, [vehiclesQuery.data])
 
-  const today = new Date().toISOString().slice(0, 10)
+  const today = localTodayIso()
 
   // Cobranças vencidas (status overdue, ou pending com due_date < hoje)
   const overdueBillings = useMemo(() => {
-    return (billingsQuery.data ?? []).filter(
-      (b) =>
-        b.is_overdue ||
-        (b.status === 'open' && b.due_date < today),
-    )
+    return (billingsQuery.data ?? [])
+      .filter((b) => b.is_overdue || (b.status === 'open' && b.due_date < today))
+      .sort((a, b) => a.due_date.localeCompare(b.due_date))
   }, [billingsQuery.data, today])
 
   // Próxima cobrança pendente (não vencida) — mais próxima por due_date
   const nextBilling: MyChargeRow | undefined = useMemo(() => {
     return (billingsQuery.data ?? [])
-      .filter((b) => b.status === 'open' && b.due_date >= today)
+      .filter((b) => b.status === 'open' && !b.is_overdue && b.due_date >= today)
       .sort((a, b) => a.due_date.localeCompare(b.due_date))[0]
   }, [billingsQuery.data, today])
 
@@ -349,23 +377,11 @@ export default function HomeTab() {
       .map(({ m }) => m)[0]
   }, [maintenancesQuery.data, activeRental?.vehicle_id, vehiclesById])
 
-  function goToCobrancas() {
-    router.navigate('/(tabs)/cobrancas' as never)
-  }
-
-  function goToManutencoes() {
-    router.navigate('/(tabs)/manutencoes' as never)
-  }
+  const go = (path: string) => () => router.navigate(path as never)
 
   return (
     <SafeAreaView style={styles.safe} edges={['top']}>
-      {/* Header */}
-      <View style={styles.header}>
-        <Text style={styles.greeting}>{greeting()}</Text>
-        {activeTenant ? (
-          <Text style={styles.tenantName}>{activeTenant.name}</Text>
-        ) : null}
-      </View>
+      <ScreenHeader eyebrow={greeting()} title={firstName(activeTenant?.customer_name) ?? 'Bem-vindo'} />
 
       {isLoading ? (
         <View style={styles.centered}>
@@ -375,65 +391,50 @@ export default function HomeTab() {
         <ScrollView
           contentContainerStyle={styles.scrollContent}
           refreshControl={
-            <RefreshControl
-              refreshing={isRefreshing}
-              onRefresh={handleRefresh}
-              tintColor={theme.primary}
-            />
+            <RefreshControl refreshing={isRefreshing} onRefresh={handleRefresh} tintColor={theme.primary} />
           }
         >
           {!activeRental ? (
-            <NoRentalCard styles={styles} />
+            <EmptyState
+              icon="bicycle-outline"
+              tone="primary"
+              title="Sem locação ativa"
+              text="Quando você tiver uma locação ativa, o veículo, os pagamentos e as manutenções aparecem aqui."
+            />
           ) : (
             <>
-              {/* Meu veículo */}
-              <SectionLabel text="Meu veículo" styles={styles} />
-              <RentalHeroCard rental={activeRental} styles={styles} />
+              <RentalHeroCard rental={activeRental} styles={styles} theme={theme} />
 
-              {/* Cobrança vencida */}
-              {overdueBillings.length > 0 && (
-                <>
-                  <SectionLabel text={`${overdueBillings.length > 1 ? `${overdueBillings.length} cobranças vencidas` : 'Cobrança vencida'}`} styles={styles} />
-                  <OverdueBillingAlert
-                    billing={overdueBillings[0]!}
-                    onPress={goToCobrancas}
-                    styles={styles}
-                  />
-                  {overdueBillings.length > 1 && (
-                    <Pressable style={styles.moreLink} onPress={goToCobrancas}>
-                      <Text style={styles.moreLinkText}>
-                        Ver todas as {overdueBillings.length} cobranças vencidas →
-                      </Text>
-                    </Pressable>
-                  )}
-                </>
-              )}
+              <View style={styles.quickRow}>
+                <QuickAction icon="wallet-outline" label="Pagar" onPress={go('/(tabs)/cobrancas')} styles={styles} />
+                <QuickAction icon="construct-outline" label="Manutenção" onPress={go('/(tabs)/manutencoes')} styles={styles} />
+                <QuickAction icon="camera-outline" label="Vistoria" onPress={go('/(tabs)/vistorias')} styles={styles} />
+                <QuickAction icon="chatbubbles-outline" label="Suporte" onPress={go('/(tabs)/suporte')} styles={styles} />
+              </View>
 
-              {/* Próximo pagamento */}
-              {nextBilling && (
-                <>
-                  <SectionLabel text="Próximo pagamento" styles={styles} />
-                  <NextBillingCard billing={nextBilling} onPress={goToCobrancas} styles={styles} />
-                </>
-              )}
+              <View style={styles.section}>
+                <SectionHeader title="Pagamentos" actionLabel="Ver todos" onAction={go('/(tabs)/cobrancas')} />
+                <PaymentCard
+                  overdue={overdueBillings}
+                  next={nextBilling}
+                  onPress={go('/(tabs)/cobrancas')}
+                  styles={styles}
+                  theme={theme}
+                />
+              </View>
 
-              {/* Manutenção urgente */}
               {urgentMaintenance && (
-                <>
-                  <SectionLabel text="Manutenção" styles={styles} />
+                <View style={styles.section}>
+                  <SectionHeader title="Manutenção" actionLabel="Ver todas" onAction={go('/(tabs)/manutencoes')} />
                   <MaintenanceCard
                     maintenance={urgentMaintenance}
                     vehicle={vehiclesById.get(urgentMaintenance.vehicle_id)}
-                    onPress={goToManutencoes}
+                    onPress={go('/(tabs)/manutencoes')}
                     styles={styles}
-                    statusTone={statusTone}
+                    theme={theme}
                   />
-                </>
+                </View>
               )}
-
-              {/* Detalhes do contrato */}
-              <SectionLabel text="Contrato" styles={styles} />
-              <ContractDetailsCard rental={activeRental} styles={styles} />
             </>
           )}
         </ScrollView>
@@ -451,274 +452,175 @@ const createStyles = (theme: ThemeTokens) => StyleSheet.create({
     flex: 1,
     backgroundColor: theme.bg,
   },
-  header: {
-    paddingHorizontal: 20,
-    paddingTop: 12,
-    paddingBottom: 14,
-    borderBottomColor: theme.surfaceAlt,
-    borderBottomWidth: 1,
-  },
-  greeting: {
-    color: theme.text,
-    fontSize: 22,
-    fontWeight: '700',
-  },
-  tenantName: {
-    color: theme.textMute,
-    fontSize: 13,
-    marginTop: 2,
-  },
   centered: {
     flex: 1,
     alignItems: 'center',
     justifyContent: 'center',
   },
   scrollContent: {
-    padding: 16,
+    paddingHorizontal: 16,
+    paddingTop: 4,
     paddingBottom: 40,
-    gap: 8,
+    gap: 20,
+  },
+  section: {
+    gap: 10,
+  },
+  pressed: {
+    opacity: 0.7,
   },
 
-  // Section label
-  sectionLabel: {
-    color: theme.textMute,
-    fontSize: 11,
-    fontWeight: '700',
-    letterSpacing: 0.6,
-    textTransform: 'uppercase',
-    marginTop: 8,
-    marginBottom: 4,
-    marginLeft: 2,
-  },
-
-  // Hero card
-  heroCard: {
-    backgroundColor: theme.surface,
-    borderColor: theme.surfaceAlt,
-    borderWidth: 1,
-    borderRadius: 14,
-    overflow: 'hidden',
-  },
+  // Hero (superfície de marca)
   heroPhoto: {
     width: '100%',
-    height: 160,
-    backgroundColor: theme.border,
+    height: 170,
+    backgroundColor: theme.brandBorder,
   },
-  heroPhotoPlaceholder: {
-    width: '100%',
-    height: 120,
-    backgroundColor: theme.border,
-    alignItems: 'center',
-    justifyContent: 'center',
+  heroBody: {
+    padding: 18,
+    gap: 18,
   },
-  heroPhotoPlaceholderText: {
-    color: theme.border,
-    fontSize: 13,
-  },
-  heroInfo: {
-    padding: 14,
+  heroTop: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 10,
+    gap: 12,
   },
-  heroPlate: {
-    color: theme.primary,
-    fontSize: 18,
-    fontWeight: '800',
-    letterSpacing: 1,
+  heroTitles: {
+    flex: 1,
+    gap: 4,
+  },
+  heroStatus: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  heroStatusDot: {
+    width: 7,
+    height: 7,
+    borderRadius: 4,
+  },
+  heroStatusText: {
+    fontSize: 12,
+    fontWeight: '700',
   },
   heroModel: {
-    color: theme.text,
-    fontSize: 15,
-    fontWeight: '500',
-    flex: 1,
-  },
-  heroBadge: {
-    backgroundColor: theme.successBg,
-    borderColor: theme.success,
-    borderWidth: 1,
-    borderRadius: 999,
-    paddingHorizontal: 10,
-    paddingVertical: 3,
-  },
-  heroBadgeText: {
-    color: theme.success,
-    fontSize: 11,
+    color: theme.brandText,
+    fontSize: 20,
     fontWeight: '700',
+    letterSpacing: -0.3,
   },
-
-  // Alert card (overdue)
-  alertCard: {
-    backgroundColor: theme.dangerBg,
-    borderColor: theme.dangerBg,
-    borderWidth: 1,
-    borderRadius: 12,
-    padding: 14,
-    flexDirection: 'row',
+  // Placa real é igual em qualquer tema — cores fixas de propósito.
+  plate: {
+    backgroundColor: '#FFFFFF',
+    borderRadius: 6,
+    borderWidth: 1.5,
+    borderColor: '#0C1424',
+    overflow: 'hidden',
     alignItems: 'center',
-    gap: 12,
+    minWidth: 92,
   },
-  alertLeft: {
-    flex: 1,
-    gap: 3,
-  },
-  alertTitle: {
-    color: theme.danger,
-    fontSize: 12,
-    fontWeight: '700',
-    textTransform: 'uppercase',
-    letterSpacing: 0.4,
-  },
-  alertDesc: {
-    color: theme.text,
-    fontSize: 14,
-    fontWeight: '500',
-  },
-  alertDue: {
-    color: theme.danger,
-    fontSize: 12,
-  },
-  alertRight: {
-    alignItems: 'flex-end',
-    gap: 4,
-  },
-  alertAmount: {
-    color: theme.danger,
-    fontSize: 16,
-    fontWeight: '700',
-  },
-  alertCta: {
-    color: theme.danger,
-    fontSize: 12,
-    fontWeight: '600',
-  },
-
-  // Info card (next billing, maintenance)
-  infoCard: {
-    backgroundColor: theme.surface,
-    borderColor: theme.surfaceAlt,
-    borderWidth: 1,
-    borderRadius: 12,
-    padding: 14,
-  },
-  infoCardRow: {
-    flexDirection: 'row',
+  plateStrip: {
+    alignSelf: 'stretch',
+    backgroundColor: '#1D4FC4',
+    paddingVertical: 1,
     alignItems: 'center',
-    gap: 12,
   },
-  infoCardLeft: {
-    flex: 1,
-    gap: 3,
+  plateStripText: {
+    color: '#FFFFFF',
+    fontSize: 7,
+    fontWeight: '800',
+    letterSpacing: 1.5,
   },
-  infoCardTitle: {
-    color: theme.textMute,
-    fontSize: 11,
-    fontWeight: '700',
-    textTransform: 'uppercase',
-    letterSpacing: 0.4,
-  },
-  infoCardDesc: {
-    color: theme.text,
-    fontSize: 14,
-    fontWeight: '500',
-  },
-  infoCardMeta: {
-    color: theme.textMute,
-    fontSize: 12,
-  },
-  infoCardRight: {
-    alignItems: 'flex-end',
-    gap: 4,
-  },
-  infoCardAmount: {
-    color: theme.primary,
+  plateText: {
+    color: '#0C1424',
     fontSize: 16,
-    fontWeight: '700',
+    fontWeight: '800',
+    letterSpacing: 1.5,
+    paddingHorizontal: 8,
+    paddingVertical: 2,
+    fontVariant: ['tabular-nums'],
   },
-  infoCardCta: {
-    color: theme.primary,
-    fontSize: 12,
-    fontWeight: '600',
+  heroStats: {
+    flexDirection: 'row',
+    backgroundColor: theme.brandInset,
+    borderRadius: radius.md,
+    paddingVertical: 12,
   },
-
-  // Maintenance status pill
-  statusPill: {
-    paddingHorizontal: 10,
-    paddingVertical: 4,
-    borderRadius: 999,
+  heroStat: {
+    flex: 1,
+    paddingHorizontal: 12,
+    gap: 2,
   },
-  statusPillText: {
-    fontSize: 11,
-    fontWeight: '700',
-    letterSpacing: 0.3,
+  heroStatDivider: {
+    borderLeftWidth: 1,
+    borderLeftColor: theme.brandBorder,
   },
-
-  // "More" link
-  moreLink: {
-    paddingVertical: 4,
-    paddingHorizontal: 2,
-  },
-  moreLinkText: {
-    color: theme.danger,
-    fontSize: 13,
+  heroStatLabel: {
+    color: theme.brandTextSoft,
+    fontSize: 11.5,
     fontWeight: '500',
   },
-
-  // Contract details card
-  detailsCard: {
-    backgroundColor: theme.surface,
-    borderColor: theme.surfaceAlt,
-    borderWidth: 1,
-    borderRadius: 12,
-    padding: 14,
-    gap: 10,
-  },
-  detailsTitle: {
-    color: theme.textMute,
-    fontSize: 11,
+  heroStatValue: {
+    color: theme.brandText,
+    fontSize: 14,
     fontWeight: '700',
-    textTransform: 'uppercase',
-    letterSpacing: 0.4,
-    marginBottom: 2,
+    fontVariant: ['tabular-nums'],
   },
-  detailsGrid: {
-    gap: 10,
-  },
-  detailRow: {
+
+  // Quick actions
+  quickRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',
-    alignItems: 'center',
+    gap: 8,
   },
-  detailLabel: {
-    color: theme.textMute,
-    fontSize: 13,
-  },
-  detailValue: {
-    color: theme.text,
-    fontSize: 13,
-    fontWeight: '500',
-  },
-
-  // Empty state
-  emptyCard: {
-    backgroundColor: theme.surface,
-    borderColor: theme.surfaceAlt,
-    borderWidth: 1,
-    borderRadius: 14,
-    padding: 24,
+  quick: {
+    flex: 1,
     alignItems: 'center',
     gap: 8,
-    marginTop: 32,
+    paddingVertical: 14,
+    backgroundColor: theme.surface,
+    borderColor: theme.border,
+    borderWidth: 1,
+    borderRadius: radius.lg,
   },
-  emptyTitle: {
+  quickLabel: {
     color: theme.text,
-    fontSize: 16,
-    fontWeight: '700',
+    fontSize: 12,
+    fontWeight: '600',
   },
-  emptyText: {
-    color: theme.textMute,
+
+  // Cards de informação
+  cardRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+  },
+  cardBody: {
+    flex: 1,
+    gap: 2,
+  },
+  cardEyebrow: {
+    color: theme.textSoft,
+    fontSize: 12.5,
+    fontWeight: '600',
+  },
+  cardTitle: {
+    color: theme.text,
+    fontSize: 15,
+    fontWeight: '600',
+  },
+  cardAmount: {
+    color: theme.text,
+    fontSize: 22,
+    fontWeight: '800',
+    letterSpacing: -0.5,
+    fontVariant: ['tabular-nums'],
+  },
+  cardMeta: {
+    color: theme.textSoft,
     fontSize: 13,
-    textAlign: 'center',
-    lineHeight: 20,
+  },
+  cardButton: {
+    marginTop: 14,
   },
 })

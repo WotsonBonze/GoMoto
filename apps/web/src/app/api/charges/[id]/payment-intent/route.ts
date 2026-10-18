@@ -6,22 +6,36 @@
  * - o valor vem de `calculateAmountDue`, não de `original_amount − desconto`.
  *   O endpoint antigo ignorava crédito aplicado e encargo de atraso (F-05):
  *   cliente com crédito pagava a mais, cobrança vencida quitava a menos.
- * - o provedor é parâmetro, não premissa. A rota não sabe o que é Mercado Pago.
+ * - o provedor é a conta que o TENANT elegeu (ADR 0030). A rota não nomeia
+ *   gateway nenhum: pede o meio de pagamento e recebe o que o gateway ativo
+ *   souber gerar.
  *
  * Escrita do cliente mobile via Route Handler com service role, conforme
  * ADR 0016 — o padrão de autenticação não muda, só o que trafega nele.
  */
 
 import { NextRequest, NextResponse } from 'next/server'
-import { createClient } from '@/lib/supabase/server'
-import { createClient as createAdminClient } from '@supabase/supabase-js'
+import { createClient, isAuthRetryableFetchError } from '@supabase/supabase-js'
 import { getOrCreateIntent } from '@/lib/payment/intents'
-import { mercadoPagoProvider } from '@/lib/payment/mercadopago-provider'
 
 type RouteContext = { params: Promise<{ id: string }> }
 
 function json(body: unknown, status = 200) {
   return NextResponse.json(body, { status })
+}
+
+/** Teto para a validação do token no GoTrue — sem ele, um GoTrue travado prende o app no spinner até a função expirar. */
+const AUTH_TIMEOUT_MS = 8000
+
+/**
+ * Falha do GoTrue (rede, timeout, 5xx, rate limit) não diz nada sobre o token.
+ * Responder 401 nesses casos mandava "Não autorizado" a cliente logado com token
+ * válido — o GoTrue de produção perde parte das requisições (2026-08-29).
+ */
+function isTransientAuthError(err: unknown): boolean {
+  if (isAuthRetryableFetchError(err)) return true
+  const status = (err as { status?: number } | null)?.status ?? 0
+  return status === 0 || status === 429 || status >= 500
 }
 
 function log(level: 'info' | 'warn' | 'error', action: string, fields: Record<string, unknown> = {}) {
@@ -36,51 +50,87 @@ export async function POST(req: NextRequest, ctx: RouteContext) {
   const token = authHeader?.replace('Bearer ', '')
   if (!token) return json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'Token não fornecido' } }, 401)
 
-  const supabase = await createClient()
-  const { data: { user }, error: authErr } = await supabase.auth.getUser(token)
-  if (authErr || !user) return json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'Não autorizado' } }, 401)
+  // Cliente sem cookies: o token vem no header, e o fetch com timeout faz um
+  // GoTrue travado virar AuthRetryableFetchError em vez de pendurar a requisição.
+  const authClient = createClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
+    {
+      auth: { persistSession: false, autoRefreshToken: false },
+      global: { fetch: (input, init) => fetch(input, { ...init, signal: AbortSignal.timeout(AUTH_TIMEOUT_MS) }) },
+    },
+  )
+  const { data: { user }, error: authErr } = await authClient.auth.getUser(token)
+  if (authErr && isTransientAuthError(authErr)) {
+    log('warn', 'intent.auth_unavailable', { charge_id: chargeId, status: authErr.status, error: authErr.message })
+    return json({ ok: false, error: {
+      code: 'AUTH_UNAVAILABLE',
+      message: 'Não foi possível confirmar sua sessão. Tente novamente.',
+    } }, 503)
+  }
+  // Daqui em diante é o token que foi recusado (vencido, revogado, assinatura
+  // inválida): o app renova a sessão e tenta de novo uma vez.
+  if (authErr || !user) return json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'Sessão expirada' } }, 401)
 
   // Service role: o token do mobile não chega por cookie, então o cliente SSR
   // roda como anon e a RLS bloqueia as leituras necessárias.
-  const admin = createAdminClient(
+  const admin = createClient(
     process.env.NEXT_PUBLIC_SUPABASE_URL!,
     process.env.SUPABASE_SERVICE_ROLE_KEY!,
   )
 
-  const { data: customer } = await admin
+  // TODOS os cadastros do login, um por locadora (PRD 0001: o mesmo CPF pode
+  // ser cliente de mais de um tenant). Era `.maybeSingle()`: com dois cadastros
+  // o PostgREST devolve erro, `data` vinha null e a rota respondia "Cliente não
+  // encontrado" a quem é cliente — em produção, 2026-09-25.
+  const { data: customers, error: customersError } = await admin
     .from('customers')
     .select('id, tenant_id')
     .eq('user_id', user.id)
-    .maybeSingle()
 
-  if (!customer) {
+  if (customersError) {
+    log('error', 'intent.customer_lookup_failed', { user_id: user.id, error: customersError.message })
+    return json({ ok: false, error: { code: 'INTERNAL', message: 'Falha ao gerar cobrança. Tente novamente.' } }, 500)
+  }
+  if (!customers || customers.length === 0) {
     log('warn', 'intent.customer_not_found', { user_id: user.id, charge_id: chargeId })
     return json({ ok: false, error: { code: 'FORBIDDEN', message: 'Cliente não encontrado' } }, 403)
   }
 
-  const c = customer as { id: string; tenant_id: string }
-
-  // Titularidade: a cobrança precisa ser deste cliente. Sem esta checagem, o
-  // service role contornaria a RLS.
+  // Titularidade: a cobrança precisa ser de UM destes cadastros, na locadora
+  // dele. Sem esta checagem, o service role contornaria a RLS. Cobrança alheia
+  // e inexistente respondem igual (404), para não revelar qual existe.
   const { data: charge } = await admin
     .from('charges')
-    .select('id, customer_id')
+    .select('id, tenant_id, customer_id')
     .eq('id', chargeId)
-    .eq('tenant_id', c.tenant_id)
     .maybeSingle()
 
-  if (!charge || (charge as { customer_id: string }).customer_id !== c.id) {
-    log('warn', 'intent.charge_not_owned', { charge_id: chargeId, customer_id: c.id })
+  const ch = charge as { tenant_id: string; customer_id: string } | null
+  const c = ch
+    ? (customers as { id: string; tenant_id: string }[])
+        .find((cu) => cu.id === ch.customer_id && cu.tenant_id === ch.tenant_id)
+    : undefined
+
+  if (!c) {
+    log('warn', 'intent.charge_not_owned', { charge_id: chargeId, user_id: user.id })
     return json({ ok: false, error: { code: 'NOT_FOUND', message: 'Cobrança não encontrada' } }, 404)
   }
 
+  // Sem `?? 'pix'`: o default é do gateway ELEITO, resolvido dentro de
+  // `getOrCreateIntent`. Fixar aqui fazia o app pedir PIX a um provedor de
+  // checkout hospedado e ouvir que ele não gera PIX — culpa nossa, mensagem
+  // apontando para o cliente.
   const body = await req.json().catch(() => ({})) as { method?: string }
-  const method = body.method ?? 'pix'
+  const method = body.method ?? null
 
   try {
-    const result = await getOrCreateIntent(admin, c.tenant_id, chargeId, method, mercadoPagoProvider)
+    const result = await getOrCreateIntent(admin, {
+      tenantId: c.tenant_id, chargeId, method,
+    })
     log('info', 'intent.created', {
-      charge_id: chargeId, tenant_id: c.tenant_id, amount: result.amount, reused: result.is_reused,
+      charge_id: chargeId, tenant_id: c.tenant_id, provider: result.provider,
+      amount: result.amount, reused: result.is_reused,
     })
     return json({ ok: true, data: result })
   } catch (err: unknown) {
@@ -88,6 +138,26 @@ export async function POST(req: NextRequest, ctx: RouteContext) {
 
     if (e.code === 'FORBIDDEN') {
       return json({ ok: false, error: { code: 'FORBIDDEN', message: 'Pagamento online não configurado' } }, 403)
+    }
+    // Credencial expirada é diferente de gateway ausente: o cliente não deve
+    // ficar tentando de novo, e o log tem que apontar para a locadora. Antes,
+    // o 401 do provedor virava 500 "Tente novamente" — conselho errado para um
+    // token que expirou há dois meses.
+    if (e.code === 'GATEWAY_UNAUTHORIZED') {
+      log('error', 'intent.gateway_unauthorized', { charge_id: chargeId, tenant_id: c.tenant_id })
+      return json({ ok: false, error: {
+        code: 'GATEWAY_UNAUTHORIZED',
+        message: 'Pagamento online indisponível no momento. Fale com a locadora.',
+      } }, 503)
+    }
+    // A mensagem do provedor é para o operador; o cliente não tem o que
+    // ajustar e precisa saber a quem recorrer.
+    if (e.code === 'FINE_EXCEEDS_AMOUNT') {
+      log('warn', 'intent.fine_exceeds_amount', { charge_id: chargeId, tenant_id: c.tenant_id })
+      return json({ ok: false, error: {
+        code: 'FINE_EXCEEDS_AMOUNT',
+        message: 'Não é possível pagar esta cobrança pelo app. Entre em contato com a locadora para realizar o pagamento.',
+      } }, 409)
     }
     if (e.code === 'NOT_FOUND') {
       return json({ ok: false, error: { code: 'NOT_FOUND', message: e.message } }, 404)

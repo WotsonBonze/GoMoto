@@ -139,7 +139,7 @@ git commit -m "feat(db): adiciona discount_pct em contracts"
 
 ## Regra de ouro: nunca rode migrations contra a cloud direto
 
-O projeto cloud `hcnxbqunescfanqzmsha` ainda hospeda dados reais do MVP. Até a Fase 5 ([[Arquitetura Proposta#Fase 5]]) entrarem com multi-tenancy + ambientes separados (`dev`/`staging`/`prod`), tratamos a cloud como **somente leitura** para mudanças de schema.
+O projeto cloud de produção é `oskgooflepkkjdwxuouj` (Supabase "gomotos2"); `hcnxbqunescfanqzmsha` era o projeto do MVP e não é mais usado. Hoje a produção só tem dados de teste. Até a Fase 5 ([[Arquitetura Proposta#Fase 5]]) entrarem com multi-tenancy + ambientes separados (`dev`/`staging`/`prod`), tratamos a cloud como **somente leitura** para mudanças de schema.
 
 - ❌ **NÃO** rode `pnpm db:push` apontando para a cloud.
 - ❌ **NÃO** edite tabelas no Dashboard do Supabase cloud.

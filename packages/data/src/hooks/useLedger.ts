@@ -7,12 +7,14 @@
  * que a mesma cobrança tinha três valores devidos diferentes.
  */
 
-import { useQuery } from '@tanstack/react-query'
-import { useSupabaseContext, useRequiredTenantId, useTenantId } from '../context'
+import { useCallback } from 'react'
+import { useInfiniteQuery, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useReadScope, useSupabaseContext, useRequiredTenantId, useTenantId } from '../context'
 import {
   calculateAmountDue,
   classifyCustomerDelinquency,
   contractedBacklog,
+  planRetroactiveTermination,
   DEFAULT_DELINQUENCY_POLICY,
   type DelinquencyStatus,
   type LateChargePolicy,
@@ -22,6 +24,8 @@ import {
   listChargesForCockpit,
   listPayables,
   listProviderAccounts,
+  listGatewayHistory,
+  getPaymentIntentStatus,
   listLateChargePolicies,
   listOpenChargesByRental,
   getChargeBalance,
@@ -37,6 +41,7 @@ import {
   getRentalResult,
   listIncomeStatement,
   listRentalSchedule,
+  listRentalIssuedChargeInfo,
   getActiveDelinquencyPolicy,
   type ChargeBalanceRow,
 } from '../repositories/ledger'
@@ -53,8 +58,10 @@ const KEY = {
   rental: 'rental-result',
   dre: 'income-statement',
   schedule: 'rental-schedule',
+  terminationCandidates: 'rental-termination-candidates',
   policy: 'financial-policy',
   monthlySummary: 'monthly-summary',
+  paymentIntent: 'payment-intent',
 } as const
 
 function today(): string {
@@ -73,6 +80,10 @@ export type MyChargeRow = ChargeWithDue & {
   description: string
   item_count: number
   vehicle_plate: string | null
+  /** Quando a cobrança foi quitada: `paid_at` do pagamento mais recente não
+   *  estornado que a abateu. `null` sem pagamento. Instante (timestamptz),
+   *  não data — formatar no fuso local. */
+  paid_at: string | null
 }
 
 export type ChargeWithDue = ChargeBalanceRow & {
@@ -92,17 +103,47 @@ export type ChargeWithDue = ChargeBalanceRow & {
  * empresa), então buscar todas e indexar sai mais barato que juntar a política
  * em cada consulta de cobrança.
  */
-async function policyIndex(
-  supabase: Parameters<typeof listLateChargePolicies>[0],
-): Promise<Map<string, LateChargePolicy>> {
-  const versoes = await listLateChargePolicies(supabase)
-  return new Map(versoes.map((v) => [v.id, {
-    fee_type:            v.fee_type,
-    fee_value:           v.fee_value,
-    daily_interest_rate: v.daily_interest_rate,
-    grace_period_days:   v.grace_period_days,
-    min_amount:          v.min_amount,
-  }]))
+const POLICY_INDEX_STALE_MS = 5 * 60_000
+
+type PolicyRef = { late_charge_policy_id: string | null }
+
+/**
+ * Carregador do índice em cache. Antes cada lista de cobranças buscava
+ * `late_charge_policies` de novo — a tela Início do app fazia isso duas vezes
+ * por abertura. Política é versionada (mudança = linha nova, id novo), então o
+ * cache só fica velho por FALTA de id: se alguma cobrança aponta para uma
+ * política fora do índice, busca de novo antes de calcular — senão o encargo
+ * sairia zerado.
+ *
+ * Chamar sem linhas aquece o cache em paralelo com a consulta das cobranças;
+ * chamar com as linhas devolve o índice garantido para elas.
+ */
+function usePolicyIndex() {
+  const supabase = useSupabaseContext()
+  const qc = useQueryClient()
+  const { tenantId } = useReadScope()
+
+  return useCallback(
+    async (rows?: PolicyRef[]): Promise<Map<string, LateChargePolicy>> => {
+      const options = {
+        queryKey: ['late-charge-policies', 'index', { tenantId }],
+        queryFn: () => listLateChargePolicies(supabase, tenantId),
+      }
+      let versoes = await qc.fetchQuery({ ...options, staleTime: POLICY_INDEX_STALE_MS })
+      const known = new Set(versoes.map((v) => v.id))
+      if (rows?.some((r) => r.late_charge_policy_id && !known.has(r.late_charge_policy_id))) {
+        versoes = await qc.fetchQuery({ ...options, staleTime: 0 })
+      }
+      return new Map(versoes.map((v) => [v.id, {
+        fee_type:            v.fee_type,
+        fee_value:           v.fee_value,
+        daily_interest_rate: v.daily_interest_rate,
+        grace_period_days:   v.grace_period_days,
+        min_amount:          v.min_amount,
+      }]))
+    },
+    [supabase, qc, tenantId],
+  )
 }
 
 /** A política que ESTA cobrança congelou — nunca a vigente hoje. */
@@ -120,15 +161,17 @@ function policyOf(
  */
 export function useOpenCharges(customerId: string | undefined) {
   const supabase = useSupabaseContext()
+  const loadPolicyIndex = usePolicyIndex()
 
   return useQuery<ChargeWithDue[]>({
     queryKey: [KEY.charges, 'open', customerId],
     enabled: !!customerId,
     queryFn: async () => {
-      const [charges, index] = await Promise.all([
+      const [charges] = await Promise.all([
         listOpenCharges(supabase, customerId!),
-        policyIndex(supabase),
+        loadPolicyIndex(),
       ])
+      const index = await loadPolicyIndex(charges)
 
       return charges.map((c) => {
         const { accrued, amount_due } = calculateAmountDue(c, policyOf(index, c))
@@ -140,18 +183,20 @@ export function useOpenCharges(customerId: string | undefined) {
 
 export function useChargeDetail(chargeId: string | undefined) {
   const supabase = useSupabaseContext()
+  const loadPolicyIndex = usePolicyIndex()
 
   return useQuery({
     queryKey: [KEY.charges, chargeId],
     enabled: !!chargeId,
     queryFn: async () => {
-      const [balance, items, index] = await Promise.all([
+      const [balance, items] = await Promise.all([
         getChargeBalance(supabase, chargeId!),
         listChargeItems(supabase, chargeId!),
-        policyIndex(supabase),
+        loadPolicyIndex(),
       ])
 
       if (!balance) return null
+      const index = await loadPolicyIndex([balance])
 
       const { accrued, amount_due } = calculateAmountDue(balance, policyOf(index, balance))
       return { ...balance, items, accrued, amount_due }
@@ -167,14 +212,16 @@ export function useChargeDetail(chargeId: string | undefined) {
  */
 export function useChargesList() {
   const supabase = useSupabaseContext()
+  const loadPolicyIndex = usePolicyIndex()
 
   return useQuery({
     queryKey: [KEY.charges, 'cockpit'],
     queryFn: async () => {
-      const [rows, index] = await Promise.all([
+      const [rows] = await Promise.all([
         listChargesForCockpit(supabase),
-        policyIndex(supabase),
+        loadPolicyIndex(),
       ])
+      const index = await loadPolicyIndex(rows)
 
       return rows.map((r) => {
         const p = policyOf(index, r)
@@ -424,6 +471,32 @@ export function useRentalSchedule(rentalId: string | undefined) {
   })
 }
 
+/**
+ * O que o encerramento retroativo faz com CADA linha do cronograma — vencida,
+ * emitida ou planejada, dentro ou fora do período que sobrevive (Spec 0016).
+ * A MESMA `planRetroactiveTermination` que alimenta esta prévia é reconferida
+ * no servidor pela Server Action antes de cancelar qualquer uma — prévia e
+ * persistência não podem divergir.
+ */
+export function useRentalTerminationPlan(
+  rentalId: string | undefined,
+  terminationDate: string | undefined,
+) {
+  const supabase = useSupabaseContext()
+
+  return useQuery({
+    queryKey: [KEY.terminationCandidates, rentalId, terminationDate],
+    enabled: !!rentalId && !!terminationDate,
+    queryFn: async () => {
+      const [lines, charges] = await Promise.all([
+        listRentalSchedule(supabase, rentalId!),
+        listRentalIssuedChargeInfo(supabase, rentalId!),
+      ])
+      return planRetroactiveTermination(lines, charges, terminationDate!)
+    },
+  })
+}
+
 // ============================================================
 // Contas a pagar
 // ============================================================
@@ -476,6 +549,19 @@ export function useLateChargePolicies() {
  * Substitui `usePaymentConnection`, que assumia um único provedor por tenant —
  * o `UNIQUE(tenant_id)` de `payment_connections` impedia um segundo (F-13).
  */
+/**
+ * Gateways do tenant (ADR 0030).
+ *
+ * `active_account` é a única coisa que responde "quem cobra". A versão anterior
+ * devolvia `is_connected: accounts.length > 0` e um `default_provider` que
+ * nenhuma tela lia — a UI dizia "Mercado Pago conectado" por texto fixo,
+ * independentemente do que estivesse no banco.
+ *
+ * Uma conta ativa sem `is_default` é estado real e possível: o tenant conectou
+ * um segundo gateway e ainda não o elegeu, ou desconectou o que cobrava. A tela
+ * precisa distinguir isso de "nada configurado", porque no primeiro caso as
+ * cobranças online param e ninguém é avisado.
+ */
 export function useProviderAccounts() {
   const supabase = useSupabaseContext()
 
@@ -483,12 +569,49 @@ export function useProviderAccounts() {
     queryKey: ['payment-provider-accounts'],
     queryFn: async () => {
       const accounts = await listProviderAccounts(supabase)
+      const active = accounts.find((a) => a.is_default && a.active) ?? null
       return {
         accounts,
-        is_connected: accounts.length > 0,
-        default_provider: accounts.find((a) => a.is_default)?.provider ?? null,
+        connected: accounts.filter((a) => a.active),
+        active_account: active,
+        /** Há gateway gerando cobrança agora? */
+        is_billing_enabled: active !== null,
       }
     },
+  })
+}
+
+/** Histórico de alterações das integrações de pagamento (ADR 0039). */
+export function useGatewayHistory() {
+  const supabase = useSupabaseContext()
+
+  return useQuery({
+    queryKey: ['payment-provider-accounts', 'history'],
+    queryFn: () => listGatewayHistory(supabase),
+  })
+}
+
+/**
+ * Acompanha uma tentativa de pagamento até o gateway confirmar.
+ *
+ * O pagamento chega por webhook, fora do navegador: sem isto a tela fica
+ * mostrando o QR de uma cobrança já quitada, e o botão de gerar Pix continua
+ * aparecendo numa cobrança paga — os dois sintomas de a tela não saber o que o
+ * banco já sabe.
+ *
+ * `enabled` desliga o poll assim que o modal fecha ou o pagamento confirma:
+ * intervalo que sobrevive à tela é bateria e requisição jogadas fora.
+ */
+export function usePaymentIntentStatus(intentId: string | undefined, enabled = true) {
+  const supabase = useSupabaseContext()
+
+  return useQuery({
+    queryKey: [KEY.paymentIntent, intentId],
+    enabled: !!intentId && enabled,
+    // 5 s é o mesmo do app do cliente. Confirmação de Pix leva segundos, e o
+    // custo é uma leitura de linha única por chave primária.
+    refetchInterval: 5000,
+    queryFn: async () => getPaymentIntentStatus(supabase, intentId!),
   })
 }
 
@@ -510,9 +633,12 @@ export function useProviderAccounts() {
  */
 export function useMyCharges(onlyOpen = true) {
   const supabase = useSupabaseContext()
+  const scope = useReadScope()
+  const loadPolicyIndex = usePolicyIndex()
 
   return useQuery<MyChargeRow[]>({
-    queryKey: [KEY.charges, 'mine', onlyOpen],
+    queryKey: [KEY.charges, 'mine', onlyOpen, { tenantId: scope.tenantId }],
+    enabled: scope.ready,
     queryFn: async () => {
       let query = supabase
         .from('charge_balances')
@@ -520,64 +646,144 @@ export function useMyCharges(onlyOpen = true) {
         .order('due_date', { ascending: true })
 
       if (onlyOpen) query = query.eq('status', 'open').gt('open_amount', 0)
+      if (scope.tenantId) query = query.eq('tenant_id', scope.tenantId)
 
-      const [{ data, error }, index] = await Promise.all([
-        query,
-        policyIndex(supabase),
+      const [{ data, error }] = await Promise.all([query, loadPolicyIndex()])
+
+      if (error) throw error
+      const rows = (data ?? []) as ChargeBalanceRow[]
+      return enrichMyCharges(supabase, rows, await loadPolicyIndex(rows))
+    },
+  })
+}
+
+/** Tamanho da página do histórico de pagas no app do cliente. */
+export const MY_PAID_CHARGES_PAGE_SIZE = 30
+
+/**
+ * Histórico de cobranças PAGAS do cliente, paginado.
+ *
+ * Antes o app usava `useMyCharges(false)`, que baixava todas as cobranças de
+ * uma vez e filtrava as pagas no aparelho. Com histórico longo isso crescia sem
+ * limite, mandava um `.in()` com centenas de ids na URL e esbarrava no
+ * `max_rows` do PostgREST (1000), que corta a resposta em silêncio — as pagas
+ * mais antigas simplesmente sumiam.
+ *
+ * Paginação por `range` sobre `due_date desc, charge_id desc`: o desempate por
+ * id mantém a ordem estável entre páginas quando várias vencem no mesmo dia.
+ */
+export function useMyPaidCharges(pageSize = MY_PAID_CHARGES_PAGE_SIZE) {
+  const supabase = useSupabaseContext()
+  const scope = useReadScope()
+  const loadPolicyIndex = usePolicyIndex()
+
+  return useInfiniteQuery({
+    queryKey: [KEY.charges, 'mine', 'paid', pageSize, { tenantId: scope.tenantId }],
+    enabled: scope.ready,
+    initialPageParam: 0,
+    queryFn: async ({ pageParam }): Promise<MyChargeRow[]> => {
+      const from = pageParam * pageSize
+      let query = supabase
+        .from('charge_balances')
+        .select('*')
+        .eq('status', 'paid')
+      if (scope.tenantId) query = query.eq('tenant_id', scope.tenantId)
+      const [{ data, error }] = await Promise.all([
+        query
+          .order('due_date', { ascending: false })
+          .order('charge_id', { ascending: false })
+          .range(from, from + pageSize - 1),
+        loadPolicyIndex(),
       ])
 
       if (error) throw error
-
       const rows = (data ?? []) as ChargeBalanceRow[]
-      if (rows.length === 0) return []
-
-      // Descrição e placa: o app precisa disso para exibir, e `charge_balances`
-      // só agrega valores. Consultas separadas, nunca join na view — juntar
-      // itens ali dentro reintroduziria o fan-out de F-01.
-      const [itemsRes, rentalsRes] = await Promise.all([
-        supabase
-          .from('charge_items')
-          .select('charge_id, description, amount')
-          .in('charge_id', rows.map((r) => r.charge_id)),
-        supabase
-          .from('rentals')
-          .select('id, vehicles(license_plate)')
-          .in('id', [...new Set(rows.map((r) => r.rental_id).filter(Boolean))] as string[]),
-      ])
-
-      const itemsByCharge = new Map<string, { description: string; amount: number }[]>()
-      for (const i of (itemsRes.data ?? []) as { charge_id: string; description: string; amount: number }[]) {
-        const list = itemsByCharge.get(i.charge_id) ?? []
-        list.push(i)
-        itemsByCharge.set(i.charge_id, list)
-      }
-
-      type RentalVehicle = {
-        id: string
-        vehicles: { license_plate: string } | { license_plate: string }[] | null
-      }
-      const plateByRental = new Map(
-        ((rentalsRes.data ?? []) as unknown as RentalVehicle[]).map((r) => {
-          const v = Array.isArray(r.vehicles) ? r.vehicles[0] : r.vehicles
-          return [r.id, v?.license_plate ?? null] as const
-        }),
-      )
-
-      return rows.map((c) => {
-        const { accrued, amount_due } = calculateAmountDue(c, policyOf(index, c))
-        const items = itemsByCharge.get(c.charge_id) ?? []
-        const principal = [...items].sort((a, b) => b.amount - a.amount)[0]
-
-        return {
-          ...c,
-          accrued_total: accrued.total,
-          amount_due,
-          description: principal?.description ?? 'Cobrança',
-          item_count: items.length,
-          vehicle_plate: c.rental_id ? plateByRental.get(c.rental_id) ?? null : null,
-        }
-      })
+      return enrichMyCharges(supabase, rows, await loadPolicyIndex(rows))
     },
+    // Página incompleta = acabou. Evita uma ida extra só para descobrir o fim.
+    getNextPageParam: (lastPage, allPages) =>
+      lastPage.length < pageSize ? undefined : allPages.length,
+  })
+}
+
+/**
+ * Descrição e placa: o app precisa disso para exibir, e `charge_balances` só
+ * agrega valores. Consultas separadas, nunca join na view — juntar itens ali
+ * dentro reintroduziria o fan-out de F-01.
+ */
+async function enrichMyCharges(
+  supabase: ReturnType<typeof useSupabaseContext>,
+  rows: ChargeBalanceRow[],
+  index: Map<string, LateChargePolicy>,
+): Promise<MyChargeRow[]> {
+  if (rows.length === 0) return []
+
+  // Só quem já recebeu algo tem data de pagamento; nas em aberto sem abatimento
+  // a consulta seria desperdício.
+  const withPayment = rows.filter((r) => r.paid_amount > 0).map((r) => r.charge_id)
+
+  const [itemsRes, rentalsRes, allocationsRes] = await Promise.all([
+    supabase
+      .from('charge_items')
+      .select('charge_id, description, amount')
+      .in('charge_id', rows.map((r) => r.charge_id)),
+    supabase
+      .from('rentals')
+      .select('id, vehicles(license_plate)')
+      .in('id', [...new Set(rows.map((r) => r.rental_id).filter(Boolean))] as string[]),
+    withPayment.length > 0
+      ? supabase
+          .from('payment_allocations')
+          .select('charge_id, payments(paid_at, reversed_at)')
+          .in('charge_id', withPayment)
+      : Promise.resolve({ data: [] }),
+  ])
+
+  const itemsByCharge = new Map<string, { description: string; amount: number }[]>()
+  for (const i of (itemsRes.data ?? []) as { charge_id: string; description: string; amount: number }[]) {
+    const list = itemsByCharge.get(i.charge_id) ?? []
+    list.push(i)
+    itemsByCharge.set(i.charge_id, list)
+  }
+
+  type RentalVehicle = {
+    id: string
+    vehicles: { license_plate: string } | { license_plate: string }[] | null
+  }
+  const plateByRental = new Map(
+    ((rentalsRes.data ?? []) as unknown as RentalVehicle[]).map((r) => {
+      const v = Array.isArray(r.vehicles) ? r.vehicles[0] : r.vehicles
+      return [r.id, v?.license_plate ?? null] as const
+    }),
+  )
+
+  // Estornado não quitou nada — a view também o ignora no `paid_amount`.
+  type AllocationPayment = {
+    charge_id: string
+    payments: { paid_at: string; reversed_at: string | null } | { paid_at: string; reversed_at: string | null }[] | null
+  }
+  const paidAtByCharge = new Map<string, string>()
+  for (const a of (allocationsRes.data ?? []) as unknown as AllocationPayment[]) {
+    const p = Array.isArray(a.payments) ? a.payments[0] : a.payments
+    if (!p || p.reversed_at) continue
+    const current = paidAtByCharge.get(a.charge_id)
+    if (!current || new Date(p.paid_at) > new Date(current)) paidAtByCharge.set(a.charge_id, p.paid_at)
+  }
+
+  return rows.map((c) => {
+    const { accrued, amount_due } = calculateAmountDue(c, policyOf(index, c))
+    const items = itemsByCharge.get(c.charge_id) ?? []
+    const principal = [...items].sort((a, b) => b.amount - a.amount)[0]
+
+    return {
+      ...c,
+      accrued_total: accrued.total,
+      amount_due,
+      description: principal?.description ?? 'Cobrança',
+      item_count: items.length,
+      vehicle_plate: c.rental_id ? plateByRental.get(c.rental_id) ?? null : null,
+      paid_at: paidAtByCharge.get(c.charge_id) ?? null,
+    }
   })
 }
 

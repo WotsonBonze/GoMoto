@@ -126,12 +126,15 @@ export async function getInspectionForExecution(
 /** Vistorias periódicas (todos os status) das locações do cliente autenticado — RLS já escopa. */
 export async function listPeriodicInspectionsForCustomer(
   client: SupabaseClient,
+  tenantId?: string | null,
 ): Promise<Inspection[]> {
-  const { data, error } = await client
+  let q = client
     .from('inspections')
     .select('*')
     .eq('kind', 'periodic')
     .order('created_at', { ascending: false })
+  if (tenantId) q = q.eq('tenant_id', tenantId)
+  const { data, error } = await q
   if (error) throw error
   return (data ?? []) as Inspection[]
 }

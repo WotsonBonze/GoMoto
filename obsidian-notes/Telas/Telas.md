@@ -24,6 +24,7 @@ Documentação detalhada de cada tela: campos, filtros, colunas, ações, querie
 - [[Entradas]] — Accordion por referência, auto-preenchimento de locatário, lookup por contrato ativo
 - [[Despesas]] — Upload de NF (aviso se ausente), accordion por categoria, custo por moto
 - [[Multas]] — Quickfill CTB, auto-vinculação cliente↔moto, histórico colapsável por moto
+- [[ROI do Veículo]] — Retorno do investimento (payback por dinheiro recebido), recebido/em atraso/a receber, despesas empresa×cliente, ocupação
 
 ## Operações
 - [[Fila]] — Tela mais complexa: reordenação com motivo, cadastro completo, fechamento de contrato em 5 etapas

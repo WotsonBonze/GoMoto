@@ -1,7 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
   RENTAL_MINIMUM_DURATION,
-  CONTRACT_TERMINATION_FINE_BRL,
   addMonths,
   addYears,
   parseIsoDate,
@@ -34,7 +33,6 @@ describe('RENTAL_MINIMUM_DURATION', () => {
   it('expõe constantes alinhadas com o produto', () => {
     expect(RENTAL_MINIMUM_DURATION.rental.months).toBe(3)
     expect(RENTAL_MINIMUM_DURATION.rent_to_own.years).toBe(2)
-    expect(CONTRACT_TERMINATION_FINE_BRL).toBe(1000)
   })
 })
 

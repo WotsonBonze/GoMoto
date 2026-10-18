@@ -49,6 +49,27 @@ test.describe('audit_logs — imutabilidade (RNF-005)', () => {
       .single()
     expect(stillThere?.table_name).toBe('e2e_immutability_test')
 
-    await admin.from('audit_logs').delete().eq('id', inserted!.id)
+    // A limpeza virou ASSERÇÃO na ADR 0034 Fase 5: nem `service_role` apaga.
+    //
+    // Até aqui a garantia era só RLS, que o backend legitimamente contorna — e a
+    // trilha do dinheiro passou a ser escrita por funções `SECURITY DEFINER`,
+    // que ignoram RLS. A imutabilidade precisava passar a existir onde ela não
+    // pode ser contornada, como já acontece no razão (`trg_ftx_immutable`).
+    //
+    // O preço é a linha ficar no banco de teste para sempre. É o mesmo preço que
+    // o razão já cobra, e pelo mesmo motivo.
+    const { error: adminDeleteErr } = await admin
+      .from('audit_logs')
+      .delete()
+      .eq('id', inserted!.id)
+
+    expect(adminDeleteErr, 'service_role apagou linha da trilha de auditoria').not.toBeNull()
+
+    const { data: aindaLa } = await admin
+      .from('audit_logs')
+      .select('id')
+      .eq('id', inserted!.id)
+      .maybeSingle()
+    expect(aindaLa, 'a linha sumiu apesar do erro').not.toBeNull()
   })
 })

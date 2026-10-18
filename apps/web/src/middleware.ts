@@ -133,7 +133,10 @@ export async function middleware(request: NextRequest) {
   const isPublicPath =
     request.nextUrl.pathname.startsWith('/auth') ||
     request.nextUrl.pathname === '/home' ||
-    request.nextUrl.pathname === '/definir-senha';
+    request.nextUrl.pathname === '/definir-senha' ||
+    // Política de privacidade e suporte (arquivos estáticos em public/) — exigidas públicas pela App Store e Play Store.
+    request.nextUrl.pathname === '/privacidade.html' ||
+    request.nextUrl.pathname === '/suporte.html';
 
   const pathname = request.nextUrl.pathname;
 

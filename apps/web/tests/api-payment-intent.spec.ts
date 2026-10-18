@@ -25,7 +25,9 @@ import {
   deleteTestCustomer, deleteTestAuthUser,
 } from './helpers'
 import { createCharge } from '../src/lib/financial/charges'
-import { getOrCreateIntent, type PaymentProvider } from '../src/lib/payment/intents'
+import { getOrCreateIntent } from '../src/lib/payment/intents'
+import type { PaymentProvider } from '../src/lib/payment/types'
+import type { ProviderRegistry } from '../src/lib/payment/registry'
 
 const admin = () => getSupabaseAdmin()
 const RUN = Date.now().toString(36)
@@ -98,11 +100,21 @@ async function cobrancaPara(customerId: string, valor: number) {
   return c.chargeId as string
 }
 
-/** Provedor falso: registra o que foi pedido, sem sair da máquina. */
-function provedorFalso() {
+/**
+ * Provedor falso: registra o que foi pedido, sem sair da máquina.
+ *
+ * Entra por REGISTRY, não por parâmetro (ADR 0030): `getOrCreateIntent` resolve
+ * o gateway pela conta que o tenant elegeu, então o falso tem que se passar
+ * pelo slug daquela conta. É o que torna o teste uma prova de que a resolução
+ * funciona, e não só do cálculo de valor.
+ */
+function provedorFalso(id = 'mercadopago', methods: PaymentProvider['descriptor']['methods'] = ['pix']) {
   const chamadas: { amount: number; chargeId: string; method: string }[] = []
   const provider: PaymentProvider = {
-    name: 'mercadopago',
+    descriptor: {
+      id, label: 'Provedor Falso', description: 'teste',
+      connectionMode: 'oauth', methods, minAmount: 5, available: true,
+    },
     async createIntent({ amount, chargeId, method }) {
       chamadas.push({ amount, chargeId, method })
       return {
@@ -112,7 +124,8 @@ function provedorFalso() {
       }
     },
   }
-  return { provider, chamadas }
+  const registry: ProviderRegistry = { [id]: provider }
+  return { provider, registry, chamadas }
 }
 
 let contaProvedorId = ''
@@ -204,6 +217,44 @@ test.describe('Rota do QR — autenticação e titularidade', () => {
     expect(res.status()).toBe(404)
   })
 
+  test('cliente de DUAS locadoras alcança a própria cobrança', async ({ request }) => {
+    // Regressão de produção (2026-09-25): a rota buscava o cadastro com
+    // `.maybeSingle()` por `user_id`. Com um cadastro por locadora (PRD 0001),
+    // o PostgREST devolvia erro e o cliente ouvia "Cliente não encontrado".
+    const { data: outra, error: tErr } = await admin()
+      .from('tenants')
+      .insert({ name: `${TEST_TAG} Outra ${RUN}`, slug: `e2e-outra-${RUN}` })
+      .select('id')
+      .single()
+    if (tErr) throw new Error(`tenant: ${tErr.message}`)
+    const outraId = (outra as { id: string }).id
+
+    try {
+      const { error: cErr } = await admin().from('customers').insert({
+        tenant_id: outraId, name: `${TEST_TAG} App outra`, cpf: dono.cpf,
+        phone: '21988887777', state: 'RJ', active: true, in_queue: false,
+        user_id: dono.userId,
+      })
+      if (cErr) throw new Error(`cliente na outra locadora: ${cErr.message}`)
+
+      const res = await request.post(`/api/charges/${chargeDoDono}/payment-intent`, {
+        headers: { Authorization: `Bearer ${dono.token}` },
+        data: {},
+      })
+      const body = await res.json()
+
+      // Sem gateway configurado a rota ainda pode recusar (403 "Pagamento
+      // online não configurado"); o que NÃO pode é negar que ele é cliente
+      // nem que a cobrança é dele.
+      expect(body.error?.message, 'dono com dois cadastros foi tratado como não-cliente')
+        .not.toBe('Cliente não encontrado')
+      expect(res.status(), 'dono com dois cadastros não alcançou a própria cobrança').not.toBe(404)
+    } finally {
+      await admin().from('customers').delete().eq('tenant_id', outraId)
+      await admin().from('tenants').delete().eq('id', outraId)
+    }
+  })
+
   test('usuário autenticado que não é cliente é barrado', async ({ request }) => {
     // Operador do cockpit tem token válido e nenhum `customers.user_id`.
     const { data: session } = await createClient(
@@ -232,7 +283,7 @@ test.describe('Valor do QR — getOrCreateIntent', () => {
       .from('payment_provider_accounts')
       .insert({
         tenant_id: tenantId, provider: 'mercadopago',
-        external_account_id: `intent-${RUN}`, active: true,
+        external_account_id: `intent-${RUN}`, active: true, is_default: true,
       })
       .select('id')
       .single()
@@ -257,13 +308,32 @@ test.describe('Valor do QR — getOrCreateIntent', () => {
 
   test('cobra o valor em aberto, não o valor de face', async () => {
     const chargeId = await cobrancaPara(cliente.customerId, 500)
-    const { provider, chamadas } = provedorFalso()
+    const { registry, chamadas } = provedorFalso()
 
-    const r = await getOrCreateIntent(admin(), tenantId, chargeId, 'pix', provider)
+    const r = await getOrCreateIntent(admin(), { tenantId, chargeId, method: 'pix' }, registry)
 
     expect(r.amount).toBe(500)
     expect(r.is_reused).toBe(false)
     expect(chamadas[0].amount, 'pediu ao provedor um valor diferente do devido').toBe(500)
+  })
+
+  test('sem método pedido, usa o meio do gateway ELEITO', async () => {
+    // Os dois chamadores reais escreviam `'pix'` fixo, o que só funcionava
+    // enquanto todo gateway gerava PIX. Um provedor de checkout hospedado
+    // (`payment_link`) recusaria — e a locadora leria "não gera cobrança por
+    // pix" depois de trocar de gateway, sem nunca ter pedido PIX.
+    const chargeId = await cobrancaPara(cliente.customerId, 300)
+    const { registry, chamadas } = provedorFalso('mercadopago', ['payment_link'])
+
+    const r = await getOrCreateIntent(admin(), { tenantId, chargeId }, registry)
+
+    expect(chamadas[0].method, 'pediu ao provedor um meio que ele não gera').toBe('payment_link')
+    expect(r.method).toBe('payment_link')
+
+    // E o que ficou gravado é o que a confirmação vai ler.
+    const { data } = await admin()
+      .from('payment_intents').select('method').eq('id', r.intent_id).single()
+    expect((data as { method: string }).method).toBe('payment_link')
   })
 
   test('a segunda chamada REAPROVEITA a tentativa pendente', async () => {
@@ -271,10 +341,10 @@ test.describe('Valor do QR — getOrCreateIntent', () => {
     // impede dois QR ativos para a mesma dívida. Se o código não reaproveitar,
     // a segunda chamada explode — e o cliente vê erro ao reabrir a tela.
     const chargeId = await cobrancaPara(cliente.customerId, 250)
-    const { provider, chamadas } = provedorFalso()
+    const { registry, chamadas } = provedorFalso()
 
-    const primeira = await getOrCreateIntent(admin(), tenantId, chargeId, 'pix', provider)
-    const segunda = await getOrCreateIntent(admin(), tenantId, chargeId, 'pix', provider)
+    const primeira = await getOrCreateIntent(admin(), { tenantId, chargeId, method: 'pix' }, registry)
+    const segunda = await getOrCreateIntent(admin(), { tenantId, chargeId, method: 'pix' }, registry)
 
     expect(segunda.intent_id).toBe(primeira.intent_id)
     expect(segunda.is_reused).toBe(true)
@@ -288,9 +358,9 @@ test.describe('Valor do QR — getOrCreateIntent', () => {
 
   test('tentativa expirada é marcada e dá lugar a uma nova', async () => {
     const chargeId = await cobrancaPara(cliente.customerId, 180)
-    const { provider } = provedorFalso()
+    const { registry } = provedorFalso()
 
-    const primeira = await getOrCreateIntent(admin(), tenantId, chargeId, 'pix', provider)
+    const primeira = await getOrCreateIntent(admin(), { tenantId, chargeId, method: 'pix' }, registry)
 
     // Vence o QR: é o que o tempo faria.
     await admin()
@@ -298,7 +368,7 @@ test.describe('Valor do QR — getOrCreateIntent', () => {
       .update({ expires_at: new Date(Date.now() - 60_000).toISOString() })
       .eq('id', primeira.intent_id)
 
-    const segunda = await getOrCreateIntent(admin(), tenantId, chargeId, 'pix', provider)
+    const segunda = await getOrCreateIntent(admin(), { tenantId, chargeId, method: 'pix' }, registry)
 
     expect(segunda.intent_id).not.toBe(primeira.intent_id)
     expect(segunda.is_reused).toBe(false)
@@ -315,11 +385,11 @@ test.describe('Valor do QR — getOrCreateIntent', () => {
     // provedor e a segunda inserção bate no índice único — que existe
     // exatamente para impedir dois QR ativos para a mesma dívida.
     const chargeId = await cobrancaPara(cliente.customerId, 340)
-    const { provider } = provedorFalso()
+    const { registry } = provedorFalso()
 
     const resultados = await Promise.allSettled([
-      getOrCreateIntent(admin(), tenantId, chargeId, 'pix', provider),
-      getOrCreateIntent(admin(), tenantId, chargeId, 'pix', provider),
+      getOrCreateIntent(admin(), { tenantId, chargeId, method: 'pix' }, registry),
+      getOrCreateIntent(admin(), { tenantId, chargeId, method: 'pix' }, registry),
     ])
 
     const { count } = await admin()
@@ -338,7 +408,7 @@ test.describe('Valor do QR — getOrCreateIntent', () => {
 
   test('cobrança já quitada não gera QR', async () => {
     const chargeId = await cobrancaPara(cliente.customerId, 120)
-    const { provider } = provedorFalso()
+    const { registry } = provedorFalso()
 
     // Quita por fora, como uma baixa manual faria.
     const { data: pay } = await admin()
@@ -353,26 +423,123 @@ test.describe('Valor do QR — getOrCreateIntent', () => {
       charge_id: chargeId, amount: 120,
     })
 
-    await expect(getOrCreateIntent(admin(), tenantId, chargeId, 'pix', provider))
+    await expect(getOrCreateIntent(admin(), { tenantId, chargeId, method: 'pix' }, registry))
       .rejects.toThrow(/não está em aberto/i)
   })
 
   test('cobrança inexistente não vira QR silencioso', async () => {
-    const { provider, chamadas } = provedorFalso()
+    const { registry, chamadas } = provedorFalso()
     await expect(getOrCreateIntent(
-      admin(), tenantId, '00000000-0000-4000-8000-000000000998', 'pix', provider,
+      admin(), { tenantId, chargeId: '00000000-0000-4000-8000-000000000998', method: 'pix' }, registry,
     )).rejects.toThrow(/não encontrada/i)
     expect(chamadas, 'falou com o provedor sem cobrança').toHaveLength(0)
   })
 
+  /**
+   * O ponto da ADR 0030: quem cobra é a conta ELEITA pelo tenant, não um
+   * provedor escolhido por `import`. Antes, `is_default` existia e não era lido
+   * por ninguém — cadastrar um segundo gateway não mudava nada.
+   */
+  test('cobra pelo gateway que o tenant elegeu, não pelo primeiro que existir', async () => {
+    const chargeId = await cobrancaPara(cliente.customerId, 410)
+
+    // Segundo gateway do mesmo tenant, eleito no lugar do primeiro.
+    const { data: outra, error } = await admin()
+      .from('payment_provider_accounts')
+      .insert({
+        tenant_id: tenantId, provider: 'gateway_de_teste',
+        external_account_id: `eleito-${RUN}`, active: true,
+      })
+      .select('id').single()
+    if (error) throw new Error(`conta rival: ${error.message}`)
+    const rivalId = (outra as { id: string }).id
+
+    await admin().rpc('fn_store_provider_credentials', {
+      p_account_id: rivalId, p_access_token: 'tok-rival', p_refresh_token: null,
+    })
+    const { error: eleErr } = await admin().rpc('fn_set_default_provider_account', { p_account_id: rivalId })
+    if (eleErr) throw new Error(`eleição: ${eleErr.message}`)
+
+    try {
+      const mp = provedorFalso('mercadopago')
+      const rival = provedorFalso('gateway_de_teste')
+      const registry = { ...mp.registry, ...rival.registry }
+
+      const r = await getOrCreateIntent(admin(), { tenantId, chargeId, method: 'pix' }, registry)
+
+      expect(r.provider, 'cobrou pelo gateway errado').toBe('gateway_de_teste')
+      expect(rival.chamadas, 'o gateway eleito não foi chamado').toHaveLength(1)
+      expect(mp.chamadas, 'chamou um gateway que o tenant não elegeu').toHaveLength(0)
+    } finally {
+      await admin().from('payment_intents').delete().eq('provider_account_id', rivalId)
+      await admin().rpc('fn_disconnect_provider_account', { p_account_id: rivalId })
+      await admin().from('payment_provider_accounts').delete().eq('id', rivalId)
+      await admin().rpc('fn_set_default_provider_account', { p_account_id: contaProvedorId })
+    }
+  })
+
+  /**
+   * G-05: `method` era aceito pela rota, propagado por três camadas e
+   * descartado pelo provedor — pedir `boleto` gerava um PIX em silêncio.
+   */
+  test('método que o gateway não gera é recusado, não vira PIX', async () => {
+    const chargeId = await cobrancaPara(cliente.customerId, 77)
+    const { registry, chamadas } = provedorFalso()
+
+    await expect(getOrCreateIntent(admin(), { tenantId, chargeId, method: 'boleto' }, registry))
+      .rejects.toThrow(/não gera cobrança por boleto/i)
+
+    expect(chamadas, 'falou com o provedor com método não suportado').toHaveLength(0)
+
+    const { count } = await admin()
+      .from('payment_intents').select('id', { count: 'exact', head: true })
+      .eq('charge_id', chargeId)
+    expect(count, 'gerou tentativa para um método recusado').toBe(0)
+  })
+
+  /**
+   * Piso do gateway. A Cora recusa abaixo de R$ 5,00 com um 400 genérico
+   * (`services[0].amount must be greater than or equal to 500`) que virava
+   * "Não foi possível gerar o Pix. Tente novamente." — conselho inútil, porque
+   * o valor da cobrança não muda por tentar de novo. Aconteceu em PRODUÇÃO.
+   */
+  test('valor abaixo do mínimo do gateway falha dizendo o limite, sem chamar a API', async () => {
+    const chargeId = await cobrancaPara(cliente.customerId, 3)
+    const { registry, chamadas } = provedorFalso()
+
+    await expect(getOrCreateIntent(admin(), { tenantId, chargeId, method: 'pix' }, registry))
+      .rejects.toThrow(/não gera cobrança abaixo de R\$\s?5,00/i)
+
+    expect(chamadas, 'gastou uma chamada ao gateway para receber um 400 previsível').toHaveLength(0)
+
+    const { count } = await admin()
+      .from('payment_intents').select('id', { count: 'exact', head: true })
+      .eq('charge_id', chargeId)
+    expect(count, 'gravou tentativa para um valor que o gateway recusa').toBe(0)
+  })
+
+  /** Conta gravada com slug sem implementação tem que parar aqui, com nome. */
+  test('gateway sem implementação falha explicitamente', async () => {
+    const chargeId = await cobrancaPara(cliente.customerId, 55)
+    const { registry } = provedorFalso('outro_provedor')
+
+    await expect(getOrCreateIntent(admin(), { tenantId, chargeId, method: 'pix' }, registry))
+      .rejects.toThrow(/não tem implementação/i)
+  })
+
   test('sem conta de provedor ativa a falha é explícita', async () => {
     const chargeId = await cobrancaPara(cliente.customerId, 90)
-    const { provider } = provedorFalso()
+    const { registry } = provedorFalso()
 
     // Desativar só a conta deste teste não bastava: resíduo de execução
     // anterior deixava OUTRA conta ativa do mesmo tenant, `getOrCreateIntent`
     // a encontrava e o teste passava ou falhava conforme a sujeira do banco.
-    // A condição que se quer é "nenhuma conta ativa", então é ela que se monta.
+    // A condição que se quer é "nenhum gateway eleito", então é ela que se monta.
+    //
+    // Pelo caminho real (`fn_disconnect_provider_account`), não por UPDATE
+    // solto: `active = false` com `is_default = true` viola o CHECK da ADR 0030,
+    // e o UPDATE recusado sem ninguém conferir o erro deixava o teste verde
+    // contra um banco que não estava no estado pedido.
     const { data: ativas } = await admin()
       .from('payment_provider_accounts')
       .select('id')
@@ -380,13 +547,17 @@ test.describe('Valor do QR — getOrCreateIntent', () => {
       .eq('active', true)
 
     const ids = ((ativas ?? []) as { id: string }[]).map((a) => a.id)
-    await admin().from('payment_provider_accounts').update({ active: false }).in('id', ids)
+    for (const id of ids) {
+      const { error } = await admin().rpc('fn_disconnect_provider_account', { p_account_id: id })
+      if (error) throw new Error(`desconectar ${id}: ${error.message}`)
+    }
 
     try {
-      await expect(getOrCreateIntent(admin(), tenantId, chargeId, 'pix', provider))
-        .rejects.toThrow(/não configurada/i)
+      await expect(getOrCreateIntent(admin(), { tenantId, chargeId, method: 'pix' }, registry))
+        .rejects.toThrow(/nenhum gateway/i)
     } finally {
       await admin().from('payment_provider_accounts').update({ active: true }).in('id', ids)
+      await admin().rpc('fn_set_default_provider_account', { p_account_id: contaProvedorId })
     }
   })
 })

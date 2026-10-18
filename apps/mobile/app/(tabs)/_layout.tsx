@@ -1,79 +1,62 @@
 import { Tabs } from 'expo-router'
-import { StyleSheet, Text, View } from 'react-native'
-import { useTheme } from '../../src/theme'
+import type { ColorValue } from 'react-native'
+import { useSafeAreaInsets } from 'react-native-safe-area-context'
+import { StatusBar } from 'expo-status-bar'
+import { useStatusBarStyle, useTheme } from '../../src/theme'
+import { Icon, type IconName } from '../../src/components/ui'
 
-function TabIcon({ label, focused }: { label: string; focused: boolean }) {
-  const theme = useTheme()
-  return (
-    <View style={styles.iconWrap}>
-      <Text style={[styles.iconText, { color: focused ? theme.primary : theme.textMute }]}>{label}</Text>
-    </View>
+/** Contorno quando inativa, preenchido quando ativa — padrão iOS/Material 3. */
+function tabIcon(outline: IconName, filled: IconName) {
+  return ({ focused, color }: { focused: boolean; color: ColorValue }) => (
+    <Icon name={focused ? filled : outline} size={24} color={color} />
   )
 }
 
 export default function TabsLayout() {
   const theme = useTheme()
+  const insets = useSafeAreaInsets()
+  // As telas de acesso deixam a barra clara (fundo azul-marinho); aqui ela
+  // volta a seguir o tema, senão os ícones somem no fundo claro.
+  const statusBarStyle = useStatusBarStyle()
   return (
-    <Tabs
-      screenOptions={{
-        headerShown: false,
-        tabBarActiveTintColor: theme.primary,
-        tabBarInactiveTintColor: theme.textMute,
-        tabBarStyle: {
-          backgroundColor: theme.surface,
-          borderTopColor: theme.border,
-        },
-        tabBarLabelStyle: { fontSize: 11, fontWeight: '500' },
-      }}
-    >
-      <Tabs.Screen
-        name="index"
-        options={{
-          title: 'Início',
-          tabBarIcon: ({ focused }) => <TabIcon label="⌂" focused={focused} />,
+    <>
+      <StatusBar style={statusBarStyle} />
+      <Tabs
+        screenOptions={{
+          headerShown: false,
+          tabBarActiveTintColor: theme.primary,
+          tabBarInactiveTintColor: theme.textMute,
+          tabBarStyle: {
+            backgroundColor: theme.surface,
+            borderTopColor: theme.border,
+            height: 60 + insets.bottom,
+            paddingTop: 8,
+            paddingBottom: Math.max(insets.bottom, 8),
+          },
+          tabBarLabelStyle: { fontSize: 11, fontWeight: '600', marginTop: 2 },
         }}
-      />
-      <Tabs.Screen
-        name="cobrancas"
-        options={{
-          title: 'Cobranças',
-          tabBarIcon: ({ focused }) => <TabIcon label="$" focused={focused} />,
-        }}
-      />
-      <Tabs.Screen
-        name="manutencoes"
-        options={{
-          title: 'Manutenções',
-          tabBarIcon: ({ focused }) => <TabIcon label="M" focused={focused} />,
-        }}
-      />
-      <Tabs.Screen
-        name="vistorias"
-        options={{
-          title: 'Vistorias',
-          tabBarIcon: ({ focused }) => <TabIcon label="V" focused={focused} />,
-        }}
-      />
-      <Tabs.Screen
-        name="suporte"
-        options={{
-          title: 'Conta',
-          tabBarIcon: ({ focused }) => <TabIcon label="☰" focused={focused} />,
-        }}
-      />
-    </Tabs>
+      >
+        <Tabs.Screen
+          name="index"
+          options={{ title: 'Início', tabBarIcon: tabIcon('home-outline', 'home') }}
+        />
+        <Tabs.Screen
+          name="cobrancas"
+          options={{ title: 'Cobranças', tabBarIcon: tabIcon('wallet-outline', 'wallet') }}
+        />
+        <Tabs.Screen
+          name="manutencoes"
+          options={{ title: 'Manutenção', tabBarIcon: tabIcon('construct-outline', 'construct') }}
+        />
+        <Tabs.Screen
+          name="vistorias"
+          options={{ title: 'Vistorias', tabBarIcon: tabIcon('camera-outline', 'camera') }}
+        />
+        <Tabs.Screen
+          name="suporte"
+          options={{ title: 'Conta', tabBarIcon: tabIcon('person-circle-outline', 'person-circle') }}
+        />
+      </Tabs>
+    </>
   )
 }
-
-const styles = StyleSheet.create({
-  iconWrap: {
-    width: 24,
-    height: 24,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  iconText: {
-    fontSize: 16,
-    fontWeight: '700',
-  },
-})

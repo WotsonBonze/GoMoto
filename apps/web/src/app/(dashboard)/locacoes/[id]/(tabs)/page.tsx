@@ -196,6 +196,16 @@ export default async function RentalDetailPage({
                 {rental.vehicle.year_manufacture && (
                   <p className="text-[13px] text-fg-mute">{rental.vehicle.year_manufacture} · {rental.vehicle.color}</p>
                 )}
+                {/* RF-003 — km inicial/final/rodado. `—` em locação anterior a
+                    esta feature (km_initial nulo). */}
+                <p className="text-[13px] text-fg-mute">
+                  Km inicial: {rental.km_initial != null ? rental.km_initial.toLocaleString('pt-BR') : '—'}
+                  {' · '}
+                  Km final: {rental.km_final != null ? rental.km_final.toLocaleString('pt-BR') : '—'}
+                  {rental.km_initial != null && rental.km_final != null && (
+                    <> {' · '}Km rodado: {(rental.km_final - rental.km_initial).toLocaleString('pt-BR')}</>
+                  )}
+                </p>
                 <Link
                   href={`/veiculos/${rental.vehicle.id}`}
                   className="inline-flex items-center gap-1 text-[12px] text-fg-mute transition-colors hover:text-primary"

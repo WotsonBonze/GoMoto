@@ -41,6 +41,7 @@ type FormState = {
   start_date:       string
   end_date:         string
   use_pro_rata:     boolean
+  km_initial:       string
   security_deposit: string
   down_payment:          string
   down_payment_due_date: string
@@ -49,6 +50,10 @@ type FormState = {
   checkin_checkout_inspection_profile_id: string
   periodic_inspection_profile_id:         string
   periodic_inspection_frequency_days:     string
+  // Multa por rescisão antecipada e prazo mínimo de contrato (Spec 0015) —
+  // opcionais, configuráveis por locação.
+  early_termination_fine_amount: string
+  minimum_term_days:             string
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -110,6 +115,7 @@ function buildInitialForm(
     start_date:       d?.start_date ?? '',
     end_date:         d?.end_date ?? '',
     use_pro_rata:     d?.use_pro_rata ?? true,
+    km_initial:       d?.km_initial != null ? String(d.km_initial) : '',
     security_deposit: d?.security_deposit != null ? String(d.security_deposit) : '',
     down_payment:          d?.down_payment != null ? String(d.down_payment) : '',
     down_payment_due_date: d?.down_payment_due_date ?? '',
@@ -118,6 +124,8 @@ function buildInitialForm(
     checkin_checkout_inspection_profile_id: '',
     periodic_inspection_profile_id:         '',
     periodic_inspection_frequency_days:     '',
+    early_termination_fine_amount: d?.early_termination_fine_amount != null ? String(d.early_termination_fine_amount) : '',
+    minimum_term_days:             d?.minimum_term_days != null ? String(d.minimum_term_days) : '',
   }
 }
 
@@ -246,6 +254,7 @@ export function RentalForm({ rentalId, initialData, defaultCustomerId, tenantNam
           start_date:   form.start_date,
           end_date:     form.end_date,
           security_deposit: form.security_deposit ? parseFloat(form.security_deposit) : null,
+          km_initial:   form.km_initial ? parseInt(form.km_initial, 10) : null,
         },
         tenantName: tenantName ?? '',
       })
@@ -394,7 +403,8 @@ export function RentalForm({ rentalId, initialData, defaultCustomerId, tenantNam
 
   const isFormReady = Boolean(
     form.vehicle_id && form.customer_id && form.start_date && form.end_date &&
-    form.cycle_amount && form.due_day && form.end_date > form.start_date
+    form.cycle_amount && form.due_day && form.end_date > form.start_date &&
+    (isEditMode || form.km_initial !== '')
   )
 
   function validateStep() {
@@ -407,6 +417,15 @@ export function RentalForm({ rentalId, initialData, defaultCustomerId, tenantNam
       errors.end_date = 'Data de fim deve ser posterior ao início'
     if (!form.cycle_amount || parseFloat(form.cycle_amount) <= 0)
       errors.cycle_amount = 'Informe o valor do ciclo'
+    if (!isEditMode) {
+      const km = parseInt(form.km_initial, 10)
+      const vehicleKm = vehicles.find(v => v.id === form.vehicle_id)?.km_current ?? 0
+      if (form.km_initial === '' || isNaN(km) || km < 0) {
+        errors.km_initial = 'Informe o km inicial'
+      } else if (km < vehicleKm) {
+        errors.km_initial = `Km não pode ser menor que ${vehicleKm.toLocaleString('pt-BR')} (km atual do veículo)`
+      }
+    }
     setFieldErrors(errors)
     return Object.keys(errors).length === 0
   }
@@ -429,6 +448,8 @@ export function RentalForm({ rentalId, initialData, defaultCustomerId, tenantNam
             down_payment:          form.down_payment ? parseFloat(form.down_payment) : null,
             down_payment_due_date: form.down_payment_due_date || undefined,
           } : {}),
+          early_termination_fine_amount: form.early_termination_fine_amount ? parseFloat(form.early_termination_fine_amount) : null,
+          minimum_term_days:             form.minimum_term_days ? parseInt(form.minimum_term_days, 10) : null,
         })
         if (!result.ok) { setGlobalError(result.error.message); return }
 
@@ -455,6 +476,7 @@ export function RentalForm({ rentalId, initialData, defaultCustomerId, tenantNam
         start_date:       form.start_date,
         end_date:         form.end_date,
         use_pro_rata:     form.use_pro_rata,
+        km_initial:       parseInt(form.km_initial, 10),
         security_deposit:     form.security_deposit ? parseFloat(form.security_deposit) : null,
         deposit_paid:         depositPaid,
         deposit_payment_date: depositPaid ? depositPaymentDate : undefined,
@@ -470,6 +492,8 @@ export function RentalForm({ rentalId, initialData, defaultCustomerId, tenantNam
         periodic_inspection_frequency_days:     form.periodic_inspection_profile_id && form.periodic_inspection_frequency_days
           ? parseInt(form.periodic_inspection_frequency_days, 10)
           : null,
+        early_termination_fine_amount: form.early_termination_fine_amount ? parseFloat(form.early_termination_fine_amount) : null,
+        minimum_term_days:             form.minimum_term_days ? parseInt(form.minimum_term_days, 10) : null,
       })
       if (!result.ok) { setGlobalError(result.error.message); return }
       router.push(`/locacoes/${result.data.lease_id}`)
@@ -604,7 +628,18 @@ export function RentalForm({ rentalId, initialData, defaultCustomerId, tenantNam
                     <select
                       className={fieldErrors.vehicle_id ? inputErrCls : selectCls}
                       value={form.vehicle_id}
-                      onChange={e => set('vehicle_id', e.target.value)}
+                      onChange={e => {
+                        const vehicleId = e.target.value
+                        const vehicle = vehicles.find(v => v.id === vehicleId)
+                        setForm(f => ({
+                          ...f,
+                          vehicle_id: vehicleId,
+                          // Pré-preenchido com o km atual do veículo — editável,
+                          // mas evita o operador digitar do zero o caso comum
+                          // (entrega no mesmo km que o veículo já registra).
+                          km_initial: vehicle?.km_current != null ? String(vehicle.km_current) : f.km_initial,
+                        }))
+                      }}
                     >
                       <option value="">Selecione um veículo…</option>
                       {vehicles.map(v => (
@@ -617,6 +652,27 @@ export function RentalForm({ rentalId, initialData, defaultCustomerId, tenantNam
                       <p className="mt-1 text-[12px] text-danger">{fieldErrors.vehicle_id}</p>
                     )}
                   </div>
+                </div>
+              )}
+              {!isEditMode && form.vehicle_id && (
+                <div className="mt-4 max-w-xs">
+                  <label className={labelCls}>Km inicial *</label>
+                  <input
+                    type="number"
+                    min="0"
+                    step="1"
+                    placeholder="Km do veículo na entrega"
+                    className={fieldErrors.km_initial ? inputErrCls : inputCls}
+                    value={form.km_initial}
+                    onChange={e => set('km_initial', e.target.value)}
+                  />
+                  {fieldErrors.km_initial ? (
+                    <p className="mt-1 text-[12px] text-danger">{fieldErrors.km_initial}</p>
+                  ) : (
+                    <p className="mt-1 text-[12px] text-fg-mute">
+                      Km do veículo no momento da entrega — é o km impresso no contrato.
+                    </p>
+                  )}
                 </div>
               )}
             </section>
@@ -656,10 +712,43 @@ export function RentalForm({ rentalId, initialData, defaultCustomerId, tenantNam
                   </div>
                   <div className={`${readOnlyCls} w-fit px-4`}>Pro rata: {form.use_pro_rata ? 'Sim' : 'Não'}</div>
                   <p className="text-[12px] text-fg-mute">
-                    Valor do ciclo e encargos → <Link href={`/locacoes/${rentalId}/reajustar`} className="text-primary hover:underline">Reajustar</Link>.{' '}
-                    Prazo → <Link href={`/locacoes/${rentalId}/renovar`} className="text-primary hover:underline">Renovar</Link> (estender)
-                    {' '}ou <Link href={`/locacoes/${rentalId}/encerrar`} className="text-primary hover:underline">Encerrar</Link> (antecipar).{' '}
+                    Período, ciclo, dia de vencimento e valor → <Link href={`/locacoes/${rentalId}/ajustar`} className="text-primary hover:underline">Ajustar</Link>.{' '}
+                    Para encerrar o contrato e liberar o veículo → <Link href={`/locacoes/${rentalId}/encerrar`} className="text-primary hover:underline">Encerrar</Link>.{' '}
                     Tipo, ciclo, dia de vencimento, início e pro rata não podem ser alterados — encerre esta locação e crie uma nova.
+                  </p>
+
+                  {/* Multa/prazo mínimo (Spec 0015) — diferente do resto desta
+                      seção, continuam editáveis em locação ativa (RF-002). A
+                      Server Action recusa se a locação já foi encerrada. */}
+                  <div className="grid max-w-md grid-cols-2 gap-4 border-t border-divider pt-4">
+                    <div>
+                      <label className={labelCls}>Multa por rescisão antecipada (R$)</label>
+                      <input
+                        type="number"
+                        min="0"
+                        step="0.01"
+                        placeholder="0,00 — opcional"
+                        className={inputCls}
+                        value={form.early_termination_fine_amount}
+                        onChange={e => set('early_termination_fine_amount', e.target.value)}
+                      />
+                    </div>
+                    <div>
+                      <label className={labelCls}>Prazo mínimo (dias)</label>
+                      <input
+                        type="number"
+                        min="1"
+                        step="1"
+                        placeholder="Opcional"
+                        className={inputCls}
+                        value={form.minimum_term_days}
+                        onChange={e => set('minimum_term_days', e.target.value)}
+                      />
+                    </div>
+                  </div>
+                  <p className="text-[12px] text-fg-mute">
+                    Configuração opcional. Se preenchidos, o encerramento dentro do prazo mínimo
+                    exibe a multa e o operador decide, na hora, se cobra.
                   </p>
                 </div>
               ) : (
@@ -797,6 +886,39 @@ export function RentalForm({ rentalId, initialData, defaultCustomerId, tenantNam
                     />
                     Calcular pro rata na primeira e última cobranças
                   </label>
+
+                  {/* Multa por rescisão antecipada e prazo mínimo (Spec 0015) —
+                      opcionais, configuráveis por locação. */}
+                  <div className="grid max-w-md grid-cols-2 gap-4">
+                    <div>
+                      <label className={labelCls}>Multa por rescisão antecipada (R$)</label>
+                      <input
+                        type="number"
+                        min="0"
+                        step="0.01"
+                        placeholder="0,00 — opcional"
+                        className={inputCls}
+                        value={form.early_termination_fine_amount}
+                        onChange={e => set('early_termination_fine_amount', e.target.value)}
+                      />
+                    </div>
+                    <div>
+                      <label className={labelCls}>Prazo mínimo (dias)</label>
+                      <input
+                        type="number"
+                        min="1"
+                        step="1"
+                        placeholder="Opcional"
+                        className={inputCls}
+                        value={form.minimum_term_days}
+                        onChange={e => set('minimum_term_days', e.target.value)}
+                      />
+                    </div>
+                  </div>
+                  <p className="text-[12px] text-fg-mute">
+                    Configuração opcional. Se preenchidos, o encerramento dentro do prazo mínimo
+                    exibe a multa e o operador decide, na hora, se cobra.
+                  </p>
                 </div>
               )}
             </section>
@@ -1075,6 +1197,7 @@ export function RentalForm({ rentalId, initialData, defaultCustomerId, tenantNam
                   ['Início', form.start_date ? formatDate(form.start_date) : '—'],
                   ['Fim',    form.end_date   ? formatDate(form.end_date)   : '—'],
                   ['Pro rata',    form.use_pro_rata ? 'Sim' : 'Não'],
+                  ['Km inicial',  form.km_initial ? `${parseInt(form.km_initial, 10).toLocaleString('pt-BR')} km` : '—'],
                   ...(form.security_deposit
                     ? [['Caução', formatCurrency(parseFloat(form.security_deposit))]]
                     : []),

@@ -9,6 +9,13 @@ type SupabaseContextValue = {
    * permitir interação com dados de domínio.
    */
   tenantId: string | null
+  /**
+   * Quando true, as leituras de lista filtram por `tenantId`. O app do cliente
+   * liga: a RLS de cliente (`current_customer_ids()`) devolve o cadastro dele em
+   * TODAS as locadoras, então sem o filtro quem é cliente de duas via placas e
+   * cobranças das duas misturadas, qualquer que fosse a locadora escolhida.
+   */
+  scopeReadsToTenant: boolean
 }
 
 const SupabaseContext = createContext<SupabaseContextValue | null>(null)
@@ -16,14 +23,16 @@ const SupabaseContext = createContext<SupabaseContextValue | null>(null)
 export function SupabaseProvider({
   client,
   tenantId,
+  scopeReadsToTenant = false,
   children,
 }: {
   client: SupabaseClient
   tenantId: string | null
+  scopeReadsToTenant?: boolean
   children: React.ReactNode
 }) {
   return (
-    <SupabaseContext.Provider value={{ client, tenantId }}>
+    <SupabaseContext.Provider value={{ client, tenantId, scopeReadsToTenant }}>
       {children}
     </SupabaseContext.Provider>
   )
@@ -39,6 +48,19 @@ export function useTenantId(): string | null {
   const ctx = useContext(SupabaseContext)
   if (!ctx) throw new Error('useTenantId deve ser usado dentro de <SupabaseProvider>')
   return ctx.tenantId
+}
+
+/**
+ * Escopo das leituras de lista. `tenantId` é o filtro a aplicar (null = sem
+ * filtro, a RLS decide) e entra na queryKey para o cache não servir os dados de
+ * uma locadora na outra. `ready` é false enquanto o escopo está ligado mas a
+ * locadora ainda não foi resolvida — consultar antes traria tudo misturado.
+ */
+export function useReadScope(): { tenantId: string | null; ready: boolean } {
+  const ctx = useContext(SupabaseContext)
+  if (!ctx) throw new Error('useReadScope deve ser usado dentro de <SupabaseProvider>')
+  if (!ctx.scopeReadsToTenant) return { tenantId: null, ready: true }
+  return { tenantId: ctx.tenantId, ready: !!ctx.tenantId }
 }
 
 /**

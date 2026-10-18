@@ -60,7 +60,10 @@ ON CONFLICT (user_id) DO NOTHING;
 -- ============================================================
 UPDATE tenants
    SET name = 'Empresa Teste 1', slug = 'empresa-teste-1',
-       contact_phone = '11999990001', contact_email = 'contato@empresa1.com.br'
+       contact_phone = '11999990001', contact_email = 'contato@empresa1.com.br',
+       -- Login personalizado (ADR 0042): http://empresa1.localhost:3000/login.
+       -- Sem logo no seed (arquivo vai para o Storage) — envie pelo admin.
+       login_subdomain = 'empresa1'
  WHERE id = '00000000-0000-0000-0000-000000000001';
 
 INSERT INTO tenants (id, name, slug, contact_phone, contact_email) VALUES
@@ -374,3 +377,10 @@ INSERT INTO vehicle_status_history (vehicle_id, tenant_id, previous_status, new_
 SELECT id, tenant_id, NULL, status, NULL, created_at
 FROM vehicles
 ON CONFLICT DO NOTHING;
+
+-- ============================================================
+-- Contatos da locadora exibidos no app do cliente ("Fale com a locadora")
+-- ============================================================
+INSERT INTO tenant_contacts (tenant_id, label, phone, phone_kind, email, business_hours, sort_order) VALUES
+    ('00000000-0000-0000-0000-000000000001', 'Financeiro', '11987654321', 'whatsapp', 'financeiro@empresa01.com', 'Seg a sex, 8h às 18h', 0),
+    ('00000000-0000-0000-0000-000000000001', 'Manutenção', '1133334444',  'phone',    NULL,                       'Seg a sáb, 8h às 12h', 1);

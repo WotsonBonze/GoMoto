@@ -204,7 +204,7 @@ test.describe('Política de encargo — versionamento', () => {
 
 test.describe('Política de encargo — a tela', () => {
   test('mostra a política em vigor e salva uma versão nova', async ({ page }) => {
-    await page.goto('/configuracoes')
+    await page.goto('/configuracoes/encargos')
     await waitForPageLoad(page)
 
     const secao = page.locator('section').filter({ hasText: 'Encargo por atraso' })
@@ -240,7 +240,7 @@ test.describe('Política de encargo — a tela', () => {
   })
 
   test('a tela recusa vigência anterior a hoje', async ({ page }) => {
-    await page.goto('/configuracoes')
+    await page.goto('/configuracoes/encargos')
     await waitForPageLoad(page)
 
     const secao = page.locator('section').filter({ hasText: 'Encargo por atraso' })
@@ -495,7 +495,7 @@ test.describe('Empresa sem política — encargo é zero, e a tela diz isso', ()
     // O formulário nascia com 2% e 1% ao mês preenchidos quando não havia
     // política — os valores de mercado. Quem abria a tela lia configuração
     // onde não havia nenhuma.
-    await page.goto('/configuracoes')
+    await page.goto('/configuracoes/encargos')
     await waitForPageLoad(page)
 
     const secao = page.locator('section').filter({ hasText: 'Encargo por atraso' })

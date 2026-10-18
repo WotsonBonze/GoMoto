@@ -145,7 +145,7 @@ async function uploadMaintenanceFile(file: File, prefix: string): Promise<string
 /**
  * @constant INITIAL_FORM
  * @description Estado inicial do formulário de manutenção. Fornece valores em branco ou defaults sensatos.
- * Impacto se alterado: Modifica os campos padrões ao abrir o modal de "Nova Manutenção". Por exemplo, o tipo default começa como "corrective" e oficina como "Oficina do Careca".
+ * Impacto se alterado: Modifica os campos padrões ao abrir o modal de "Nova Manutenção". Por exemplo, o tipo default começa como "corrective" e a oficina começa em branco.
  */
 const INITIAL_FORM: MaintenanceFormData = {
   vehicle_id: '',
@@ -157,7 +157,7 @@ const INITIAL_FORM: MaintenanceFormData = {
   actual_km: '',
   cost: '',
   completed_date: '',
-  workshop: 'Oficina do Careca',
+  workshop: '',
   observations: '',
   effective_executor: 'company',
   customer_amount: '',
@@ -175,6 +175,15 @@ const TYPE_LABEL_MAP: Record<string, string> = {
   corrective: 'Corretiva',
   inspection: 'Vistoria',
 }
+
+/**
+ * @constant MAINTENANCE_TYPE_OPTIONS
+ * @description Opções de tipo de manutenção disponíveis para cadastro e edição manual.
+ */
+const MAINTENANCE_TYPE_OPTIONS = [
+  { value: 'corrective', label: 'Corretiva' },
+  { value: 'preventive', label: 'Preventiva' },
+]
 
 /**
  * @constant STATUS_COLORS
@@ -425,8 +434,8 @@ export default function MaintenancePage() {
   // [completionKm, setCompletionKm]: Quilometragem do odômetro no momento da conclusão da manutenção.
   const [completionKm, setCompletionKm] = useState('')
   
-  // [completionWorkshop, setCompletionWorkshop]: A oficina que realizou o reparo. Inicia com um "default".
-  const [completionWorkshop, setCompletionWorkshop] = useState('Oficina do Careca')
+  // [completionWorkshop, setCompletionWorkshop]: A oficina que realizou o reparo. Inicia em branco.
+  const [completionWorkshop, setCompletionWorkshop] = useState('')
   
   // [completionObservations, setCompletionObservations]: Parecer técnico extra feito pelo mecânico ou analista.
   const [completionObservations, setCompletionObservations] = useState('')
@@ -600,6 +609,13 @@ export default function MaintenancePage() {
     ...vehicles.map((m) => ({ value: m.id, label: `${m.license_plate} — ${m.make} ${m.model}` })),
   ], [vehicles])
 
+  const typeSelectOptions = useMemo(() => {
+    if (formData.type === 'inspection') {
+      return [...MAINTENANCE_TYPE_OPTIONS, { value: 'inspection', label: 'Vistoria' }]
+    }
+    return MAINTENANCE_TYPE_OPTIONS
+  }, [formData.type])
+
   const hasActiveFilters =
     statusFilter !== 'all'
     || !!vehicleFilter
@@ -642,7 +658,7 @@ export default function MaintenancePage() {
     setCompletingMaintenance(null)
     setCompletionStep(1)
     setCompletionKm('')
-    setCompletionWorkshop('Oficina do Careca')
+    setCompletionWorkshop('')
     setCompletionObservations('')
     setCompletionDate(new Date().toISOString().split('T')[0])
     setCompletionExtras([])
@@ -812,7 +828,7 @@ export default function MaintenancePage() {
     setCompletingMaintenance(maintenance)
     setCompletionStep(1)
     setCompletionKm(maintenance.vehicle?.km_current?.toString() ?? '')
-    setCompletionWorkshop(maintenance.workshop || 'Oficina do Careca')
+    setCompletionWorkshop(maintenance.workshop ?? '')
     setCompletionObservations(maintenance.observations || '')
     setCompletionDate(new Date().toISOString().split('T')[0])
     setCompletionExtraIds([])
@@ -1375,18 +1391,22 @@ export default function MaintenancePage() {
               }}
               options={vehicleSelectOptions}
             />
-            <div>
-              <label className="mb-1.5 block text-[13px] font-medium text-fg-mute">Tipo</label>
-              <div className="flex h-10 items-center rounded-lg border border-border bg-surface-2 px-3 text-[13px] text-fg-mute cursor-not-allowed">
-                {editingMaintenance ? TYPE_LABEL_MAP[formData.type] || formData.type : 'Corretiva'}
-              </div>
-            </div>
+            <Select
+              label="Tipo *"
+              value={formData.type}
+              onChange={(e) =>
+                setFormData({
+                  ...formData,
+                  type: e.target.value as 'preventive' | 'corrective' | 'inspection',
+                })
+              }
+              options={typeSelectOptions}
+            />
             <div className="md:col-span-2">
               <Input
                 label="Item / Descrição *"
                 value={formData.description}
                 onChange={(e) => setFormData({ ...formData, description: e.target.value })}
-                placeholder="Ex: Troca do cabo do freio..."
               />
             </div>
           </div>
@@ -1395,9 +1415,9 @@ export default function MaintenancePage() {
             /* AGENDADO: gatilhos de quando a manutenção vence. */
             <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
               <Input label="Data Agendada" type="date" value={formData.scheduled_date} onChange={(e) => setFormData({ ...formData, scheduled_date: e.target.value })} />
-              <Input label="KM Previsto" type="number" value={formData.predicted_km} onChange={(e) => setFormData({ ...formData, predicted_km: e.target.value })} placeholder="Ex: 18000" />
+              <Input label="KM Previsto" type="number" value={formData.predicted_km} onChange={(e) => setFormData({ ...formData, predicted_km: e.target.value })} />
               <div className="md:col-span-2">
-                <Input label="Oficina / Mecânico" value={formData.workshop} onChange={(e) => setFormData({ ...formData, workshop: e.target.value })} placeholder="Onde a manutenção será feita (opcional)" />
+                <Input label="Oficina / Mecânico" autoComplete="off" value={formData.workshop} onChange={(e) => setFormData({ ...formData, workshop: e.target.value })} />
               </div>
               <div className="md:col-span-2">
                 <Textarea
@@ -1418,9 +1438,9 @@ export default function MaintenancePage() {
             <div className="space-y-4">
               <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
                 <Input label="Data de Conclusão *" type="date" value={formData.completed_date} onChange={(e) => setFormData({ ...formData, completed_date: e.target.value })} />
-                <Input label="KM no Serviço *" type="number" value={formData.actual_km} onChange={(e) => setFormData({ ...formData, actual_km: e.target.value })} placeholder="Ex: 15500" />
-                <Input label="Oficina / Mecânico" value={formData.workshop} onChange={(e) => setFormData({ ...formData, workshop: e.target.value })} />
-                <Input label="Custo (R$)" type="number" step="0.01" value={formData.cost} onChange={(e) => setFormData({ ...formData, cost: e.target.value })} placeholder="0.00" />
+                <Input label="KM no Serviço *" type="number" value={formData.actual_km} onChange={(e) => setFormData({ ...formData, actual_km: e.target.value })} />
+                <Input label="Oficina / Mecânico" autoComplete="off" value={formData.workshop} onChange={(e) => setFormData({ ...formData, workshop: e.target.value })} />
+                <Input label="Custo (R$)" type="number" step="0.01" value={formData.cost} onChange={(e) => setFormData({ ...formData, cost: e.target.value })} />
                 {/* Quem responde pelo repasse é o cliente da locação ATIVA do
                     veículo — o servidor resolve assim, e a tela precisa dizer o
                     mesmo ANTES de salvar. Sem isto o operador digitava um valor,
@@ -1437,7 +1457,7 @@ export default function MaintenancePage() {
                         value={locacao ? formData.customer_amount : ''}
                         disabled={!locacao}
                         onChange={(e) => setFormData({ ...formData, customer_amount: e.target.value })}
-                        placeholder={locacao ? '0,00' : '—'}
+                        placeholder={locacao ? '' : '—'}
                       />
                       <p className="mt-1 text-[12px] text-fg-mute">
                         {!formData.vehicle_id
@@ -1740,10 +1760,10 @@ export default function MaintenancePage() {
             {completionStep === 1 && (
               <div className="space-y-4">
                 <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-                  <Input label="KM do Odômetro *" type="number" value={completionKm} onChange={(e) => setCompletionKm(e.target.value)} placeholder="Ex: 15500" />
+                  <Input label="KM do Odômetro *" type="number" value={completionKm} onChange={(e) => setCompletionKm(e.target.value)} />
                   <Input label="Data de Conclusão *" type="date" value={completionDate} onChange={(e) => setCompletionDate(e.target.value)} />
                   <div className="md:col-span-2">
-                    <Input label="Oficina / Mecânico" value={completionWorkshop} onChange={(e) => setCompletionWorkshop(e.target.value)} />
+                    <Input label="Oficina / Mecânico" autoComplete="off" value={completionWorkshop} onChange={(e) => setCompletionWorkshop(e.target.value)} />
                   </div>
                 </div>
                 <Textarea label="Observações" value={completionObservations} onChange={(e) => setCompletionObservations(e.target.value)} rows={2} />
@@ -1947,7 +1967,6 @@ export default function MaintenancePage() {
                           step="0.01"
                           value={fin.customer_amount}
                           onChange={(e) => setCompletionFinancials((prev) => prev.map((f, i) => i === idx ? { ...f, customer_amount: e.target.value } : f))}
-                          placeholder="0,00"
                         />
                       </div>
 
@@ -1957,7 +1976,6 @@ export default function MaintenancePage() {
                         step="0.01"
                         value={fin.cost}
                         onChange={(e) => setCompletionFinancials((prev) => prev.map((f, i) => i === idx ? { ...f, cost: e.target.value } : f))}
-                        placeholder="0.00"
                       />
 
                       <div className="grid grid-cols-2 gap-3">
@@ -2139,7 +2157,6 @@ export default function MaintenancePage() {
             type="number"
             value={kmForm.km_current}
             onChange={(e) => setKmForm({ ...kmForm, km_current: e.target.value })}
-            placeholder="Ex: 16500"
           />
           <div className="flex justify-end gap-3 border-t border-divider pt-4">
             <Button variant="secondary" onClick={() => setIsKmModalOpen(false)}>Cancelar</Button>

@@ -40,7 +40,7 @@ export default async function AdminLayout({ children }: AdminLayoutProps) {
                 <ShieldCheck className="w-5 h-5 text-bg" />
               </div>
               <div>
-                <div className="text-[15px] font-semibold text-fg leading-tight">GoMoto</div>
+                <div className="text-[15px] font-semibold text-fg leading-tight">Locaw</div>
                 <div className="text-[11px] text-fg-mute">Admin da plataforma</div>
               </div>
             </div>

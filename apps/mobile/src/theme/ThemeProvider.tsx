@@ -58,3 +58,18 @@ export function useThemeContext(): ThemeContextValue {
   if (!ctx) throw new Error('useThemeContext deve ser usado dentro de <ThemeProvider>')
   return ctx
 }
+
+/**
+ * Força o tema claro na subárvore (login, definir senha, escolher locadora):
+ * antes do login não sabemos quem é o cliente, nem se a preferência salva no
+ * aparelho é dele. Os componentes do kit leem o tema do contexto, então o
+ * override precisa ser um Provider, não um `lightTheme` local.
+ */
+export function LightThemeScope({ children }: { children: ReactNode }) {
+  const parent = useThemeContext()
+  const value = useMemo(
+    () => ({ ...parent, theme: lightTheme, mode: 'light' as const }),
+    [parent],
+  )
+  return <ThemeContext.Provider value={value}>{children}</ThemeContext.Provider>
+}

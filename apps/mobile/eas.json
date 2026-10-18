@@ -1,17 +1,37 @@
 {
   "cli": {
     "version": ">= 10.0.0",
-    "appVersionSource": "local"
+    "appVersionSource": "remote"
   },
   "build": {
     "preview": {
+      "environment": "preview",
       "distribution": "internal",
+      "env": {
+        "APP_VARIANT": "gomoto"
+      },
       "android": {
         "buildType": "apk"
       }
     },
     "production": {
-      "autoIncrement": true
+      "environment": "production",
+      "autoIncrement": true,
+      "env": {
+        "APP_VARIANT": "gomoto"
+      }
+    },
+    "preview-locawone": {
+      "extends": "preview",
+      "env": {
+        "APP_VARIANT": "locawone"
+      }
+    },
+    "production-locawone": {
+      "extends": "production",
+      "env": {
+        "APP_VARIANT": "locawone"
+      }
     }
   },
   "submit": {

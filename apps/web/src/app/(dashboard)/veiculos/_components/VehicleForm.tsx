@@ -10,15 +10,31 @@ import {
   AlertCircle,
   X,
   Plus,
+  Bike,
+  Car,
+  Check,
+  ChevronDown,
+  Fingerprint,
+  FileText,
+  CalendarClock,
+  Banknote,
+  MapPin,
+  ShieldCheck,
+  Camera,
+  Wrench,
+  type LucideIcon,
 } from 'lucide-react'
 
 import {
-  VEHICLE_STATUS_LABELS,
+  VEHICLE_TYPE_LABELS,
   VEHICLE_PHOTO_SLOT_LABELS,
+  VehicleSchema,
   ACQUISITION_TYPE_LABELS,
   type VehiclePhotoSlot,
-  type VehicleStatus,
+  type VehicleType,
   type MaintenancePlanItem,
+  vehicleTypeFromCrlv,
+  canEditKmEntry,
   parseCRLVText,
   crlvSuccessRate,
   applyPlateMask, stripPlate,
@@ -37,6 +53,7 @@ import {
 
 import { createVehicle, updateVehicle, deleteVehiclePhoto, saveVehicleObligations, assignMaintenancePlan } from '../actions'
 import { DocumentImportCard } from '@/components/documents/DocumentImportCard'
+import { VEHICLE_TRACKER_ENABLED } from '@/lib/vehicles/features'
 
 // ─── Constantes ──────────────────────────────────────────────────────────────
 
@@ -59,23 +76,48 @@ const OBLIGATION_STATUS_OPTIONS = [
   { value: 'exempt',  label: 'Isento' },
 ]
 
-const STATUS_CONFIG: Record<string, { label: string; activeCls: string }> = {
-  available:   { label: 'Disponível',    activeCls: 'bg-success-bg text-success border-success' },
-  reserved:    { label: 'Reservado',     activeCls: 'bg-info-bg text-info border-info' },
-  maintenance: { label: 'Em manutenção', activeCls: 'bg-warning-bg text-warning border-warning' },
-  sinister:    { label: 'Sinistrado',    activeCls: 'bg-danger-bg text-danger border-danger' },
+const VEHICLE_TYPE_OPTIONS: { value: VehicleType; Icon: LucideIcon }[] = [
+  { value: 'motorcycle', Icon: Bike },
+  { value: 'car',        Icon: Car },
+]
+
+/**
+ * Seções opcionais, recolhidas por padrão. O cadastro mostra só o Essencial
+ * (placa, tipo, marca, modelo, anos e cor); o resto abre sob demanda e pode
+ * ser completado depois, na edição.
+ */
+const SECTIONS = {
+  'sec-complement':  { title: 'Identificação complementar', description: 'RENAVAM, chassi, combustível, cilindrada e observações', icon: Fingerprint },
+  'sec-document':    { title: 'Documentação (CRV)',         description: 'Proprietário registrado, CPF/CNPJ, UF, nº do CRV e transferência', icon: FileText },
+  'sec-obligations': { title: 'IPVA e licenciamento',       description: 'Valor, vencimento e situação de IPVA, licenciamento e DPVAT', icon: CalendarClock },
+  'sec-acquisition': { title: 'Aquisição',                  description: 'Tipo, data da compra, valor pago, FIPE e vendedor', icon: Banknote },
+  'sec-tracker':     { title: 'Rastreador GPS',             description: 'Marca, modelo e IMEI', icon: MapPin },
+  'sec-insurance':   { title: 'Seguro',                     description: 'Valor mensal e vencimento da apólice', icon: ShieldCheck },
+  'sec-photos':      { title: 'Fotos',                      description: 'Principal, frente, laterais, traseira e painel · JPG, PNG ou WebP até 5MB', icon: Camera },
+  'sec-maintenance': { title: 'Plano de manutenção',        description: 'Plano e a última vez que cada item foi feito', icon: Wrench },
+} satisfies Record<string, { title: string; description: string; icon: LucideIcon }>
+
+type SectionId = keyof typeof SECTIONS
+
+/** Seções que aparecem na tela (o rastreador depende da flag). */
+const VISIBLE_SECTIONS = (Object.keys(SECTIONS) as SectionId[])
+  .filter((id) => id !== 'sec-tracker' || VEHICLE_TRACKER_ENABLED)
+
+/** Campo com erro → seção que precisa abrir para o operador vê-lo. */
+const FIELD_SECTION: Record<string, SectionId> = {
+  renavam: 'sec-complement', chassis: 'sec-complement', fuel: 'sec-complement',
+  engine_capacity: 'sec-complement', observations: 'sec-complement',
+  registered_owner_name: 'sec-document', registered_owner_document: 'sec-document',
+  registered_owner_type: 'sec-document', registration_state: 'sec-document',
+  crv_number: 'sec-document', crv_exercise_year: 'sec-document',
+  ownership_transferred: 'sec-document', ownership_transfer_date: 'sec-document',
+  acquisition_type: 'sec-acquisition', purchase_date: 'sec-acquisition', acquisition_amount: 'sec-acquisition',
+  fipe_value: 'sec-acquisition', previous_owner: 'sec-acquisition', previous_owner_cpf: 'sec-acquisition',
+  tracker_brand: 'sec-tracker', tracker_model: 'sec-tracker', tracker_imei: 'sec-tracker',
+  insurance_monthly_amount: 'sec-insurance', insurance_expiry_date: 'sec-insurance',
 }
 
-const NAV_ITEMS = [
-  { id: 'sec-identification', label: 'Identificação' },
-  { id: 'sec-document',       label: 'Documentação' },
-  { id: 'sec-status',         label: 'Status' },
-  { id: 'sec-acquisition',    label: 'Aquisição' },
-  { id: 'sec-tracker',        label: 'Rastreador' },
-  { id: 'sec-insurance',      label: 'Seguro' },
-  { id: 'sec-photos',         label: 'Fotos' },
-  { id: 'sec-maintenance',    label: 'Manutenção' },
-]
+const REQUIRED_TOTAL = 7
 
 // ─── Tipos ───────────────────────────────────────────────────────────────────
 
@@ -91,14 +133,58 @@ interface VehicleFormProps {
   initialObligations?: Partial<Record<ObligationType, { amount: string; dueDate: string; status: string } | null>>
 }
 
-// ─── Cabeçalho de seção ──────────────────────────────────────────────────────
+// ─── Seção recolhível ────────────────────────────────────────────────────────
 
-function SectionHeader({ title, hint }: { title: string; hint?: string }) {
+function CollapsibleSection({
+  id, title, description, icon: Icon, filled, autoFilled, open, onToggle, children,
+}: {
+  id: string
+  title: string
+  description: string
+  icon: LucideIcon
+  filled: boolean
+  /** algum campo da seção veio do CRLV e ainda não foi mexido */
+  autoFilled?: boolean
+  open: boolean
+  onToggle: () => void
+  children: React.ReactNode
+}) {
   return (
-    <div className="flex items-baseline gap-3 mb-5">
-      <h2 className="text-[15px] font-bold text-fg">{title}</h2>
-      {hint && <span className="text-[12px] text-fg-mute">{hint}</span>}
-    </div>
+    <section id={id} className="border-t border-divider first:border-t-0">
+      <button
+        type="button"
+        aria-expanded={open}
+        aria-controls={`${id}-body`}
+        onClick={onToggle}
+        className="w-full min-h-[52px] px-4 py-2.5 flex items-center gap-3 text-left hover:bg-surface-2 transition-colors"
+      >
+        <span className="w-7 h-7 rounded-lg bg-surface-2 grid place-items-center text-fg-mute flex-shrink-0">
+          <Icon className="w-4 h-4" />
+        </span>
+        <span className="flex-1 min-w-0">
+          <span className="block text-[13px] font-semibold text-fg">{title}</span>
+          <span className="block text-[12px] text-fg-mute truncate">{description}</span>
+        </span>
+        {autoFilled ? (
+          <span className="h-5 px-2 rounded-full bg-primary-tint text-primary text-[11px] font-semibold inline-flex items-center gap-1 flex-shrink-0">
+            <Sparkles className="w-3 h-3" /> Do CRLV
+          </span>
+        ) : filled && !open && (
+          <span className="h-5 px-2 rounded-full bg-success-bg text-success text-[11px] font-semibold inline-flex items-center gap-1 flex-shrink-0">
+            <Check className="w-3 h-3" /> Preenchido
+          </span>
+        )}
+        <span className="hidden sm:inline text-[12px] font-semibold text-primary whitespace-nowrap">
+          {open ? 'Recolher' : filled ? 'Editar' : 'Adicionar'}
+        </span>
+        <ChevronDown className={`w-4 h-4 text-fg-mute flex-shrink-0 transition-transform ${open ? 'rotate-180' : ''}`} />
+      </button>
+      {open && (
+        <div id={`${id}-body`} className="px-4 pt-1 pb-5 sm:pl-14">
+          {children}
+        </div>
+      )}
+    </section>
   )
 }
 
@@ -106,6 +192,7 @@ function SectionHeader({ title, hint }: { title: string; hint?: string }) {
 
 const labelCls = 'block text-[13px] text-fg-mute mb-1.5'
 const inputCls = 'w-full h-9 px-3 rounded-lg bg-surface-2 border border-border text-[13px] text-fg placeholder:text-fg-mute outline-none focus:border-primary transition-all'
+const inputAutoCls = 'w-full h-9 px-3 rounded-lg bg-primary-tint border border-primary text-[13px] text-fg placeholder:text-fg-mute outline-none focus:border-primary transition-all'
 const inputErrCls = 'w-full h-9 px-3 rounded-lg bg-surface-2 border border-danger text-[13px] text-fg placeholder:text-fg-mute outline-none focus:border-danger transition-all'
 
 function Field({
@@ -184,6 +271,9 @@ function buildInitialForm(d?: Record<string, any>) {
     // em cima de um valor já completo, ela descarta silenciosamente qualquer
     // caractere fora do formato de placa real (ex.: placas de seed/teste).
     license_plate:             d?.license_plate ?? '',
+    // Sem default na criação: o tipo é obrigatório e precisa ser escolhido
+    // (ou vir do CRLV). Na edição vem do banco — o DEFAULT da coluna é moto.
+    vehicle_type:              (d?.vehicle_type ?? '') as VehicleType | '',
     renavam:                   d?.renavam ? applyRenavamMask(d.renavam) : '',
     make:                      d?.make ?? '',
     model:                     d?.model ?? '',
@@ -195,7 +285,6 @@ function buildInitialForm(d?: Record<string, any>) {
     engine_capacity:           d?.engine_capacity ? String(d.engine_capacity).replace(/\D/g, '') : '',
     km_entry:                  '',
     observations:              d?.observations ?? '',
-    status:                    (d?.status && d.status !== 'rented' ? d.status : 'available') as string,
     acquisition_type:          d?.acquisition_type ?? 'used',
     purchase_date:             d?.purchase_date ?? '',
     acquisition_amount:        d?.acquisition_amount != null ? formatCurrencyInput(String(d.acquisition_amount)) : '',
@@ -228,8 +317,9 @@ function buildInitialForm(d?: Record<string, any>) {
 
 export function VehicleForm({ vehicleId, initialData, initialPhotoUrls = {}, initialObligations }: VehicleFormProps) {
   const isEditMode = !!vehicleId
-  const currentStatus = initialData?.status as VehicleStatus | undefined
-  const isRented = currentStatus === 'rented'
+  // KM de entrada é gravado uma vez só: na edição, o campo aparece enquanto
+  // o veículo ainda não tem um (cadastro feito sem ele).
+  const showKmEntry = !isEditMode || canEditKmEntry(initialData?.km_entry)
 
   const router = useRouter()
   const supabase = useSupabaseContext()
@@ -239,6 +329,20 @@ export function VehicleForm({ vehicleId, initialData, initialPhotoUrls = {}, ini
   const [form, setForm] = useState(() => buildInitialForm(initialData))
   function set(key: keyof ReturnType<typeof buildInitialForm>, value: string) {
     setForm((prev) => ({ ...prev, [key]: value }))
+    // Editou à mão: o campo deixa de ser "vindo do CRLV".
+    setAutoFilled((prev) => {
+      if (!prev.has(key)) return prev
+      const next = new Set(prev)
+      next.delete(key)
+      return next
+    })
+  }
+
+  /** Campos preenchidos pela importação do CRLV — destacados até o operador mexer. */
+  const [autoFilled, setAutoFilled] = useState<Set<string>>(new Set())
+  function fieldCls(key: string) {
+    if (fieldErrors[key]) return inputErrCls
+    return autoFilled.has(key) ? inputAutoCls : inputCls
   }
 
   const [fieldErrors, setFieldErrors] = useState<Partial<Record<string, string>>>({})
@@ -308,34 +412,67 @@ export function VehicleForm({ vehicleId, initialData, initialPhotoUrls = {}, ini
   // plano nenhum — trocar de plano existente não deve exigir/gerar bootstrap.
   const showPlanBootstrap = !originalPlanId && !!selectedPlanId
 
-  // ── Âncoras: rastrear seção ativa via IntersectionObserver
-  const sectionRefs = useRef<Record<string, HTMLElement | null>>({})
-  const [activeSection, setActiveSection] = useState('sec-identification')
-
-  useEffect(() => {
-    const observer = new IntersectionObserver(
-      (entries) => {
-        // Pega a seção com maior interseção visível
-        const visible = entries
-          .filter((e) => e.isIntersecting)
-          .sort((a, b) => b.intersectionRatio - a.intersectionRatio)
-        if (visible.length > 0) {
-          setActiveSection(visible[0].target.id)
-        }
-      },
-      { rootMargin: '-20% 0px -60% 0px', threshold: [0, 0.25, 0.5, 0.75, 1] },
-    )
-
-    Object.values(sectionRefs.current).forEach((el) => {
-      if (el) observer.observe(el)
-    })
-
-    return () => observer.disconnect()
-  }, [isEditMode])
-
-  function scrollTo(id: string) {
-    sectionRefs.current[id]?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  // ── Seções recolhidas
+  function isSectionFilled(id: SectionId): boolean {
+    switch (id) {
+      case 'sec-complement':  return !!(form.renavam || form.chassis || form.engine_capacity || form.observations)
+      case 'sec-document':    return !!(form.registered_owner_name || form.registered_owner_document || form.registration_state || form.crv_number || form.ownership_transferred === 'true' || (!isEditMode && crvFile))
+      // DPVAT nasce "Isento" por padrão — isso sozinho não conta como preenchido.
+      case 'sec-obligations': return Object.values(obligations).some((o) => o.amount || o.dueDate)
+      case 'sec-acquisition': return !!(form.purchase_date || form.acquisition_amount || form.fipe_value || form.previous_owner)
+      case 'sec-tracker':     return form.has_tracker === 'true'
+      case 'sec-insurance':   return form.has_insurance === 'true'
+      case 'sec-photos':      return Object.keys(photoUrls).length > 0
+      case 'sec-maintenance': return !!selectedPlanId
+    }
   }
+
+  // Na edição, o que já tem dado abre expandido; na criação, tudo recolhido.
+  const [openSections, setOpenSections] = useState<Set<SectionId>>(() =>
+    isEditMode
+      ? new Set(VISIBLE_SECTIONS.filter(isSectionFilled))
+      : new Set(),
+  )
+  function toggleSection(id: SectionId) {
+    setOpenSections((prev) => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }
+  function sectionProps(id: SectionId) {
+    const cfg = SECTIONS[id]
+    return {
+      id,
+      title: cfg.title,
+      description: cfg.description,
+      icon: cfg.icon,
+      filled: isSectionFilled(id),
+      autoFilled: [...autoFilled].some((k) => FIELD_SECTION[k] === id),
+      open: openSections.has(id),
+      onToggle: () => toggleSection(id),
+    }
+  }
+
+  // Erro num campo de seção recolhida abre a seção — senão a mensagem some.
+  useEffect(() => {
+    const toOpen = Object.keys(fieldErrors)
+      .map((field) => (field.startsWith('photo_') ? 'sec-photos' : FIELD_SECTION[field]))
+      .filter((id): id is SectionId => !!id)
+    if (toOpen.length === 0) return
+    setOpenSections((prev) => new Set([...prev, ...toOpen]))
+  }, [fieldErrors])
+
+  const requiredDone = [
+    stripPlate(form.license_plate).length === 7,
+    !!form.vehicle_type,
+    !!form.make.trim(),
+    !!form.model.trim(),
+    form.year_manufacture.length === 4,
+    form.year_model.length === 4,
+    !!form.color.trim(),
+  ].filter(Boolean).length
 
   // ─── CRLV ────────────────────────────────────────────────────────────────
 
@@ -361,9 +498,26 @@ export function VehicleForm({ vehicleId, initialData, initialPhotoUrls = {}, ini
       const fields = parseCRLVText(rawText)
       const stats = crlvSuccessRate(fields)
       const importedOwnerType = detectOwnerType(fields.cpfCnpj)
+      const importedFuel = mapCombustivelToFuel(fields.combustivel)
+      const imported: Record<string, unknown> = {
+        license_plate: fields.placa, vehicle_type: vehicleTypeFromCrlv(fields.especieTipo),
+        renavam: fields.renavam, make: fields.marca, model: fields.modelo,
+        year_manufacture: fields.anoFabricacao, year_model: fields.anoModelo, color: fields.cor,
+        chassis: fields.chassi, engine_capacity: fields.cilindrada, fuel: importedFuel,
+        registered_owner_name: fields.proprietario, registered_owner_document: fields.cpfCnpj,
+        registered_owner_type: fields.cpfCnpj, registration_state: fields.uf,
+        crv_number: fields.numeroCrv, crv_exercise_year: fields.exercicio,
+      }
+      const importedKeys = Object.keys(imported).filter((k) => imported[k] != null && imported[k] !== '')
+      setAutoFilled(new Set(importedKeys))
+      setOpenSections((prev) => new Set([
+        ...prev,
+        ...importedKeys.map((k) => FIELD_SECTION[k]).filter((id): id is SectionId => !!id),
+      ]))
       setForm((prev) => ({
         ...prev,
         license_plate:             fields.placa != null ? applyPlateMask(fields.placa) : prev.license_plate,
+        vehicle_type:              vehicleTypeFromCrlv(fields.especieTipo) ?? prev.vehicle_type,
         renavam:                   fields.renavam != null ? applyRenavamMask(fields.renavam) : prev.renavam,
         make:                      fields.marca           ?? prev.make,
         model:                     [fields.modelo, fields.versao].filter(Boolean).join(' ') || prev.model,
@@ -372,7 +526,7 @@ export function VehicleForm({ vehicleId, initialData, initialPhotoUrls = {}, ini
         color:                     fields.cor             ?? prev.color,
         chassis:                   fields.chassi ? fields.chassi.replace(/[^A-Z0-9]/gi, '').toUpperCase().slice(0, 17) : prev.chassis,
         engine_capacity:           fields.cilindrada ? fields.cilindrada.replace(/\D/g, '') : prev.engine_capacity,
-        fuel:                      mapCombustivelToFuel(fields.combustivel) ?? prev.fuel,
+        fuel:                      importedFuel ?? prev.fuel,
         registered_owner_name:     fields.proprietario    ?? prev.registered_owner_name,
         registered_owner_document: fields.cpfCnpj != null
           ? (importedOwnerType === 'cpf' ? applyCpfMask(fields.cpfCnpj) : applyCnpjMask(fields.cpfCnpj))
@@ -451,7 +605,8 @@ export function VehicleForm({ vehicleId, initialData, initialPhotoUrls = {}, ini
     }
     return {
       license_plate:             stripPlate(form.license_plate),
-      renavam:                   stripRenavam(form.renavam),
+      vehicle_type:              form.vehicle_type || undefined,
+      renavam:                   stripRenavam(form.renavam) || null,
       make:                      form.make.toUpperCase().trim(),
       model:                     form.model.trim(),
       year_manufacture:          form.year_manufacture || null,
@@ -461,7 +616,6 @@ export function VehicleForm({ vehicleId, initialData, initialPhotoUrls = {}, ini
       chassis:                   form.chassis || null,
       engine_capacity:           form.engine_capacity || null,
       observations:              form.observations || null,
-      status:                    isRented ? currentStatus : form.status,
       acquisition_type:          form.acquisition_type || null,
       purchase_date:             form.purchase_date || null,
       acquisition_amount:        num(form.acquisition_amount),
@@ -489,11 +643,27 @@ export function VehicleForm({ vehicleId, initialData, initialPhotoUrls = {}, ini
     setGlobalError(null)
     setFieldErrors({})
 
+    // Mesmo schema da action: o operador vê todos os campos com problema de
+    // uma vez, sem ida ao servidor. Erro em seção recolhida abre a seção.
+    const payload = buildPayload()
+    const check = VehicleSchema.safeParse(payload)
+    if (!check.success) {
+      const errors: Record<string, string> = {}
+      for (const issue of check.error.issues) {
+        const key = String(issue.path[0] ?? '')
+        if (key && !errors[key]) errors[key] = issue.message
+      }
+      setFieldErrors(errors)
+      setGlobalError(check.error.issues[0]?.message ?? 'Revise os campos destacados.')
+      return
+    }
+
     startTransition(async () => {
-      const payload = buildPayload()
+
+      const kmEntry = showKmEntry && form.km_entry ? parseInt(form.km_entry, 10) : undefined
 
       if (isEditMode) {
-        const result = await updateVehicle(vehicleId!, payload)
+        const result = await updateVehicle(vehicleId!, { ...payload, ...(kmEntry != null ? { km_entry: kmEntry } : {}) })
         if (!result.ok) {
           // O erro global sai SEMPRE, não só quando falta `field`. Erro
           // apontando para um campo sem slot de exibição — ou para uma seção
@@ -545,7 +715,6 @@ export function VehicleForm({ vehicleId, initialData, initialPhotoUrls = {}, ini
       }
 
       // ── Criação
-      const kmEntry = form.km_entry ? parseInt(form.km_entry, 10) : undefined
       const result = await createVehicle({ ...payload, ...(kmEntry != null ? { km_entry: kmEntry } : {}) })
       if (!result.ok) {
         if (result.error.field) setFieldErrors({ [result.error.field]: result.error.message })
@@ -657,7 +826,7 @@ export function VehicleForm({ vehicleId, initialData, initialPhotoUrls = {}, ini
     )
   }
 
-  // ─── Layout com sidebar ──────────────────────────────────────────────────
+  // ─── Layout ──────────────────────────────────────────────────────────────
 
   const acquisitionOptions = Object.entries(ACQUISITION_TYPE_LABELS).map(([value, label]) => ({ value, label }))
   const backHref  = isEditMode ? `/veiculos/${vehicleId}` : '/veiculos'
@@ -666,7 +835,7 @@ export function VehicleForm({ vehicleId, initialData, initialPhotoUrls = {}, ini
   return (
     <div className="min-h-screen bg-bg">
 
-      {/* ── Sticky header ─────────────────────────────────────────────────── */}
+      {/* ── Cabeçalho fixo ────────────────────────────────────────────────── */}
       <div className="sticky top-0 z-20 bg-bg backdrop-blur border-b border-border px-6 h-14 flex items-center gap-3">
         <Link href={backHref} className="text-[13px] text-fg-mute hover:text-fg transition-colors whitespace-nowrap">
           ← {backLabel}
@@ -675,200 +844,220 @@ export function VehicleForm({ vehicleId, initialData, initialPhotoUrls = {}, ini
         <h1 className="text-[15px] font-bold text-fg flex-1 truncate">
           {isEditMode ? 'Editar veículo' : 'Cadastrar veículo'}
         </h1>
-        <Link href={backHref} className="h-8 px-4 rounded-full border border-border text-fg-mute text-[13px] font-medium hover:text-fg hover:border-fg-mute transition-colors inline-flex items-center">
-          Cancelar
-        </Link>
-        <button
-          type="submit"
-          form="vehicle-form"
-          disabled={isPending}
-          className="h-8 px-5 rounded-full bg-primary text-bg text-[13px] font-bold hover:bg-primary-hover transition-colors disabled:opacity-60"
-        >
-          {isPending ? 'Salvando…' : isEditMode ? 'Salvar' : 'Cadastrar'}
-        </button>
       </div>
 
-      {/* ── Corpo: sidebar + conteúdo ─────────────────────────────────────── */}
-      <div className="flex gap-0 max-w-5xl mx-auto">
+      {/* noValidate: a validação é o VehicleSchema (mesmo da action), com
+          mensagem por campo — o balão nativo do navegador não alcança o tipo
+          do veículo nem os campos dentro de seções recolhidas. */}
+      <form
+        id="vehicle-form"
+        onSubmit={handleSubmit}
+        noValidate
+        className="max-w-3xl mx-auto px-6 py-8 space-y-8"
+      >
 
-        {/* ── Sidebar de navegação ─────────────────────────────────────── */}
-        <aside className="w-44 flex-shrink-0 hidden md:block">
-          <nav className="sticky top-14 pt-8 pb-8 pr-4 space-y-0.5">
-            {NAV_ITEMS.map((item) => {
-              const isActive = activeSection === item.id
-              return (
-                <button
-                  key={item.id}
-                  type="button"
-                  onClick={() => scrollTo(item.id)}
-                  className={`w-full text-left px-3 py-2 rounded-lg text-[13px] font-medium transition-colors ${
-                    isActive
-                      ? 'bg-surface-2 text-fg'
-                      : 'text-fg-mute hover:text-fg-mute hover:bg-divider'
-                  }`}
-                >
-                  <span className={`inline-block w-1.5 h-1.5 rounded-full mr-2.5 mb-0.5 transition-colors ${isActive ? 'bg-primary' : 'bg-fg-mute'}`} />
-                  {item.label}
-                </button>
-              )
-            })}
-          </nav>
-        </aside>
+        {/* Importar CRLV — somente criação. Parsing determinístico local
+            (packages/core/src/parsers/crlv.ts) — NÃO passa por IA, mas
+            reaproveita o ícone/título/padrão visual do card de extração
+            por IA (Spec 0012) por escolha de produto; sem o selo "IA". */}
+        {!isEditMode && (
+          <DocumentImportCard
+            icon={Sparkles}
+            title="Preencher com IA"
+            description="Anexe o CRLV para preencher automaticamente."
+            accept="application/pdf"
+            status={crlvImporting ? 'loading' : crlvMsg?.kind === 'success' ? 'success' : crlvMsg?.kind === 'error' ? 'error' : 'idle'}
+            message={crlvMsg?.kind === 'success' ? `${crlvMsg.found}/${crlvMsg.total} campos importados.` : crlvMsg?.kind === 'error' ? crlvMsg.text : undefined}
+            fileName={crvFile?.name}
+            onSelect={(f) => void handleCrlvImport(f)}
+            onRetry={() => { if (crvFile) void handleCrlvImport(crvFile) }}
+            onDismissError={() => setCrlvMsg(null)}
+            onClear={() => { setCrvFile(null); setCrlvMsg(null); setAutoFilled(new Set()) }}
+          />
+        )}
 
-        {/* ── Formulário ───────────────────────────────────────────────── */}
-        <form
-          id="vehicle-form"
-          onSubmit={handleSubmit}
-          className="flex-1 min-w-0 px-6 py-8 space-y-14"
-        >
+        {/* ══ Essencial ═══════════════════════════════════════════════════ */}
+        <section aria-labelledby="sec-essential-title" className="bg-surface border border-divider rounded-xl p-5 space-y-4">
+          <div className="flex items-baseline gap-3 flex-wrap">
+            <h2 id="sec-essential-title" className="text-[15px] font-bold text-fg">Essencial</h2>
+            <span className="text-[12px] text-fg-mute">
+              {isEditMode ? 'campos com * são obrigatórios' : 'o mínimo para o veículo entrar na frota · campos com * são obrigatórios'}
+            </span>
+          </div>
+          {autoFilled.size > 0 && (
+            <p className="flex items-center gap-2 text-[12px] text-primary">
+              <Sparkles className="w-3.5 h-3.5 flex-shrink-0" />
+              Campos em destaque vieram do CRLV. Confira antes de cadastrar.
+            </p>
+          )}
 
-          {/* ══ Identificação ════════════════════════════════════════════ */}
-          <section
-            id="sec-identification"
-            ref={(el) => { sectionRefs.current['sec-identification'] = el }}
-          >
-            <SectionHeader title="Identificação" hint="campos obrigatórios marcados com *" />
-
-            {/* Importar CRLV — somente criação. Parsing determinístico local
-                (packages/core/src/parsers/crlv.ts) — NÃO passa por IA, mas
-                reaproveita o ícone/título/padrão visual do card de extração
-                por IA (Spec 0012) por escolha de produto; sem o selo "IA". */}
-            {!isEditMode && (
-              <div className="mb-5">
-                <DocumentImportCard
-                  icon={Sparkles}
-                  title="Preencher com IA"
-                  description="Anexe o CRLV para preencher automaticamente."
-                  accept="application/pdf"
-                  status={crlvImporting ? 'loading' : crlvMsg?.kind === 'success' ? 'success' : crlvMsg?.kind === 'error' ? 'error' : 'idle'}
-                  message={crlvMsg?.kind === 'success' ? `${crlvMsg.found}/${crlvMsg.total} campos importados.` : crlvMsg?.kind === 'error' ? crlvMsg.text : undefined}
-                  fileName={crvFile?.name}
-                  onSelect={(f) => void handleCrlvImport(f)}
-                  onRetry={() => { if (crvFile) void handleCrlvImport(crvFile) }}
-                  onDismissError={() => setCrlvMsg(null)}
-                  onClear={() => { setCrvFile(null); setCrlvMsg(null) }}
-                />
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <Field label="Placa *" error={fieldErrors.license_plate}>
+              <input
+                className={fieldCls('license_plate')}
+                placeholder="ABC1D23"
+                value={form.license_plate}
+                maxLength={8}
+                onChange={(e) => set('license_plate', applyPlateMask(e.target.value))}
+                aria-required
+              />
+            </Field>
+            <div>
+              <span id="vehicle-type-label" className={labelCls}>Tipo do veículo *</span>
+              <div role="radiogroup" aria-labelledby="vehicle-type-label" className="flex gap-2">
+                {VEHICLE_TYPE_OPTIONS.map(({ value, Icon }) => {
+                  const active = form.vehicle_type === value
+                  return (
+                    <button
+                      key={value}
+                      type="button"
+                      role="radio"
+                      aria-checked={active}
+                      onClick={() => set('vehicle_type', value)}
+                      className={`h-9 px-4 rounded-full border text-[13px] font-medium inline-flex items-center gap-2 transition-colors ${
+                        active
+                          ? 'bg-primary-tint text-primary border-primary'
+                          : fieldErrors.vehicle_type
+                            ? 'border-danger text-fg-mute hover:text-fg'
+                            : 'border-border text-fg-mute hover:text-fg'
+                      }`}
+                    >
+                      <Icon className="w-4 h-4" />
+                      {VEHICLE_TYPE_LABELS[value]}
+                    </button>
+                  )
+                })}
               </div>
-            )}
+              {fieldErrors.vehicle_type && <p className="text-[12px] text-danger mt-1">{fieldErrors.vehicle_type}</p>}
+            </div>
+          </div>
 
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <Field label="Marca *" error={fieldErrors.make}>
+              <input className={fieldCls('make')} placeholder="HONDA" value={form.make} onChange={(e) => set('make', e.target.value)} aria-required />
+            </Field>
+            <Field label="Modelo *" error={fieldErrors.model}>
+              <input className={fieldCls('model')} placeholder="CG 160 FAN" value={form.model} onChange={(e) => set('model', e.target.value)} aria-required />
+            </Field>
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+            <Field label="Ano fabricação *" error={fieldErrors.year_manufacture}>
+              <input
+                className={fieldCls('year_manufacture')}
+                placeholder="2025"
+                value={form.year_manufacture}
+                maxLength={4}
+                inputMode="numeric"
+                onChange={(e) => set('year_manufacture', e.target.value.replace(/\D/g, '').slice(0, 4))}
+                aria-required
+              />
+            </Field>
+            <Field label="Ano modelo *" error={fieldErrors.year_model}>
+              <input
+                className={fieldCls('year_model')}
+                placeholder="2026"
+                value={form.year_model}
+                maxLength={4}
+                inputMode="numeric"
+                onChange={(e) => set('year_model', e.target.value.replace(/\D/g, '').slice(0, 4))}
+                aria-required
+              />
+            </Field>
+            <Field label="Cor *" error={fieldErrors.color}>
+              <input className={fieldCls('color')} placeholder="PRETA" value={form.color} onChange={(e) => set('color', e.target.value)} aria-required />
+            </Field>
+          </div>
+
+          {/* KM de entrada é gravado uma vez só (RN-010): na criação, ou na
+              edição enquanto o veículo ainda não tem um. */}
+          {showKmEntry && (
+            <div className="pt-4 border-t border-divider">
+              <Field label="KM de entrada" error={fieldErrors.km_entry} className="sm:max-w-[calc(33.333%-0.667rem)]">
+                <input
+                  className={fieldErrors.km_entry ? inputErrCls : inputCls}
+                  placeholder="KM no painel"
+                  value={form.km_entry}
+                  inputMode="numeric"
+                  onChange={(e) => set('km_entry', e.target.value.replace(/\D/g, ''))}
+                />
+              </Field>
+              <p className="text-[12px] text-fg-mute mt-1.5">
+                {isEditMode
+                  ? 'Este veículo ainda não tem KM de entrada. É a base do plano de manutenção e, depois de salvo, não pode ser alterado.'
+                  : 'Opcional, mas recomendado: é a base do plano de manutenção. Dá para informar depois, na edição, mas uma vez salvo não pode ser alterado.'}
+              </p>
+            </div>
+          )}
+        </section>
+
+        {/* ══ Mais informações (seções recolhidas) ═══════════════════════ */}
+        <div className="space-y-3">
+          <div className="flex items-baseline gap-3 flex-wrap">
+            <h2 className="text-[15px] font-bold text-fg">Mais informações</h2>
+            <span className="text-[12px] text-fg-mute">
+              {isEditMode ? 'opcional' : 'opcional · dá para completar depois, na edição do veículo'}
+            </span>
+          </div>
+          <div className="bg-surface border border-divider rounded-xl overflow-hidden">
+
+          {/* ══ Identificação complementar ══════════════════════════════════ */}
+          <CollapsibleSection {...sectionProps('sec-complement')}>
             <div className="space-y-4">
-              <div className="grid grid-cols-2 gap-4">
-                <Field label="Placa *" error={fieldErrors.license_plate}>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <Field label="RENAVAM" error={fieldErrors.renavam}>
                   <input
-                    className={fieldErrors.license_plate ? inputErrCls : inputCls}
-                    placeholder="ABC1D23"
-                    value={form.license_plate}
-                    maxLength={8}
-                    onChange={(e) => set('license_plate', applyPlateMask(e.target.value))}
-                    required
-                  />
-                </Field>
-                <Field label="RENAVAM *" error={fieldErrors.renavam}>
-                  <input
-                    className={fieldErrors.renavam ? inputErrCls : inputCls}
+                    className={fieldCls('renavam')}
                     placeholder="11 dígitos"
                     value={form.renavam}
                     maxLength={11}
                     inputMode="numeric"
                     onChange={(e) => set('renavam', applyRenavamMask(e.target.value))}
-                    required
                   />
                 </Field>
-              </div>
-
-              <div className="grid grid-cols-2 gap-4">
-                <Field label="Marca *" error={fieldErrors.make}>
-                  <input className={fieldErrors.make ? inputErrCls : inputCls} placeholder="HONDA" value={form.make} onChange={(e) => set('make', e.target.value)} required />
-                </Field>
-                <Field label="Modelo *" error={fieldErrors.model}>
-                  <input className={fieldErrors.model ? inputErrCls : inputCls} placeholder="CG 160 FAN" value={form.model} onChange={(e) => set('model', e.target.value)} required />
-                </Field>
-              </div>
-
-              <div className="grid grid-cols-4 gap-4">
-                <Field label="Ano fabricação">
+                <Field label="Chassi" error={fieldErrors.chassis}>
                   <input
-                    className={inputCls}
-                    placeholder="2024"
-                    value={form.year_manufacture}
-                    maxLength={4}
-                    inputMode="numeric"
-                    onChange={(e) => set('year_manufacture', e.target.value.replace(/\D/g, '').slice(0, 4))}
-                  />
-                </Field>
-                <Field label="Ano modelo">
-                  <input
-                    className={inputCls}
-                    placeholder="2025"
-                    value={form.year_model}
-                    maxLength={4}
-                    inputMode="numeric"
-                    onChange={(e) => set('year_model', e.target.value.replace(/\D/g, '').slice(0, 4))}
-                  />
-                </Field>
-                <Field label="Cor">
-                  <input className={inputCls} placeholder="PRETA" value={form.color} onChange={(e) => set('color', e.target.value)} />
-                </Field>
-                <Field label="Combustível">
-                  <select className={inputCls} value={form.fuel} onChange={(e) => set('fuel', e.target.value)}>
-                    {FUEL_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
-                  </select>
-                </Field>
-              </div>
-
-              <div className={`grid gap-4 ${!isEditMode ? 'grid-cols-3' : 'grid-cols-2'}`}>
-                <Field label="Chassi">
-                  <input
-                    className={inputCls}
-                    placeholder="1HGBH41JXMN109186"
+                    className={fieldCls('chassis')}
+                    placeholder="9C2KC2200RR000000"
                     value={form.chassis}
                     maxLength={17}
                     onChange={(e) => set('chassis', e.target.value.replace(/[^A-Z0-9]/gi, '').toUpperCase().slice(0, 17))}
                   />
                 </Field>
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <Field label="Combustível">
+                  <select className={fieldCls('fuel')} value={form.fuel} onChange={(e) => set('fuel', e.target.value)}>
+                    {FUEL_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+                  </select>
+                </Field>
                 <Field label="Cilindrada (cc)">
                   <input
-                    className={inputCls}
+                    className={fieldCls('engine_capacity')}
                     placeholder="162"
                     value={form.engine_capacity}
                     inputMode="numeric"
                     onChange={(e) => set('engine_capacity', e.target.value.replace(/\D/g, ''))}
                   />
                 </Field>
-                {!isEditMode && (
-                  <Field label="KM de entrada" error={fieldErrors.km_entry}>
-                    <input
-                      className={fieldErrors.km_entry ? inputErrCls : inputCls}
-                      placeholder="KM no painel"
-                      value={form.km_entry}
-                      inputMode="numeric"
-                      onChange={(e) => set('km_entry', e.target.value.replace(/\D/g, ''))}
-                    />
-                  </Field>
-                )}
               </div>
-
               <Field label="Observações / Laudo de vistoria">
                 <textarea className={`${inputCls} h-20 py-2 resize-none`} placeholder="Arranhões, avarias ou detalhes na entrega…" value={form.observations} onChange={(e) => set('observations', e.target.value)} />
               </Field>
             </div>
-          </section>
+          </CollapsibleSection>
 
           {/* ══ Documentação ═════════════════════════════════════════════ */}
-          <section
-            id="sec-document"
-            ref={(el) => { sectionRefs.current['sec-document'] = el }}
-          >
-            <SectionHeader title="Documentação (CRV)" hint="opcional" />
+          <CollapsibleSection {...sectionProps('sec-document')}>
             <div className="space-y-4">
               <div className="grid grid-cols-2 gap-4">
                 <Field label="Proprietário registrado">
-                  <input className={inputCls} placeholder="Quem consta no CRV" value={form.registered_owner_name} onChange={(e) => set('registered_owner_name', e.target.value)} />
+                  <input className={fieldCls('registered_owner_name')} placeholder="Quem consta no CRV" value={form.registered_owner_name} onChange={(e) => set('registered_owner_name', e.target.value)} />
                 </Field>
                 <div className="grid grid-cols-[90px_1fr] gap-2">
                   <Field label="Tipo doc.">
                     <select
-                      className={inputCls}
+                      className={fieldCls('registered_owner_type')}
                       value={form.registered_owner_type}
                       onChange={(e) => {
                         const t = e.target.value as 'cpf' | 'cnpj'
@@ -887,7 +1076,7 @@ export function VehicleForm({ vehicleId, initialData, initialPhotoUrls = {}, ini
                   </Field>
                   <Field label="CPF / CNPJ">
                     <input
-                      className={inputCls}
+                      className={fieldCls('registered_owner_document')}
                       placeholder={form.registered_owner_type === 'cpf' ? '000.000.000-00' : '00.000.000/0001-00'}
                       value={form.registered_owner_document}
                       maxLength={form.registered_owner_type === 'cpf' ? 14 : 18}
@@ -905,7 +1094,7 @@ export function VehicleForm({ vehicleId, initialData, initialPhotoUrls = {}, ini
               <div className="grid grid-cols-4 gap-4">
                 <Field label="UF">
                   <input
-                    className={inputCls}
+                    className={fieldCls('registration_state')}
                     maxLength={2}
                     placeholder="SP"
                     value={form.registration_state}
@@ -914,7 +1103,7 @@ export function VehicleForm({ vehicleId, initialData, initialPhotoUrls = {}, ini
                 </Field>
                 <Field label="Número do CRV">
                   <input
-                    className={inputCls}
+                    className={fieldCls('crv_number')}
                     placeholder="1234567890"
                     value={form.crv_number}
                     inputMode="numeric"
@@ -923,7 +1112,7 @@ export function VehicleForm({ vehicleId, initialData, initialPhotoUrls = {}, ini
                 </Field>
                 <Field label="Ano-exercício">
                   <input
-                    className={inputCls}
+                    className={fieldCls('crv_exercise_year')}
                     placeholder="2025"
                     value={form.crv_exercise_year}
                     maxLength={4}
@@ -944,39 +1133,6 @@ export function VehicleForm({ vehicleId, initialData, initialPhotoUrls = {}, ini
                   <input type="date" className={inputCls} value={form.ownership_transfer_date} onChange={(e) => set('ownership_transfer_date', e.target.value)} />
                 </Field>
               )}
-
-              {/* Obrigações anuais */}
-              <div className="pt-2 space-y-2.5">
-                <p className="text-[13px] font-bold text-fg">
-                  Documentação anual <span className="text-[12px] font-normal text-fg-mute">(opcional)</span>
-                </p>
-                {([
-                  { key: 'ipva'      as const, label: 'IPVA' },
-                  { key: 'licensing' as const, label: 'Licenciamento' },
-                  { key: 'dpvat'     as const, label: 'DPVAT' },
-                ]).map((row) => (
-                  <div key={row.key} className="grid grid-cols-[80px_1fr_1fr_130px] gap-3 items-end bg-divider border border-border rounded-xl px-4 py-3">
-                    <span className="text-[13px] font-bold text-fg pb-2.5">{row.label}</span>
-                    <Field label="Valor (R$)">
-                      <input
-                        className={inputCls}
-                        placeholder="0,00"
-                        value={obligations[row.key].amount}
-                        inputMode="decimal"
-                        onChange={(e) => setObligation(row.key, { amount: applyCurrencyMask(e.target.value) })}
-                      />
-                    </Field>
-                    <Field label="Vencimento">
-                      <input type="date" className={inputCls} value={obligations[row.key].dueDate} onChange={(e) => setObligation(row.key, { dueDate: e.target.value })} />
-                    </Field>
-                    <Field label="Status">
-                      <select className={inputCls} value={obligations[row.key].status} onChange={(e) => setObligation(row.key, { status: e.target.value as ObligationStatus })}>
-                        {OBLIGATION_STATUS_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
-                      </select>
-                    </Field>
-                  </div>
-                ))}
-              </div>
 
               {/* Anexo CRV — somente criação */}
               {!isEditMode && (
@@ -1000,48 +1156,43 @@ export function VehicleForm({ vehicleId, initialData, initialPhotoUrls = {}, ini
                 </div>
               )}
             </div>
-          </section>
+          </CollapsibleSection>
 
-          {/* ══ Status ═══════════════════════════════════════════════════ */}
-          <section
-            id="sec-status"
-            ref={(el) => { sectionRefs.current['sec-status'] = el }}
-          >
-            <SectionHeader title="Status na Frota" />
-            {isRented ? (
-              <div className="flex items-center gap-3">
-                <div className="h-9 px-4 rounded-full text-[13px] font-medium border inline-flex items-center bg-info-bg text-info border-info">
-                  {VEHICLE_STATUS_LABELS.rented}
+          {/* ══ IPVA e licenciamento ═════════════════════════════════════ */}
+          <CollapsibleSection {...sectionProps('sec-obligations')}>
+            {/* Obrigações anuais */}
+            <div className="space-y-2.5">
+              {([
+                { key: 'ipva'      as const, label: 'IPVA' },
+                { key: 'licensing' as const, label: 'Licenciamento' },
+                { key: 'dpvat'     as const, label: 'DPVAT' },
+              ]).map((row) => (
+                <div key={row.key} className="grid grid-cols-[80px_1fr_1fr_130px] gap-3 items-end bg-divider border border-border rounded-xl px-4 py-3">
+                  <span className="text-[13px] font-bold text-fg pb-2.5">{row.label}</span>
+                  <Field label="Valor (R$)">
+                    <input
+                      className={inputCls}
+                      placeholder="0,00"
+                      value={obligations[row.key].amount}
+                      inputMode="decimal"
+                      onChange={(e) => setObligation(row.key, { amount: applyCurrencyMask(e.target.value) })}
+                    />
+                  </Field>
+                  <Field label="Vencimento">
+                    <input type="date" className={inputCls} value={obligations[row.key].dueDate} onChange={(e) => setObligation(row.key, { dueDate: e.target.value })} />
+                  </Field>
+                  <Field label="Status">
+                    <select className={inputCls} value={obligations[row.key].status} onChange={(e) => setObligation(row.key, { status: e.target.value as ObligationStatus })}>
+                      {OBLIGATION_STATUS_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+                    </select>
+                  </Field>
                 </div>
-                <p className="text-[12px] text-fg-mute">Status Locado é gerenciado automaticamente via contratos.</p>
-              </div>
-            ) : (
-              <div className="flex flex-wrap gap-2">
-                {Object.entries(STATUS_CONFIG).map(([value, cfg]) => {
-                  const isActive = form.status === value
-                  return (
-                    <button
-                      key={value}
-                      type="button"
-                      onClick={() => set('status', value)}
-                      className={`h-9 px-5 rounded-full text-[13px] font-medium border transition-all ${
-                        isActive ? cfg.activeCls : 'bg-transparent text-fg-mute border-border'
-                      }`}
-                    >
-                      {cfg.label}
-                    </button>
-                  )
-                })}
-              </div>
-            )}
-          </section>
+              ))}
+            </div>
+          </CollapsibleSection>
 
           {/* ══ Aquisição ════════════════════════════════════════════════ */}
-          <section
-            id="sec-acquisition"
-            ref={(el) => { sectionRefs.current['sec-acquisition'] = el }}
-          >
-            <SectionHeader title="Aquisição" hint="opcional" />
+          <CollapsibleSection {...sectionProps('sec-acquisition')}>
             <div className="space-y-4">
               <div className="grid grid-cols-2 gap-4">
                 <Field label="Tipo de aquisição">
@@ -1095,53 +1246,47 @@ export function VehicleForm({ vehicleId, initialData, initialPhotoUrls = {}, ini
                 </div>
               )}
             </div>
-          </section>
+          </CollapsibleSection>
 
-          {/* ══ Rastreador GPS ═══════════════════════════════════════════ */}
-          <section
-            id="sec-tracker"
-            ref={(el) => { sectionRefs.current['sec-tracker'] = el }}
-          >
-            <SectionHeader title="Rastreador GPS" hint="opcional" />
-            <div className="space-y-4">
-              <div className="flex items-center gap-3">
-                <Toggle
-                  checked={form.has_tracker === 'true'}
-                  onChange={(v) => set('has_tracker', v ? 'true' : 'false')}
-                />
-                <span className="text-[13px] text-fg">
-                  {form.has_tracker === 'true' ? 'Possui rastreador instalado' : 'Sem rastreador'}
-                </span>
-              </div>
-              {form.has_tracker === 'true' && (
-                <div className="grid grid-cols-3 gap-4">
-                  <Field label="Marca *">
-                    <input className={inputCls} placeholder="Ex: Sascar" value={form.tracker_brand} onChange={(e) => set('tracker_brand', e.target.value)} />
-                  </Field>
-                  <Field label="Modelo *">
-                    <input className={inputCls} placeholder="Ex: Track & Drive" value={form.tracker_model} onChange={(e) => set('tracker_model', e.target.value)} />
-                  </Field>
-                  <Field label="IMEI (15 dígitos) *" error={fieldErrors.tracker_imei}>
-                    <input
-                      className={fieldErrors.tracker_imei ? inputErrCls : inputCls}
-                      maxLength={15}
-                      placeholder="123456789012345"
-                      value={form.tracker_imei}
-                      inputMode="numeric"
-                      onChange={(e) => set('tracker_imei', e.target.value.replace(/\D/g, '').slice(0, 15))}
-                    />
-                  </Field>
+          {/* ══ Rastreador GPS — escondido até existir a integração ═════ */}
+          {VEHICLE_TRACKER_ENABLED && (
+            <CollapsibleSection {...sectionProps('sec-tracker')}>
+              <div className="space-y-4">
+                <div className="flex items-center gap-3">
+                  <Toggle
+                    checked={form.has_tracker === 'true'}
+                    onChange={(v) => set('has_tracker', v ? 'true' : 'false')}
+                  />
+                  <span className="text-[13px] text-fg">
+                    {form.has_tracker === 'true' ? 'Possui rastreador instalado' : 'Sem rastreador'}
+                  </span>
                 </div>
-              )}
-            </div>
-          </section>
+                {form.has_tracker === 'true' && (
+                  <div className="grid grid-cols-3 gap-4">
+                    <Field label="Marca *">
+                      <input className={inputCls} placeholder="Ex: Sascar" value={form.tracker_brand} onChange={(e) => set('tracker_brand', e.target.value)} />
+                    </Field>
+                    <Field label="Modelo *">
+                      <input className={inputCls} placeholder="Ex: Track & Drive" value={form.tracker_model} onChange={(e) => set('tracker_model', e.target.value)} />
+                    </Field>
+                    <Field label="IMEI (15 dígitos) *" error={fieldErrors.tracker_imei}>
+                      <input
+                        className={fieldErrors.tracker_imei ? inputErrCls : inputCls}
+                        maxLength={15}
+                        placeholder="123456789012345"
+                        value={form.tracker_imei}
+                        inputMode="numeric"
+                        onChange={(e) => set('tracker_imei', e.target.value.replace(/\D/g, '').slice(0, 15))}
+                      />
+                    </Field>
+                  </div>
+                )}
+              </div>
+            </CollapsibleSection>
+          )}
 
           {/* ══ Seguro ═══════════════════════════════════════════════════ */}
-          <section
-            id="sec-insurance"
-            ref={(el) => { sectionRefs.current['sec-insurance'] = el }}
-          >
-            <SectionHeader title="Seguro" hint="opcional" />
+          <CollapsibleSection {...sectionProps('sec-insurance')}>
             <div className="space-y-4">
               <div className="flex items-center gap-3">
                 <Toggle
@@ -1169,14 +1314,10 @@ export function VehicleForm({ vehicleId, initialData, initialPhotoUrls = {}, ini
                 </div>
               )}
             </div>
-          </section>
+          </CollapsibleSection>
 
           {/* ══ Fotos ════════════════════════════════════════════════════ */}
-          <section
-            id="sec-photos"
-            ref={(el) => { sectionRefs.current['sec-photos'] = el }}
-          >
-            <SectionHeader title="Fotos" hint="JPG, PNG ou WebP · máx. 5MB por slot · todos opcionais" />
+          <CollapsibleSection {...sectionProps('sec-photos')}>
             <div className="grid grid-cols-3 sm:grid-cols-6 gap-3">
               {PHOTO_SLOTS.map((slot) => {
                 const url = photoUrls[slot]
@@ -1231,14 +1372,10 @@ export function VehicleForm({ vehicleId, initialData, initialPhotoUrls = {}, ini
                 )
               })}
             </div>
-          </section>
+          </CollapsibleSection>
 
           {/* ══ Plano de Manutenção ══════════════════════════════════════ */}
-          <section
-            id="sec-maintenance"
-            ref={(el) => { sectionRefs.current['sec-maintenance'] = el }}
-          >
-            <SectionHeader title="Plano de Manutenção" hint="opcional" />
+          <CollapsibleSection {...sectionProps('sec-maintenance')}>
             {maintenancePlansQuery.isLoading ? (
               <div className="flex justify-center py-6">
                 <div className="w-5 h-5 border-2 border-primary border-t-transparent rounded-full animate-spin" />
@@ -1341,7 +1478,10 @@ export function VehicleForm({ vehicleId, initialData, initialPhotoUrls = {}, ini
                 )}
               </div>
             )}
-          </section>
+          </CollapsibleSection>
+
+          </div>
+          </div>
 
           {/* ── Erro global ────────────────────────────────────────────── */}
           {globalError && (
@@ -1351,20 +1491,28 @@ export function VehicleForm({ vehicleId, initialData, initialPhotoUrls = {}, ini
             </div>
           )}
 
-          {/* ── Footer ────────────────────────────────────────────────── */}
-          <div className="flex gap-3 justify-end pt-4 pb-16 border-t border-border">
-            <Link href={backHref} className="inline-flex items-center h-9 px-5 rounded-full border border-border text-fg-mute text-[13px] font-medium hover:text-fg hover:border-fg-mute transition-colors">
-              Cancelar
-            </Link>
-            <button
-              type="submit"
-              disabled={isPending}
-              className="h-9 px-6 rounded-full bg-primary text-bg text-[13px] font-bold hover:bg-primary-hover transition-colors disabled:opacity-60"
-            >
-              {isPending ? 'Salvando…' : isEditMode ? 'Salvar alterações' : 'Cadastrar veículo'}
-            </button>
-          </div>
-        </form>
+      </form>
+
+      {/* ── Rodapé fixo: o botão de salvar fica sempre à vista ─────────────── */}
+      <div className="sticky bottom-0 z-20 bg-bg border-t border-border">
+        <div className="max-w-3xl mx-auto px-6 h-16 flex items-center gap-3">
+          <p className="hidden sm:block flex-1 min-w-0 text-[12px] text-fg-mute" aria-live="polite">
+            {requiredDone === REQUIRED_TOTAL
+              ? <><strong className="text-fg">Obrigatórios completos.</strong>{isEditMode ? '' : ' O resto pode ficar para depois.'}</>
+              : <><strong className="text-fg tabular-nums">{requiredDone}/{REQUIRED_TOTAL}</strong> obrigatórios preenchidos</>}
+          </p>
+          <Link href={backHref} className="ml-auto sm:ml-0 inline-flex items-center h-9 px-5 rounded-full border border-border text-fg-mute text-[13px] font-medium hover:text-fg hover:border-fg-mute transition-colors">
+            Cancelar
+          </Link>
+          <button
+            type="submit"
+            form="vehicle-form"
+            disabled={isPending}
+            className="h-9 px-6 rounded-full bg-primary text-bg text-[13px] font-bold hover:bg-primary-hover transition-colors disabled:opacity-60"
+          >
+            {isPending ? 'Salvando…' : isEditMode ? 'Salvar' : 'Cadastrar'}
+          </button>
+        </div>
       </div>
     </div>
   )

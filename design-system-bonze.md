@@ -1534,7 +1534,7 @@ Toda a tipografia fica nos elementos filhos dentro de `<td className="px-4">`. O
 <span className="text-sm font-medium text-[#9e9e9e]">Faltam 3.500 km</span>
 
 {/* Concluída — exibe texto auxiliar como oficina */}
-<span className="text-xs text-[#9e9e9e]">Oficina do Careca</span>
+<span className="text-xs text-[#9e9e9e]">Oficina Central</span>
 ```
 
 **Dois elementos empilhados na mesma célula (dado + subinfo):**

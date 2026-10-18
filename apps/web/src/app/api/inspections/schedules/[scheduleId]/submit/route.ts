@@ -41,39 +41,53 @@ export async function POST(req: NextRequest, ctx: RouteContext) {
     process.env.SUPABASE_SERVICE_ROLE_KEY!,
   )
 
-  // Passo 1 (ADR 0016 §5): resolve customer por user_id
-  const { data: customer } = await admin
+  // Passo 1 (ADR 0016 §5): resolve os cadastros de cliente por user_id —
+  // TODOS, um por locadora (PRD 0001). Era `.maybeSingle()`: com dois
+  // cadastros o PostgREST devolve erro e a rota respondia "Cliente não
+  // encontrado" a quem é cliente (mesmo defeito da rota de pagamento,
+  // achado em produção em 2026-09-25).
+  const { data: customers, error: customersError } = await admin
     .from('customers')
     .select('id, tenant_id')
     .eq('user_id', user.id)
-    .maybeSingle()
 
-  if (!customer) {
+  if (customersError) {
+    log('error', 'inspection.customer_lookup_failed', { user_id: user.id, error: customersError.message })
+    return json({ ok: false, error: { code: 'INTERNAL', message: 'Falha ao enviar vistoria. Tente novamente.' } }, 500)
+  }
+  if (!customers || customers.length === 0) {
     log('warn', 'inspection.customer_not_found', { user_id: user.id, schedule_id: scheduleId })
     return json({ ok: false, error: { code: 'FORBIDDEN', message: 'Cliente não encontrado' } }, 403)
   }
 
-  // Passo 2: resolve schedule por id + tenant_id — senão NOT_FOUND
+  const tenantIds = customers.map((c) => c.tenant_id as string)
+
+  // Passo 2: resolve schedule por id, restrito às locadoras do cliente — senão NOT_FOUND
   const { data: schedule } = await admin
     .from('inspection_schedules')
     .select('id, tenant_id, rental_id')
     .eq('id', scheduleId)
-    .eq('tenant_id', customer.tenant_id)
+    .in('tenant_id', tenantIds)
     .maybeSingle()
 
   if (!schedule) {
-    log('warn', 'inspection.schedule_not_found', { schedule_id: scheduleId, tenant_id: customer.tenant_id, user_id: user.id })
+    log('warn', 'inspection.schedule_not_found', { schedule_id: scheduleId, user_id: user.id })
     return json({ ok: false, error: { code: 'NOT_FOUND', message: 'Agendamento não encontrado' } }, 404)
   }
 
-  // Passo 3: confere posse — rental.customer_id precisa ser o do customer resolvido
+  // Passo 3: confere posse — rental.customer_id precisa ser o cadastro deste
+  // usuário NA locadora do agendamento
   const { data: rental } = await admin
     .from('rentals')
     .select('id, customer_id, periodic_inspection_profile_id')
     .eq('id', schedule.rental_id)
     .maybeSingle()
 
-  if (!rental || rental.customer_id !== customer.id || !rental.periodic_inspection_profile_id) {
+  const customer = rental
+    ? customers.find((c) => c.id === rental.customer_id && c.tenant_id === schedule.tenant_id)
+    : undefined
+
+  if (!rental || !customer || !rental.periodic_inspection_profile_id) {
     log('warn', 'inspection.periodic_forbidden', { user_id: user.id, schedule_id: scheduleId })
     return json({ ok: false, error: { code: 'FORBIDDEN', message: 'Agendamento não pertence a este cliente' } }, 403)
   }

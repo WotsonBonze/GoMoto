@@ -1,10 +1,74 @@
 # ⚙️ Tela: Configurações — [[GoMoto]]
 
-Rota: `/configuracoes` | Tipo: Client Component
+Rota: `/configuracoes/*` | Casca: `configuracoes/layout.tsx` (Server Component) — [[decisions/0041-configuracoes-com-submenu|ADR 0041]]
+
+`/configuracoes` não tem conteúdo próprio: redireciona para `/configuracoes/conta`. Cada assunto é uma sub-rota com `page.tsx` (guarda no servidor) e, quando escreve, `actions.ts` próprio.
+
+## Estrutura e permissões
+
+| Grupo | Item do menu | Rota | Quem vê |
+|---|---|---|---|
+| Minha conta | Perfil e segurança | `/configuracoes/conta` | todos |
+| Minha conta | Aparência | `/configuracoes/aparencia` | todos |
+| Empresa | Usuários | `/configuracoes/usuarios` | Owner/Admin |
+| Empresa | Contatos do app | `/configuracoes/contatos` | Owner/Admin |
+| Financeiro | Gateways de pagamento | `/configuracoes/pagamentos` | Owner |
+| Financeiro | Multa e juros | `/configuracoes/encargos` | Owner |
+| Financeiro | Diagnóstico | `/configuracoes/integracoes` | Owner/Admin |
+
+- O **menu** (`_components/settings-nav.ts`, testado) é filtrado pelo papel resolvido no layout via `getCurrentTenantRole()`; grupos vazios somem — Operator/Viewer veem só "Minha conta" (Spec 0011 RNF-003).
+- O menu só decide o que **mostrar**. Cada página barra com `requireTenantOwner()` / `requireTenantOwnerOrAdmin()` e `redirect('/configuracoes/conta')`; a checagem que vale para escrita continua no banco.
+- O callback OAuth dos gateways (`api/auth/gateway/[provider]/callback`) devolve para `/configuracoes/pagamentos?payment=...`. O `redirect_uri` registrado nos provedores não mudou.
 
 ## Seções
 
 > Seção "Dados da Empresa" removida (2026-08-07) — os campos `empresa_*` na tabela `settings` não eram consumidos por nenhuma outra tela (contratos, relatórios, etc.).
+
+### Gateway de Pagamento (Owner apenas) — [[decisions/0030-multiplos-gateways-de-pagamento|ADR 0030]]
+
+O tenant conecta **quantos gateways quiser**; exatamente **um** gera as cobranças.
+
+A lista sai do catálogo `PAYMENT_PROVIDERS` (`@gomoto/core/payments`) cruzado com as contas do tenant — nenhum nome de provedor está escrito na tela. Provedor com `available: false` aparece como **"Em breve"**, com o botão desabilitado: o tenant vê para onde a integração vai sem clicar em algo que não faz nada.
+
+| Estado da linha | Badge | Ações |
+|---|---|---|
+| `is_default AND active` | **Gerando cobranças** | Desconectar |
+| `active`, sem `is_default` | Conectado | **Ativar**, Desconectar |
+| conta existente, `active = false` | (do catálogo) | Reconectar |
+| nunca conectado, `available` | — | Conectar |
+| nunca conectado, `available = false` | Em breve | Conectar (desabilitado) |
+
+**Conectar não elege.** Só o primeiro gateway do tenant nasce eleito; um segundo entra como "Conectado" e a troca é um clique explícito em *Ativar*. Conectar nunca redireciona o dinheiro da empresa em silêncio.
+
+**Aviso de "Nenhum gateway ativo".** Existe conta conectada e nenhuma eleita — normalmente depois de desconectar a que cobrava. O app do cliente para de gerar cobrança online; sem o aviso, isso acontecia sem nada na tela dizer por quê.
+
+**Provedores disponíveis:**
+
+| Provedor | Conexão | Gera |
+|---|---|---|
+| Mercado Pago | OAuth2 | Pix |
+| Cora | OAuth2 | Pix (mín. R$ 5,00) |
+| InfinitePay | **InfiniteTag digitada** | Link de checkout (mín. R$ 1,00) |
+
+Nos dois primeiros o tenant é levado ao provedor, faz login e autoriza. O `redirect_uri` (`<NEXT_PUBLIC_APP_URL>/api/auth/gateway/<provedor>/callback`) precisa estar **registrado no painel de cada provedor**, senão a autorização é recusada antes da tela de login.
+
+**InfinitePay conecta por handle** — [[decisions/0032-integracao-infinitepay-checkout|ADR 0032]]. Não há OAuth nem chave: a credencial é a InfiniteTag, um nome de usuário **público**. O operador digita (com ou sem `$`) e o GoMoto **sonda a API criando um link de verificação de R$ 1,00** antes de gravar — é a única prova disponível de que a tag cobra, porque `payment_check` responde igual para pedido inexistente e pedido não pago.
+
+Depois de gravar, um modal mostra o link e pede conferência, com *Não é minha conta* desconectando na hora. O motivo é que **nada na API prova posse do handle**: digitar errado manda o dinheiro para a conta de um estranho, em silêncio. A conta pode precisar habilitar o **Checkout Externo** no app da InfinitePay — o erro é o mesmo de handle inexistente, então a mensagem cobre as duas leituras.
+
+Escrita: as três operações passam por RPC `SECURITY DEFINER` (`fn_connect_provider_account`, `fn_set_default_provider_account`, `fn_disconnect_provider_account`), que checam Owner **e** tenant dentro do banco. `authenticated` não tem `INSERT`/`UPDATE` em `payment_provider_accounts` — a linha aponta para uma credencial no Vault, e o guard de dinheiro não pode viver só na aplicação.
+
+### Contatos para o cliente (Owner/Admin)
+
+Lista de contatos que aparece no **app do cliente**, aba Conta → *Fale com a locadora*, na ordem definida aqui (setas subir/descer). Cada contato tem **nome livre** ("Financeiro", "Manutenção"), **número e/ou e-mail** — ao menos um —, o **tipo do número** (Telefone ou WhatsApp) e um **horário de atendimento** opcional em texto livre ("Seg a sex, 8h às 18h").
+
+- Tabela `tenant_contacts` (`label`, `phone` só dígitos 10–11, `phone_kind` `phone|whatsapp`, `email`, `business_hours`, `sort_order`).
+- Validação: `TenantContactInputSchema` (`@gomoto/core`) — aceita telefone mascarado e normaliza para dígitos.
+- Escrita: `createTenantContactAction`, `updateTenantContactAction`, `deleteTenantContactAction`, `reorderTenantContactsAction` em `configuracoes/actions.ts`; todas com `requireTenantOwnerOrAdmin` + `logAction`.
+- RLS: membros leem, **clientes do tenant leem** (`get_customer_tenants()`), só Owner/Admin escrevem (`get_user_admin_tenant_memberships()`); `anon` sem grant.
+- Leitura: `useTenantContacts()` (`@gomoto/data`), filtrando pelo tenant do `SupabaseProvider` — um cliente de duas locadoras enxerga as duas pela RLS.
+
+No app, o ícone segue o tipo (WhatsApp verde ou telefone; envelope quando só há e-mail) e o horário aparece abaixo do número. Tocar abre direto o WhatsApp ou a ligação; se o contato também tem e-mail, o app pergunta qual canal usar. O cliente vê **somente** os contatos cadastrados aqui: sem nenhum, a seção "Fale com a locadora" não aparece no app. O telefone e o e-mail gerais da empresa (`tenants.contact_phone/contact_email`) não são exibidos ao cliente.
 
 ### Encargo por atraso (Owner apenas) — ADR 0024
 
@@ -33,41 +97,84 @@ Havia três respostas para "qual política vale": `fn_create_charge` casava por 
 
 `due_date` tinha um efeito difícil de defender: cobrança emitida hoje com vencimento em 60 dias podia pegar uma versão **agendada**, ainda não vigente.
 
-### 1. Segurança (ícone Lock `#a880ff`)
+### Diagnóstico das integrações (Owner e Admin) — [[decisions/0034-auditabilidade-do-caminho-do-dinheiro|ADR 0034]]
 
-| Campo | Tipo |
+Sub-rota `/configuracoes/integracoes` (item "Diagnóstico" do menu), guarda por `requireTenantOwnerOrAdmin()` com `redirect('/configuracoes/conta')` — Operator e Viewer não sabem que a tela existe.
+
+**Por que Owner/Admin e não Operator:** um evento de gateway carrega valor, cliente e o erro cru do provedor. É informação de gestão, no mesmo nível de "Usuários".
+
+A tela responde duas perguntas que antes não tinham resposta **dentro do produto** — o rastro existia em `gateway_events` desde a Spec 0014, mas só era alcançável por quem tivesse acesso ao banco e soubesse montar o SQL. Numa locadora, isso é ninguém.
+
+#### Eventos recebidos — view `gateway_event_audit`
+
+Uma linha por notificação de gateway, com a corrente `evento → pagamento → razão` montada (as FKs vieram da Fase 1 da ADR 0034). Cinco situações, decididas **em SQL** e não na tela:
+
+| Situação | Quando | Cor |
+|---|---|---|
+| **Confirmado** | verificado com o provedor e lançado no razão | verde |
+| **Aceito sem conferir** | confirmado sem reconsultar o provedor — credencial vencida ([[decisions/0033-dinheiro-para-cobranca-cancelada\|ADR 0033]]) | âmbar |
+| **Sem efeito** | ciclo de vida (`INVOICE.DRAFTED`, `CREATED`) — nunca vira dinheiro | cinza |
+| **Não processado** | recebido, ainda na fila | âmbar |
+| **Falhou** | processamento falhou; o provedor **não reenvia** | vermelho |
+
+A ordem da classificação importa e está na view: **"aceito sem conferir" ganha de "confirmado"**. Um recebimento aceito sem verificação é processado *e* precisa de olho humano; se `confirmado` viesse antes, a ressalva sumiria da tela — que é o oposto do que a ADR 0033 decidiu ao aceitar aquele risco.
+
+O erro cru do provedor fica **fora da tabela**, em cartões abaixo dela: é longo, e espremê-lo numa célula obrigaria a truncar justamente o que explica a falha. Foi o que faltou quando o primeiro pagamento da InfinitePay sumiu.
+
+Filtro "Precisam de atenção" isola falhos, pendentes e aceitos sem conferir.
+
+#### Reconciliação do razão — view `financial_reconciliation`
+
+Uma linha por **problema**; vazio é o estado saudável. Seis verificações:
+
+| Problema | O que significa |
 |---|---|
-| Nova Senha | password com toggle Eye/EyeOff |
-| Confirmar Nova Senha | password |
+| `unbalanced_transaction` | lançamento que não fecha em zero, ou com uma perna só |
+| `charge_without_entry` | cobrança emitida sem lançamento — some do DRE e continua na tela |
+| `payable_without_entry` | despesa que não chega ao DRE |
+| `credit_without_entry` | crédito que nasce sem saldo utilizável (foi bug real) |
+| `payment_without_allocation` | dinheiro recebido que não quitou nada |
+| `paid_intent_without_payment` | tentativa marcada como paga sem pagamento |
 
-**Validações:**
-- Mínimo 6 caracteres
-- Senhas devem corresponder
+As quatro primeiras já eram feitas por `apps/web/tests/reconciliacao.spec.ts` — **contra o banco de teste, em CI**. As duas últimas são novas e vieram da ADR 0034: são as formas de a corrente do gateway quebrar sem violar invariante nenhuma do banco.
 
-Salva via `supabase.auth.updateUser({ password: newPassword })`.
+Ambas as views são `security_invoker = true`: a RLS de cada tabela de origem continua valendo, e a página não filtra por tenant à mão.
 
-### 2. Informações da Conta (ícone User `#e65e24`) — Read-Only
+#### Reprocessar
 
-- E-mail de acesso (`supabase.auth.getUser()`)
-- Membro desde (data formatada com `Intl.DateTimeFormat('pt-BR', { day, month, year })`)
+Botão em cada evento **falho ou não processado** — e só neles. Chama
+`replayGatewayEventAction`, que confere papel (Owner/Admin), confere que o
+evento é do tenant (leitura com o cliente do usuário, sob RLS) e então aciona a
+Edge Function `gateway-replay` com `service_role`.
 
-## Componente FeedbackMessage
+Não aparece em "aceito sem conferir": aquele dinheiro **já entrou**. Oferecer
+reprocessar ali convidaria a mexer num recebimento concluído para resolver uma
+ressalva que se resolve olhando o extrato.
 
-```typescript
-type: 'success' | 'error'
-// success: bg #0e2f13, border #229731, icon CheckCircle2
-// error:   bg #7c1c1c, border #ff9c9a, icon AlertCircle
-```
+O reprocessamento roda o **mesmo** processador do webhook — os três saíram para
+`supabase/functions/_shared/` justamente para que o dreno não seja uma segunda
+implementação da confirmação de pagamento. Falha volta para a fila com o motivo
+novo, que é o que o operador precisa ler.
 
-## Queries Supabase
+### Minha conta — `/configuracoes/conta` (todos)
 
-```sql
--- Alterar senha
-supabase.auth.updateUser({ password: '...' })
+- **Informações da Conta** (read-only): e-mail de acesso e "Membro desde", via `supabase.auth.getUser()`.
+- **Segurança**: nova senha + confirmação (mínimo 6 caracteres, precisam coincidir), salva via `supabase.auth.updateUser({ password })`.
 
--- Buscar usuário logado
-supabase.auth.getUser()
-```
+### Aparência — `/configuracoes/aparencia` (todos) — ADR 0019
+
+Preferência por operador (`update_own_theme_preference`). Pré-visualiza no `<html>` ao clicar e restaura o tema salvo ao sair sem salvar — inclusive trocando de item no submenu.
+
+### Escrita (Server Actions por sub-rota)
+
+| Arquivo | Actions |
+|---|---|
+| `pagamentos/actions.ts` | `connectGateway*`, `setDefaultGatewayAction`, `disconnectGatewayAction`, `deleteGatewayAction` |
+| `encargos/actions.ts` | `createLateChargePolicyAction` |
+| `contatos/actions.ts` | `create/update/delete/reorderTenantContactAction(s)` |
+| `aparencia/actions.ts` | `updateThemePreferenceAction` |
+| `usuarios/actions.ts` | convite, papel, revogação, reativação, reset de senha |
+| `integracoes/actions.ts` | `replayGatewayEventAction` |
 
 ## Tags
 `#projeto/tela` `#gomoto/configuracoes`

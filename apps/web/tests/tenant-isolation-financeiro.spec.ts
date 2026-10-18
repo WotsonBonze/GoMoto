@@ -126,7 +126,7 @@ test.describe('Isolamento por tenant — tabelas do redesenho financeiro (Spec 0
     // ── Gateway ─────────────────────────────────────────────────────────────
     const providerAccountId = await seed('payment_provider_accounts', {
       tenant_id: TENANT_2, provider: 'mercadopago', external_account_id: `acct_${suffix}`,
-      account_email: 'loja-t2@teste.com',
+      account_label: 'loja-t2@teste.com',
     })
     cleanup.push({ table: 'payment_provider_accounts', id: providerAccountId })
 
@@ -301,11 +301,20 @@ test.describe('Isolamento por tenant — tabelas do redesenho financeiro (Spec 0
     expect(abertas, 'view sem security_invoker ignora RLS e vaza entre tenants').toEqual([])
   })
 
-  test('credencial do gateway não vaza para outro tenant', async () => {
+  test('credencial do gateway não é legível por usuário autenticado', async () => {
     // A credencial saiu da tabela e vive no Vault; a leitura passa por
     // `fn_provider_credentials`, que é SECURITY DEFINER e por isso IGNORA RLS.
-    // Sem a checagem de tenant dentro dela, qualquer autenticado leria o token
-    // de pagamento de qualquer empresa — e com ele se movimenta dinheiro.
+    //
+    // A garantia mudou de lugar na ADR 0034 e ficou MAIS FORTE. Antes, a
+    // função atendia `authenticated` e a checagem de tenant lá dentro é que
+    // barrava a leitura cruzada — o que deixava um `viewer` lendo o token da
+    // PRÓPRIA empresa, e com ele se movimenta dinheiro. Agora `authenticated`
+    // não tem EXECUTE nenhum: a recusa acontece antes de a função rodar.
+    //
+    // Por isso a asserção é sobre o CÓDIGO e não sobre a mensagem. As duas
+    // camadas recusam com 42501 (`insufficient_privilege`) — o grant e o
+    // `RAISE` interno —, e o teste não deve depender de qual delas atendeu
+    // primeiro.
     const contaAlheia = seeded['payment_provider_accounts']
 
     // Semear um segredo DE VERDADE é o que dá sentido ao teste: sem credencial
@@ -327,10 +336,10 @@ test.describe('Isolamento por tenant — tabelas do redesenho financeiro (Spec 0
       p_account_id: contaAlheia,
     })
 
-    // Ou recusa explícita, ou nada — o que não pode é devolver o segredo.
-    expect(data ?? null, 'credencial de outro tenant foi devolvida').toBeNull()
-    expect(error, 'a leitura cruzada deveria ser recusada').not.toBeNull()
-    expect(error!.message).toMatch(/outro tenant/i)
+    // O que não pode, em hipótese nenhuma, é devolver o segredo.
+    expect(data ?? null, 'credencial foi devolvida a um autenticado').toBeNull()
+    expect(error, 'a leitura deveria ser recusada').not.toBeNull()
+    expect(error!.code, `recusa deveria ser por privilégio, veio: ${error!.message}`).toBe('42501')
   })
 
   test('a credencial não é selecionável junto com a linha', async () => {

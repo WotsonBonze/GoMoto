@@ -1,15 +1,18 @@
 import { z } from 'zod'
 import { extractionField, extractionResultSchema, type ExtractionDocumentType } from './types'
 import { buildCnhPrompt, buildFineNoticePrompt } from './prompts'
+import { CNH_CATEGORIES, postProcessCnhFields } from './cnh'
 
 export const CnhFieldsSchema = z.object({
-  name: extractionField(z.string()),
-  cpf: extractionField(z.string()),
-  rg: extractionField(z.string()),
-  birth_date: extractionField(z.string()), // ISO date
-  drivers_license: extractionField(z.string()),
-  drivers_license_category: extractionField(z.string()),
-  drivers_license_validity: extractionField(z.string()), // ISO date
+  name: extractionField(z.string(), 'Campo "NOME" / "2 e 1 NOME E SOBRENOME". Nunca os nomes da FILIAÇÃO.'),
+  cpf: extractionField(z.string(), 'Campo "CPF" / "4d CPF". Exatamente 11 dígitos, só números.'),
+  rg: extractionField(z.string(), 'Campo "DOC. IDENTIDADE / ÓRG. EMISSOR / UF" / "4c". Só o número, sem órgão emissor e UF.'),
+  birth_date: extractionField(z.string(), 'Campo "DATA DE NASCIMENTO" / "3 DATA, LOCAL E UF DE NASCIMENTO". AAAA-MM-DD.'),
+  drivers_license: extractionField(z.string(), 'Campo "Nº REGISTRO" / "5 Nº REGISTRO". Exatamente 11 dígitos. Não é o Nº do espelho (vertical, na lateral).'),
+  // Enum, não texto livre: o select do formulário só aceita estes valores, e
+  // o enum no JSON Schema impede o modelo de devolver outra coisa.
+  drivers_license_category: extractionField(z.enum(CNH_CATEGORIES), 'Campo "CAT. HAB." / "9 CAT HAB". Não é a letra solta ao lado da caixa ACC nem a tabela do verso.'),
+  drivers_license_validity: extractionField(z.string(), 'Campo "VALIDADE" / "4b VALIDADE". AAAA-MM-DD. Não é 1ª HABILITAÇÃO nem DATA EMISSÃO.'),
 })
 export type CnhFields = z.infer<typeof CnhFieldsSchema>
 export const CnhExtractionResultSchema = extractionResultSchema(CnhFieldsSchema)
@@ -58,6 +61,9 @@ interface DocumentExtractionEntry<TSchema extends z.ZodTypeAny = z.ZodTypeAny> {
   fieldsSchema: TSchema
   promptBuilder: () => string
   targetEntity: 'customer' | 'fine'
+  /** Normalização + checagens determinísticas após a resposta do modelo (opcional). */
+  // Sintaxe de método de propósito: bivariante, aceita a função tipada de cada entrada.
+  postProcess?(fields: z.infer<TSchema>): z.infer<TSchema>
 }
 
 // RN-005: novo tipo de documento = nova entrada aqui, sem tocar nas existentes.
@@ -66,6 +72,7 @@ export const documentExtractionRegistry = {
     fieldsSchema: CnhFieldsSchema,
     promptBuilder: buildCnhPrompt,
     targetEntity: 'customer',
+    postProcess: (fields: CnhFields): CnhFields => postProcessCnhFields(fields),
   },
   fine_notice: {
     fieldsSchema: FineNoticeFieldsSchema,

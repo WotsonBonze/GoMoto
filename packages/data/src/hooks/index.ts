@@ -20,3 +20,4 @@ export * from './useInspectionExecution'
 export * from './useThemePreference'
 // Spec 0014 — domínio financeiro sobre o ledger
 export * from './useLedger'
+export * from './useTenantContacts'

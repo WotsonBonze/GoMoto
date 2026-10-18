@@ -4,9 +4,11 @@ import { createClient } from '@/lib/supabase/server'
 import { getCurrentTenantId } from '@/lib/auth/tenant'
 import {
   calculateAmountDue, calculateAccruedCharges, toPolicyInput, DAYS_PER_MONTH,
+  findPaymentProvider,
   type LateChargePolicy, type AccruedCharges,
 } from '@gomoto/core'
 import { formatCurrency } from '@/lib/utils'
+import { fetchTenantTimezone, tenantToday } from '@/lib/payment/business-time'
 import { BillingActions } from './_components/BillingActions'
 import { ReversePaymentButton } from './_components/ReversePaymentButton'
 
@@ -70,13 +72,14 @@ function rateioDoEncargoRealizado(
   principalEmitido: number,
   totalGravado: number,
   recebimentos: { paid_at: string; amount: number }[],
+  timezone: string | null,
 ): AccruedCharges | null {
   let abatido = 0
 
   for (const r of [...recebimentos].sort((a, b) => (a.paid_at < b.paid_at ? -1 : 1))) {
     const principal = round2(principalEmitido - abatido)
     if (principal > 0) {
-      const tentativa = calculateAccruedCharges(policy, principal, dueDate, new Date(r.paid_at))
+      const tentativa = calculateAccruedCharges(policy, principal, dueDate, tenantToday(timezone, new Date(r.paid_at)))
       if (round2(tentativa.total) === totalGravado) return tentativa
     }
     abatido = round2(abatido + r.amount)
@@ -126,6 +129,7 @@ const SOURCE_LABELS: Record<string, string> = {
   // aparece.
   rental:       'Locação',
   late_charge:  'Encargo por atraso',
+  discount:     'Desconto',
   fine:         'Multa',
   maintenance:  'Manutenção',
   expense:      'Despesa',
@@ -169,7 +173,7 @@ export default async function BillingDetailPage({
   // do documento são os ITENS — `late_charges` e `credit_applications` deixaram
   // de existir: encargo é calculado até ser realizado (R-06), e aplicação de
   // crédito é transação no ledger.
-  const [balanceResult, itemsResult, allocationsResult] = await Promise.all([
+  const [balanceResult, itemsResult, allocationsResult, gatewayResult, membrosResult, timezone] = await Promise.all([
     supabase
       .from('charge_balances')
       .select('*')
@@ -184,13 +188,49 @@ export default async function BillingDetailPage({
       .order('created_at', { ascending: true }),
     supabase
       .from('payment_allocations')
-      .select('id, amount, created_at, payment:payments(id, amount, method, paid_at, notes, reversed_at)')
+      // `received_by_system` e o provedor do intent respondem "de onde veio este
+      // dinheiro" (ADR 0034). Os dois porque cobrem épocas diferentes: a coluna
+      // só existe a partir da Fase 1, e o intent cobre os recebimentos
+      // anteriores a ela.
+      .select(
+        'id, amount, created_at, '
+        + 'payment:payments(id, amount, method, paid_at, notes, reversed_at, '
+        + 'received_by, received_by_system, intent:payment_intents(provider))',
+      )
       .eq('charge_id', id)
       .eq('tenant_id', tenantId)
       .order('created_at', { ascending: false }),
+    // O gateway ELEITO, só para o botão dizer a verdade sobre o que vai gerar.
+    // Um provedor de checkout hospedado não gera Pix, e o botão rotulado "Gerar
+    // Pix" prometeria ao operador uma coisa que a tela entregaria como outra.
+    supabase
+      .from('payment_provider_accounts')
+      .select('provider')
+      .eq('tenant_id', tenantId)
+      .eq('is_default', true)
+      .eq('active', true)
+      .maybeSingle(),
+    // Quem registrou o recebimento manual. `payments.received_by` é um id de
+    // `auth.users`, que `authenticated` não lê direto — `list_tenant_members` é
+    // SECURITY DEFINER e resolve o nome.
+    //
+    // Ela é owner/admin apenas, então para um Operator isto volta vazio. A tela
+    // continua dizendo que o recebimento foi manual; só não diz por quem. É
+    // degradação honesta: melhor omitir o nome do que inventar um.
+    supabase.rpc('list_tenant_members', { p_search: null }),
+    // "Hoje" do encargo é o da LOCADORA. A página roda no servidor (UTC na
+    // Vercel): com `new Date()`, a partir das 21h de Brasília a cobrança que
+    // vence hoje aparecia com multa e juros de um dia.
+    fetchTenantTimezone(supabase, tenantId),
   ])
 
   if (balanceResult.error || !balanceResult.data) notFound()
+
+  // Sem gateway eleito o método fica nulo e o botão volta ao rótulo genérico —
+  // gerar vai falhar de qualquer forma, com a mensagem que aponta para
+  // Configurações.
+  const electedProvider = (gatewayResult.data as { provider: string } | null)?.provider ?? null
+  const gatewayMethod = (electedProvider ? findPaymentProvider(electedProvider) : null)?.methods[0] ?? null
 
   const balance = balanceResult.data as unknown as {
     charge_id: string; customer_id: string; rental_id: string | null
@@ -207,12 +247,57 @@ export default async function BillingDetailPage({
     source_module: string; created_at: string
   }[]
 
+  // Nome de quem registrou o recebimento manual, por id.
+  const nomePorUsuario = new Map<string, string>(
+    ((membrosResult.data ?? []) as { user_id: string; name: string | null; email: string }[])
+      .map((m) => [m.user_id, m.name || m.email]),
+  )
+
+  type PaymentRow = {
+    id: string; amount: number; method: string; paid_at: string
+    notes: string | null; reversed_at: string | null
+    received_by: string | null; received_by_system: string | null
+    intent: { provider: string } | { provider: string }[] | null
+  }
   type AllocRow = {
     id: string; amount: number; created_at: string
-    payment: { id: string; amount: number; method: string; paid_at: string; notes: string | null; reversed_at: string | null }
-      | { id: string; amount: number; method: string; paid_at: string; notes: string | null; reversed_at: string | null }[]
-      | null
+    payment: PaymentRow | PaymentRow[] | null
   }
+
+  /**
+   * De onde veio o dinheiro.
+   *
+   * A pergunta que a tela não respondia: um recebimento de R$ 100 aparecia como
+   * "PIX" tanto se a Cora confirmou sozinha quanto se alguém digitou à mão — e
+   * são situações que exigem coisas diferentes de quem confere.
+   *
+   * Duas fontes, em ordem de confiança:
+   *
+   *   1. `received_by_system` — gravado pela RPC de confirmação (ADR 0034,
+   *      Fase 1). É o que o próprio caminho do dinheiro registrou.
+   *   2. o provedor do INTENT — cobre os recebimentos anteriores àquela coluna.
+   *      Menos direto, mas suficiente: pagamento amarrado a uma tentativa de
+   *      gateway veio de gateway.
+   *
+   * Sem nenhuma das duas, foi registrado por gente. Não é inferência frouxa:
+   * `fn_confirm_gateway_payment` SEMPRE marca a origem, então a ausência das
+   * duas só sobra para o caminho manual.
+   */
+  function origemDoPagamento(p: PaymentRow | null) {
+    const intent = Array.isArray(p?.intent) ? p?.intent[0] : p?.intent
+    const provider = p?.received_by_system?.replace(/^gateway:/, '') ?? intent?.provider ?? null
+
+    if (provider) {
+      return {
+        tipo: 'gateway' as const,
+        label: findPaymentProvider(provider)?.label ?? provider,
+      }
+    }
+
+    const quem = p?.received_by ? nomePorUsuario.get(p.received_by) ?? null : null
+    return { tipo: 'manual' as const, label: quem }
+  }
+
   const payments = ((allocationsResult.data ?? []) as unknown as AllocRow[]).map((a) => {
     const p = Array.isArray(a.payment) ? a.payment[0] : a.payment
     return {
@@ -226,6 +311,7 @@ export default async function BillingDetailPage({
       paid_at: p?.paid_at ?? a.created_at,
       notes: p?.notes ?? null,
       reversed: !!p?.reversed_at,
+      origem: origemDoPagamento(p),
     }
   })
 
@@ -311,7 +397,7 @@ export default async function BillingDetailPage({
   const {
     accrued, amount_due: amountDue,
     principal: principalEmAberto, late_charge_realized: jaLancado, accrued_pending: aAcrescentar,
-  } = calculateAmountDue(balance, policy)
+  } = calculateAmountDue(balance, policy, tenantToday(timezone))
   const statusCfg = STATUS_CONFIG[balance.is_overdue ? 'overdue' : balance.status] ?? STATUS_CONFIG.open
 
   // A REGRA em números que o operador reconhece: percentual ao mês como ele
@@ -347,6 +433,7 @@ export default async function BillingDetailPage({
     ? rateioDoEncargoRealizado(
         policy, balance.due_date, principalEmitido, encargoRealizado,
         payments.filter((p) => !p.reversed).map((p) => ({ paid_at: p.paid_at, amount: p.amount })),
+        timezone,
       )
     : null
 
@@ -385,6 +472,16 @@ export default async function BillingDetailPage({
   const formas = new Set(recebimentos.map((p) => p.payment_method))
   const formaUnica: string | null =
     balance.status === 'paid' && formas.size === 1 ? [...formas][0]! : null
+
+  // Desconto é item negativo (`source_module = 'discount'`), não coluna —
+  // `balance.total_amount` já vem NETO dele. O valor bruto emitido é a soma
+  // do que sobra sem os itens de desconto; sem separar os dois, "R$ 30 − R$ 5
+  // de desconto" mostraria R$ 25, quando o total já é R$ 30.
+  const discountAmount = round2(
+    -items.filter((i) => i.source_module === 'discount').reduce((sum, i) => sum + i.amount, 0),
+  )
+  const grossAmount = round2(balance.total_amount + discountAmount)
+
   const billing = {
     id: balance.charge_id,
     charge_number: balance.charge_number,
@@ -415,8 +512,8 @@ export default async function BillingDetailPage({
     cancellation_reason: charge?.cancellation_reason ?? null,
     lease_id: balance.rental_id,
     description: principalItem?.description ?? `Cobrança #${balance.charge_number}`,
-    original_amount: balance.total_amount,
-    discount_amount: 0,
+    original_amount: grossAmount,
+    discount_amount: discountAmount,
     credit_applied: 0,
     due_date: balance.due_date,
     status: balance.status,
@@ -787,6 +884,7 @@ export default async function BillingDetailPage({
                   <tr className="border-b border-divider bg-surface">
                     <th className="h-9 px-4 text-left font-medium text-fg-mute">Data</th>
                     <th className="h-9 px-4 text-left font-medium text-fg-mute">Forma</th>
+                    <th className="h-9 px-4 text-left font-medium text-fg-mute">Origem</th>
                     <th className="h-9 px-4 text-right font-medium text-fg-mute">Valor</th>
                     <th className="h-9 px-4 text-left font-medium text-fg-mute">Observação</th>
                     <th className="h-9 px-4 text-right font-medium text-fg-mute">Ações</th>
@@ -799,6 +897,22 @@ export default async function BillingDetailPage({
                           a data quebrava no meio ("24/08/2026," numa linha, "12:00" na outra). */}
                       <td className="h-9 whitespace-nowrap px-4 text-fg-soft">{fmtDatetime(p.paid_at)}</td>
                       <td className="h-9 whitespace-nowrap px-4 text-fg-mute">{PAYMENT_METHOD_LABELS[p.payment_method] ?? p.payment_method}</td>
+                      {/* Gateway e manual pedem coisas diferentes de quem confere:
+                          o primeiro tem contrapartida no extrato do provedor, o
+                          segundo depende de alguém ter digitado certo. Sem esta
+                          coluna, os dois apareciam idênticos como "PIX". */}
+                      <td className="h-9 whitespace-nowrap px-4">
+                        {p.origem.tipo === 'gateway' ? (
+                          <span className="text-fg-soft">{p.origem.label}</span>
+                        ) : (
+                          <span className="text-fg-mute">
+                            Manual
+                            {p.origem.label ? (
+                              <span className="text-fg-soft"> · {p.origem.label}</span>
+                            ) : null}
+                          </span>
+                        )}
+                      </td>
                       <td className={`h-9 px-4 text-right font-mono font-semibold ${
                         p.reversed ? 'text-fg-mute line-through' : 'text-success'
                       }`}>
@@ -918,6 +1032,7 @@ export default async function BillingDetailPage({
               status:       balance.status,
             }}
             latePolicy={policy}
+            gatewayMethod={gatewayMethod}
             customerId={billing.customer_id ?? ''}
             availableCredits={availableCredits}
             creditBalance={creditBalance}

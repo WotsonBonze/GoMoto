@@ -3,21 +3,67 @@
  * Texto final é detalhe de implementação, iterável sem mudar o contrato/schema (Spec 0012 §11.2).
  */
 
+/**
+ * A CNH tem vários números e datas parecidos (Registro × Espelho × código de
+ * segurança × RENACH; nascimento × emissão × 1ª habilitação × validade). Em
+ * teste com CNH digital real (2026-10-15) o prompt genérico anterior leu o
+ * Nº Espelho como registro em 3/3 chamadas, a letra solta ao lado de "ACC"
+ * como categoria e uma vez o Registro no lugar do CPF. Por isso cada campo é
+ * ancorado no RÓTULO impresso, e os vizinhos que confundem são nomeados.
+ * Formato/DV são conferidos depois, no código (postProcessCnhFields).
+ */
 export function buildCnhPrompt(): string {
-  return `Você está analisando uma Carteira Nacional de Habilitação (CNH) brasileira, em PDF ou foto.
-Extraia os seguintes campos exatamente como aparecem no documento:
-- name: nome completo do condutor
-- cpf: CPF (apenas os dígitos, sem pontuação)
-- rg: número do RG (ou documento de identidade equivalente)
-- birth_date: data de nascimento, no formato ISO YYYY-MM-DD
-- drivers_license: número de registro da CNH
-- drivers_license_category: categoria da habilitação (ex.: A, B, AB)
-- drivers_license_validity: data de validade da CNH, no formato ISO YYYY-MM-DD
+  return `Você está analisando uma Carteira Nacional de Habilitação (CNH) brasileira — foto do cartão
+físico ou PDF da CNH Digital (onde o cartão ocupa só parte da página; leia o cartão com atenção,
+ignore o QR code e os textos do gov.br/Serpro ao redor).
 
-Para cada campo, informe também o nível de confiança ("high" ou "low") — use "low" quando o
-texto estiver borrado, cortado, ambíguo ou você não tiver certeza da leitura. Se o campo não
+Existem dois layouts. No modelo novo (2022+) os campos têm número antes do rótulo
+(ex.: "4d CPF"); no modelo antigo os rótulos não são numerados. Cada campo abaixo indica o rótulo
+nos dois modelos. LEIA O VALOR QUE ESTÁ LOGO ABAIXO/AO LADO DO RÓTULO CERTO — a CNH tem vários
+números e datas parecidos, e o erro mais comum é pegar o valor do campo vizinho.
+
+- name: rótulo "2 e 1 NOME E SOBRENOME" (novo) ou "NOME" (antigo). Nome completo, em maiúsculas
+  como impresso. NUNCA use os nomes do campo "FILIAÇÃO" (são os pais) nem a linha de nome do
+  código MRZ no verso (que usa "<" no lugar de espaços).
+
+- cpf: rótulo "4d CPF" (novo) ou "CPF" (antigo). São exatamente 11 dígitos, impressos como
+  000.000.000-00 — devolva só os 11 dígitos. No modelo novo o CPF fica à ESQUERDA do
+  "5 Nº REGISTRO"; não troque os dois.
+
+- rg: rótulo "4c DOC IDENTIDADE / ÓRG EMISSOR / UF" (novo) ou "DOC. IDENTIDADE / ÓRG. EMISSOR / UF"
+  (antigo). O campo traz número + órgão emissor + UF juntos (ex.: "12345678 SSP SP",
+  "254954811 DETRAN RJ"). Devolva SÓ o número do documento, com letras/pontuação que façam parte
+  dele, sem o órgão emissor e sem a UF.
+
+- birth_date: rótulo "3 DATA, LOCAL E UF DE NASCIMENTO" (novo) ou "DATA NASCIMENTO" (antigo).
+  Impressa como DD/MM/AAAA (no modelo novo seguida da cidade e UF) — devolva em AAAA-MM-DD.
+
+- drivers_license: rótulo "5 Nº REGISTRO" (novo) ou "Nº REGISTRO" (antigo). São EXATAMENTE 11
+  dígitos (pode começar com zero — mantenha os zeros à esquerda). No modelo novo costuma estar
+  impresso em vermelho. NÃO confunda com:
+    • o número impresso na VERTICAL na lateral do cartão (Nº do espelho, 9–10 dígitos);
+    • o número do RENACH (começa com sigla de UF, ex.: "SP123456789");
+    • o código numérico de segurança do verso, perto de "ASSINADO DIGITALMENTE";
+    • o CPF.
+  Na CNH nova, os 9 primeiros dígitos do registro também aparecem na 1ª linha do código MRZ do
+  verso, logo depois de "I<BRA" — use isso só para conferir a leitura.
+
+- drivers_license_category: rótulo "9 CAT HAB" (novo) ou "CAT. HAB." (antigo). Valores possíveis:
+  ACC, A, B, C, D, E, AB, AC, AD, AE. Devolva exatamente um desses, sem espaços.
+  NÃO use: a letra grande e solta impressa ao lado da caixa "ACC"; a tabela de categorias do
+  verso (linhas ACC, A, A1, B, B1, C, C1, D, D1, BE, CE, C1E, DE, D1E com datas — é só a
+  equivalência internacional). Só devolva "ACC" se o campo de categoria estiver vazio e a caixa
+  "ACC" estiver preenchida.
+
+- drivers_license_validity: rótulo "4b VALIDADE" (novo) ou "VALIDADE" (antigo). Impressa como
+  DD/MM/AAAA, costuma estar em vermelho — devolva em AAAA-MM-DD. NÃO confunda com
+  "4a DATA EMISSÃO"/"DATA EMISSÃO" nem com "1ª HABILITAÇÃO".
+
+Para cada campo, informe também o nível de confiança ("high" ou "low"). Use "low" quando o texto
+estiver borrado, cortado, com reflexo ou ambíguo, quando a quantidade de dígitos não bater com a
+indicada acima, ou quando você não tiver certeza de qual rótulo o valor pertence. Se o campo não
 aparecer no documento ou não puder ser lido, retorne "value": null.
-Não invente valores. Não copie texto de outra parte do documento que não corresponda ao campo.`
+Não invente valores e não complete dígitos que não consegue ler.`
 }
 
 export function buildFineNoticePrompt(): string {

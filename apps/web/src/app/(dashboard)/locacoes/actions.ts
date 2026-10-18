@@ -1,15 +1,15 @@
 'use server'
 
 import { createClient } from '@/lib/supabase/server'
+import { createAdminClient } from '@/lib/supabase/admin'
 import { revalidatePath } from 'next/cache'
 import { z } from 'zod'
 import {
-  AdjustScheduleSchema,
+  AdjustRentalPeriodSchema,
   RentalSchema,
-  RenewRentalSchema,
   TerminateRentalSchema,
+  ReturnRemainingDepositSchema,
   RegisterPaymentSchema,
-  ApplyDiscountSchema,
   OneTimeChargeSchema,
   AddToQueueSchema,
   UploadClientDocumentSchema,
@@ -21,18 +21,15 @@ import {
   type DelinquencyFacts,
   type DelinquencyPolicy,
   isRentalTerminationWithinMinimum,
-  calculateAdjustedBillingAmount,
-  computeScheduleRegenerationCutoff,
+  planPeriodAdjustment,
   getMoveUpNote,
   getMoveDownNote,
 } from '@gomoto/core'
 import type {
   ActionResult,
   CreateRental,
-  RenewRental,
   TerminateRental,
   RegisterPayment,
-  ApplyDiscount,
   CreateOneTimeCharge,
   AddToQueue,
   UploadClientDocument,
@@ -45,10 +42,38 @@ const dateString = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Data inválida (YYYY
 import { logAction } from '@/lib/audit'
 import { createCharge, cancelCharge, receivePayment, postTransaction, dimensionsOf } from '@/lib/financial'
 import { getCurrentTenantId } from '@/lib/auth/tenant'
+import { loadPeriodAdjustmentContext } from './_lib/period-adjustment'
+import { loadTerminationPlan } from './_lib/termination-plan'
 
 function revalidateRentalPaths() {
   revalidatePath('/locacoes')
   revalidatePath('/cobrancas')
+}
+
+/**
+ * Recusa do banco quando o período cruza outra locação do mesmo veículo
+ * (ADR 0036). O trigger já manda as datas no texto; aqui só vira frase.
+ */
+function vehicleOverlapMessage(raw: string): string {
+  const detalhe = raw.split('VEHICLE_PERIOD_OVERLAP:')[1]?.trim()
+  return detalhe
+    ? `Não é possível: ${detalhe}. A moto não pode estar com dois clientes ao mesmo tempo.`
+    : 'O período cruza outra locação deste veículo. A moto não pode estar com dois clientes ao mesmo tempo.'
+}
+
+/**
+ * Recusa do banco quando o km informado é menor que o mínimo aceito
+ * (Spec 0014, RN-002/RN-003) — mesmo padrão de `vehicleOverlapMessage`.
+ */
+function kmBelowMinimumMessage(raw: string, field: 'km_initial' | 'km_final') {
+  const minimo = raw.split('minimo=')[1]?.trim()
+  return {
+    code: 'VALIDATION_ERROR' as const,
+    field,
+    message: minimo
+      ? `Km não pode ser menor que ${Number(minimo).toLocaleString('pt-BR')} (km atual do veículo).`
+      : 'Km informado é menor que o mínimo aceito.',
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -184,6 +209,9 @@ export async function createRental(
       checkin_checkout_inspection_profile_id: parsed.data.checkin_checkout_inspection_profile_id ?? null,
       periodic_inspection_profile_id:         parsed.data.periodic_inspection_profile_id ?? null,
       periodic_inspection_frequency_days:     parsed.data.periodic_inspection_frequency_days ?? null,
+      km_initial:    parsed.data.km_initial,
+      early_termination_fine_amount: parsed.data.early_termination_fine_amount ?? null,
+      minimum_term_days:             parsed.data.minimum_term_days ?? null,
     },
     p_schedule: schedule,
   })
@@ -191,6 +219,23 @@ export async function createRental(
   if (error) {
     if (error.message?.includes('VEHICLE_NOT_FOUND')) {
       return { ok: false, error: { code: 'NOT_FOUND', message: 'Veículo não encontrado.' } }
+    }
+    // ADR 0036. A RPC diz o motivo; o índice único é a garantia para qualquer
+    // outro caminho, e cai aqui como 23505.
+    if (
+      error.message?.includes('VEHICLE_ALREADY_RENTED') ||
+      (error.code === '23505' && error.message?.includes('idx_rentals_one_active_per_vehicle'))
+    ) {
+      return {
+        ok: false,
+        error: { code: 'CONFLICT', message: 'Este veículo já está em uma locação ativa. Encerre a locação atual antes de criar outra.' },
+      }
+    }
+    if (error.message?.includes('VEHICLE_PERIOD_OVERLAP')) {
+      return { ok: false, error: { code: 'CONFLICT', message: vehicleOverlapMessage(error.message) } }
+    }
+    if (error.message?.includes('KM_BELOW_MINIMUM')) {
+      return { ok: false, error: kmBelowMinimumMessage(error.message, 'km_initial') }
     }
     if (error.message?.includes('could not obtain lock')) {
       return { ok: false, error: { code: 'VEHICLE_LOCKED', message: 'Tente novamente em instantes.' } }
@@ -319,7 +364,11 @@ export async function createRental(
     action: 'create',
     table: 'rentals',
     recordId: rentalId,
-    newData: { schedule_lines: schedule.length },
+    newData: {
+      schedule_lines: schedule.length,
+      early_termination_fine_amount: parsed.data.early_termination_fine_amount ?? null,
+      minimum_term_days: parsed.data.minimum_term_days ?? null,
+    },
   })
 
   // Remove da fila ao iniciar locação (best-effort).
@@ -343,7 +392,10 @@ export async function createRental(
 
 export async function updateRental(
   leaseId: string,
-  data: Pick<CreateRental, 'observations' | 'security_deposit' | 'down_payment' | 'down_payment_due_date'>,
+  data: Pick<CreateRental,
+    | 'observations' | 'security_deposit' | 'down_payment' | 'down_payment_due_date'
+    | 'early_termination_fine_amount' | 'minimum_term_days'
+  >,
 ): Promise<ActionResult<void>> {
   const supabase = await createClient()
   const { data: { user } } = await supabase.auth.getUser()
@@ -355,14 +407,30 @@ export async function updateRental(
   const updates: Record<string, unknown> = {}
   if (data.observations !== undefined) updates.observations = data.observations
 
+  // Spec 0015 (RF-008/RN-007): multa/prazo mínimo de locação já encerrada não
+  // pode ser alterada. A guarda `status='active'` vai na MESMA instrução que
+  // grava — 0 linhas afetadas é o sinal de recusa, sem SELECT prévio que
+  // deixaria uma janela entre checar e escrever.
+  const changesFineConfig = data.early_termination_fine_amount !== undefined || data.minimum_term_days !== undefined
+  if (data.early_termination_fine_amount !== undefined) updates.early_termination_fine_amount = data.early_termination_fine_amount
+  if (data.minimum_term_days !== undefined) updates.minimum_term_days = data.minimum_term_days
+
   if (Object.keys(updates).length > 0) {
-    const { error } = await supabase
+    let query = supabase
       .from('rentals')
       .update(updates)
       .eq('id', leaseId)
       .eq('tenant_id', tenantId)
 
+    if (changesFineConfig) query = query.eq('status', 'active')
+
+    const { data: updatedRows, error } = await query.select('id')
+
     if (error) return { ok: false, error: { code: 'INTERNAL_ERROR', message: error.message } }
+
+    if (changesFineConfig && (!updatedRows || updatedRows.length === 0)) {
+      return { ok: false, error: { code: 'CONFLICT', message: 'Locação já encerrada não pode ser alterada.' } }
+    }
   }
 
   // Caução agora vive na tabela `deposits` (migration 20260719000010)
@@ -524,7 +592,17 @@ export async function updateRental(
     }
   }
 
-  await logAction({ action: 'update', table: 'rentals', recordId: leaseId })
+  await logAction({
+    action: 'update',
+    table: 'rentals',
+    recordId: leaseId,
+    newData: changesFineConfig
+      ? {
+          early_termination_fine_amount: data.early_termination_fine_amount ?? null,
+          minimum_term_days: data.minimum_term_days ?? null,
+        }
+      : undefined,
+  })
   revalidateRentalPaths()
   revalidatePath(`/locacoes/${leaseId}`)
   return { ok: true, data: undefined }
@@ -577,6 +655,18 @@ export type RentalSettlement = {
   credit_balance: number
   cancelled_schedules: number
   requires_settlement: boolean
+  /** Spec 0015 — resumo da decisão da multa por rescisão antecipada. */
+  fine_eligible: boolean
+  fine_charged: boolean
+  fine_amount: number
+  fine_deposit_amount: number
+  fine_credit_amount: number
+  fine_charge_id: string | null
+  /** Spec 0017 — totais da distribuição dirigida e saldos JÁ relidos do razão depois dela. */
+  deposit_allocated: number
+  credit_allocated: number
+  deposit_remaining: number
+  credit_remaining: number
 }
 
 export async function terminateRental(
@@ -591,7 +681,17 @@ export async function terminateRental(
 
   const parsed = TerminateRentalSchema.safeParse(data)
   if (!parsed.success) {
-    return { ok: false, error: { code: 'VALIDATION_ERROR', message: 'Dados inválidos' } }
+    // A mensagem do Zod chega ao operador: um "Dados inválidos" genérico
+    // esconderia, por exemplo, que a caução alocada exige motivo.
+    const first = parsed.error.issues[0]
+    return {
+      ok: false,
+      error: {
+        code: 'VALIDATION_ERROR',
+        message: first?.message ?? 'Dados inválidos',
+        field: first?.path?.map(String).join('.'),
+      },
+    }
   }
 
   // Determinar status de saída (rent_to_own cumprido → transferred)
@@ -612,15 +712,109 @@ export async function terminateRental(
     newStatus = 'transferred'
   }
 
+  // Spec 0016 (revisão): plano recarregado no SERVIDOR — nunca no que o
+  // client mandou — classificando toda linha viva do cronograma. Fora do
+  // período (`cancel_auto`) é SEMPRE cancelada, sem escolha do operador;
+  // dentro do período, só o que veio marcado nos dois campos "extra_*" abaixo
+  // (RF-002 revisado: decisão do operador é OPCIONAL só para o que
+  // sobreviveria por padrão — nunca silenciosa quando ele decide agir).
+  const plan = await loadTerminationPlan(
+    supabase, tenantId, parsed.data.lease_id, parsed.data.termination_date,
+  )
+
+  const extraChargeIds       = new Set(parsed.data.extra_charge_ids_to_cancel)
+  const extraScheduleLineIds = new Set(parsed.data.extra_schedule_line_ids_to_cancel)
+
+  // Cada id "extra" (dentro do período, opcional) precisa ser exatamente uma
+  // linha `keep_optional` do plano — nunca uma já bloqueada, já mantida sem
+  // opção, ou uma que nem é candidata (RN-002 como autorização de dado, não
+  // só filtro de UI).
+  for (const id of [...extraChargeIds, ...extraScheduleLineIds]) {
+    const linha = plan.find((l) => l.charge_id === id || l.schedule_line_id === id)
+    if (!linha || linha.action !== 'keep_optional') {
+      return {
+        ok: false,
+        error: {
+          code: 'TERMINATION_ITEM_NOT_CANDIDATE',
+          message: 'Uma das cobranças ou parcelas marcadas não está mais disponível para cancelamento opcional. Recarregue a tela e confira a lista de novo.',
+        },
+      }
+    }
+  }
+
+  // Cobrança já emitida a cancelar = toda `cancel_auto` (fora do período,
+  // sempre) + o que foi marcado opcionalmente (dentro do período). Cancelada
+  // ANTES da RPC, não depois: `cancelCharge` reverte a emissão no razão e
+  // recusa cobrança com pagamento ou crédito alocado (RN-001), e só depois de
+  // canceladas elas saem de `charge_balances.status='open'`, que é o que a
+  // RPC lê para apurar o valor em aberto (RF-004) e para decidir
+  // `RENTAL_HAS_OPEN_CHARGES`. Mesma ordem que `adjustRentalPeriod` já usa
+  // (ADR 0035): falha aqui aborta sem chamar a RPC — nada foi alterado no
+  // contrato.
+  const chargeIdsToCancel = plan
+    .filter((l) => l.charge_id && (l.action === 'cancel_auto' || extraChargeIds.has(l.charge_id)))
+    .map((l) => l.charge_id!)
+
+  for (const chargeId of chargeIdsToCancel) {
+    const linha = plan.find((l) => l.charge_id === chargeId)!
+    try {
+      await cancelCharge(
+        supabase, tenantId, chargeId,
+        'Encerramento retroativo do contrato',
+        user.id,
+      )
+      await logAction({
+        action: 'update',
+        table: 'charges',
+        recordId: chargeId,
+        newData: { status: 'cancelled', reason: 'rental_retroactive_termination' },
+      })
+    } catch (err) {
+      return {
+        ok: false,
+        error: {
+          code: 'INTERNAL_ERROR',
+          message: `Falha ao cancelar a cobrança #${linha.charge_number}: ${String(err)}. O encerramento não foi confirmado.`,
+        },
+      }
+    }
+  }
+
+  // Linhas ainda não emitidas, dentro do período, que o operador marcou por
+  // opção (RF-002 revisado). As de FORA do período já são cobertas pela
+  // própria RPC (comportamento inalterado: `status='scheduled' AND
+  // period_start > p_termination_date`).
+  const extraScheduleLineIdsValidadas = plan
+    .filter((l) => !l.is_issued && l.action === 'keep_optional' && extraScheduleLineIds.has(l.schedule_line_id))
+    .map((l) => l.schedule_line_id)
+
   // Spec 0014: a RPC agora APURA antes de encerrar e recusa débito em aberto
   // sem p_force. Antes, cancelava pendentes e liberava o veículo sem olhar
   // dívida nem caução (F-08).
+  //
+  // Spec 0015: a decisão da multa (cobrar? abater de quê?) entra na MESMA
+  // chamada — a RPC recalcula elegibilidade e valor a partir da própria
+  // locação e faz cobrança + abatimentos na mesma transação do encerramento
+  // (RN-009: falha parcial nunca deixa a locação encerrada com multa pela
+  // metade).
+  //
+  // Spec 0017: a distribuição dirigida de caução e crédito, dívida a dívida,
+  // entra na MESMA chamada. Qualquer recusa no meio (dívida que mudou, saldo
+  // que acabou) desfaz tudo, inclusive o encerramento (RN-006).
   const { data: settlement, error } = await supabase.rpc('terminate_rental', {
-    p_tenant_id:        tenantId,
-    p_rental_id:        parsed.data.lease_id,
-    p_termination_date: parsed.data.termination_date,
-    p_new_status:       newStatus,
-    p_force:            parsed.data.force ?? false,
+    p_tenant_id:            tenantId,
+    p_rental_id:            parsed.data.lease_id,
+    p_termination_date:     parsed.data.termination_date,
+    p_new_status:           newStatus,
+    p_force:                parsed.data.force ?? false,
+    p_km_final:             parsed.data.km_final,
+    p_charge_fine:          parsed.data.charge_fine,
+    p_fine_deposit_amount:  parsed.data.fine_deposit_amount,
+    p_fine_credit_amount:   parsed.data.fine_credit_amount,
+    p_extra_schedule_line_ids_to_cancel: extraScheduleLineIdsValidadas,
+    p_deposit_allocations:  parsed.data.deposit_allocations,
+    p_credit_allocations:   parsed.data.credit_allocations,
+    p_deposit_reason:       parsed.data.deposit_reason?.trim() || null,
   })
 
   if (error) {
@@ -636,120 +830,109 @@ export async function terminateRental(
         },
       }
     }
-    return { ok: false, error: { code: 'INTERNAL_ERROR', message: error.message } }
-  }
-
-  await logAction({ action: 'update', table: 'rentals', recordId: parsed.data.lease_id })
-  revalidateRentalPaths()
-  revalidatePath('/veiculos')
-  revalidatePath('/clientes')
-  return { ok: true, data: settlement as RentalSettlement }
-}
-
-// ---------------------------------------------------------------------------
-// renewRental — renovação com recálculo de última cobrança
-// ---------------------------------------------------------------------------
-
-export async function renewRental(
-  data: RenewRental,
-): Promise<ActionResult<void>> {
-  const supabase = await createClient()
-  const { data: { user } } = await supabase.auth.getUser()
-  if (!user) return { ok: false, error: { code: 'UNAUTHORIZED', message: 'Não autorizado' } }
-
-  const tenantId = await getCurrentTenantId(supabase)
-  if (!tenantId) return { ok: false, error: { code: 'UNAUTHORIZED', message: 'Tenant não encontrado' } }
-
-  const parsed = RenewRentalSchema.safeParse(data)
-  if (!parsed.success) {
-    return { ok: false, error: { code: 'VALIDATION_ERROR', message: 'Dados inválidos' } }
-  }
-
-  const { data: rental, error: rentalError } = await supabase
-    .from('rentals')
-    .select('cycle, due_day, cycle_amount, use_pro_rata, end_date, status')
-    .eq('id', parsed.data.lease_id)
-    .eq('tenant_id', tenantId)
-    .single()
-
-  if (rentalError || !rental) {
-    return { ok: false, error: { code: 'NOT_FOUND', message: 'Locação não encontrada.' } }
-  }
-  if (rental.status !== 'active') {
-    return { ok: false, error: { code: 'RENTAL_NOT_ACTIVE', message: 'Locação não está ativa.' } }
-  }
-
-  // Spec 0014: renovar é ACRESCENTAR linhas ao cronograma. O modelo anterior
-  // precisava reconciliar a última cobrança pro rata — atualizar se não paga,
-  // gerar complementar se paga — porque documento e plano eram a mesma coisa.
-  // Aqui nada foi emitido ainda: basta continuar o plano.
-  const { data: lastLine } = await supabase
-    .from('rental_billing_schedules')
-    .select('sequence_number, period_end')
-    .eq('rental_id', parsed.data.lease_id)
-    .eq('tenant_id', tenantId)
-    .order('sequence_number', { ascending: false })
-    .limit(1)
-    .maybeSingle()
-
-  const last = lastLine as { sequence_number: number; period_end: string } | null
-  const renewalStart = last?.period_end ?? rental.end_date
-  const offset = last?.sequence_number ?? 0
-
-  if (!rental.cycle || !rental.due_day || !rental.cycle_amount) {
-    return { ok: false, error: { code: 'VALIDATION_ERROR', message: 'Locação sem ciclo definido.' } }
-  }
-
-  const newLines = generateSchedule({
-    start_date:   renewalStart ?? rental.end_date!,
-    end_date:     parsed.data.new_end_date,
-    cycle:        rental.cycle as 'weekly' | 'monthly',
-    due_day:      rental.due_day,
-    cycle_amount: rental.cycle_amount,
-    use_pro_rata: rental.use_pro_rata ?? true,
-  })
-
-  // Estender o contrato e acrescentar as linhas é uma coisa só: linha gravada
-  // com `end_date` antigo vira cobrança emitida depois do fim da locação.
-  const { error: renewError } = await supabase.rpc('fn_renew_rental', {
-    p_tenant_id: tenantId,
-    p_rental_id: parsed.data.lease_id,
-    p_new_end:   parsed.data.new_end_date,
-    p_lines:     newLines.map((l) => ({
-      sequence_number: offset + l.sequence_number,
-      period_start:    l.period_start,
-      period_end:      l.period_end,
-      due_date:        l.due_date,
-      amount:          l.amount,
-    })),
-  })
-
-  if (renewError) {
-    if (renewError.message?.includes('RENEWAL_NOT_AN_EXTENSION')) {
+    if (error.message?.includes('KM_FINAL_REQUIRED')) {
+      return { ok: false, error: { code: 'VALIDATION_ERROR', field: 'km_final', message: 'Informe o km final.' } }
+    }
+    if (error.message?.includes('KM_BELOW_MINIMUM')) {
+      return { ok: false, error: kmBelowMinimumMessage(error.message, 'km_final') }
+    }
+    if (error.message?.includes('FINE_NOT_APPLICABLE')) {
+      return {
+        ok: false,
+        error: { code: 'CONFLICT', message: 'A multa não é mais aplicável a esta locação. Recarregue a página e tente novamente.' },
+      }
+    }
+    if (error.message?.includes('FINE_ALLOCATION_EXCEEDS_TOTAL')) {
+      return {
+        ok: false,
+        error: { code: 'VALIDATION_ERROR', field: 'fine_deposit_amount', message: 'A soma dos abatimentos não pode exceder o valor da multa.' },
+      }
+    }
+    if (error.message?.includes('AMOUNT_EXCEEDS_DEPOSIT')) {
+      return {
+        ok: false,
+        error: { code: 'VALIDATION_ERROR', field: 'deposit_allocations', message: 'A caução alocada excede o saldo disponível. Nada foi aplicado.' },
+      }
+    }
+    if (error.message?.includes('AMOUNT_EXCEEDS_BALANCE')) {
+      return {
+        ok: false,
+        error: { code: 'VALIDATION_ERROR', field: 'credit_allocations', message: 'O crédito alocado excede o saldo do cliente. Nada foi aplicado.' },
+      }
+    }
+    // Uma dívida ficou menor do que a tela mostrava (pagamento que chegou, outro
+    // operador que já baixou) e o valor alocado nela já não cabe. A RPC desfez
+    // a distribuição INTEIRA — inclusive o encerramento (RN-006/CA-011).
+    if (error.message?.includes('AMOUNT_EXCEEDS_CHARGE')) {
       return {
         ok: false,
         error: {
           code: 'VALIDATION_ERROR',
-          message: 'A nova data precisa ser posterior ao fim atual. Para encurtar o contrato, use Encerrar.',
+          field: 'deposit_allocations',
+          message: 'Uma das dívidas mudou desde que a tela carregou e o valor alocado nela já não cabe. Nada foi aplicado — recarregue a tela e refaça a distribuição.',
         },
       }
     }
-    if (renewError.message?.includes('RENTAL_NOT_FOUND')) {
-      return { ok: false, error: { code: 'NOT_FOUND', message: 'Locação não encontrada ou não está ativa.' } }
+    // Cobrança cancelada (ou quitada) por outro caminho no meio do caminho.
+    if (error.message?.includes('CHARGE_NOT_OPEN')) {
+      return {
+        ok: false,
+        error: {
+          code: 'CONFLICT',
+          message: 'Uma das dívidas deixou de estar em aberto desde que a tela carregou. Nada foi aplicado — recarregue a tela e refaça a distribuição.',
+        },
+      }
     }
-    return { ok: false, error: { code: 'INTERNAL_ERROR', message: renewError.message } }
+    // Não alcançável pela UI (a lista vem das cobranças DESTA locação): só um
+    // payload adulterado chega aqui.
+    if (error.message?.includes('CHARGE_NOT_IN_RENTAL')) {
+      return {
+        ok: false,
+        error: { code: 'FORBIDDEN', message: 'Uma das dívidas informadas não pertence a esta locação.' },
+      }
+    }
+    if (error.message?.includes('DEPOSIT_NOT_FOUND')) {
+      return {
+        ok: false,
+        error: { code: 'NOT_FOUND', field: 'fine_deposit_amount', message: 'Esta locação não tem caução em aberto para abater a multa.' },
+      }
+    }
+    console.error(JSON.stringify({
+      ts: new Date().toISOString(), level: 'error', action: 'rental.terminate_with_distribution_failed',
+      tenant_id: tenantId, rental_id: parsed.data.lease_id, charge_fine: parsed.data.charge_fine,
+      deposit_lines: parsed.data.deposit_allocations.length,
+      credit_lines: parsed.data.credit_allocations.length,
+      error: error.message,
+    }))
+    return { ok: false, error: { code: 'INTERNAL_ERROR', message: error.message } }
   }
+
+  const result = settlement as RentalSettlement
 
   await logAction({
     action: 'update',
     table: 'rentals',
     recordId: parsed.data.lease_id,
-    newData: { new_end_date: parsed.data.new_end_date, added_lines: newLines.length },
+    newData: {
+      fine_decision: {
+        charged: result.fine_charged,
+        amount: result.fine_amount,
+        deposit_amount: result.fine_deposit_amount,
+        credit_amount: result.fine_credit_amount,
+        charge_id: result.fine_charge_id,
+      },
+      // Spec 0017: quem gastou o dinheiro do cliente, em qual dívida e por quê.
+      deposit_allocations: parsed.data.deposit_allocations,
+      credit_allocations: parsed.data.credit_allocations,
+      deposit_reason: parsed.data.deposit_reason?.trim() || null,
+      deposit_allocated: result.deposit_allocated,
+      credit_allocated: result.credit_allocated,
+    },
   })
-
   revalidateRentalPaths()
-  revalidatePath(`/locacoes/${parsed.data.lease_id}`)
-  return { ok: true, data: undefined }
+  revalidatePath('/veiculos')
+  revalidatePath('/clientes')
+  return { ok: true, data: result }
 }
 
 // ---------------------------------------------------------------------------
@@ -812,97 +995,10 @@ export async function registerPayment(
   return { ok: true, data: undefined }
 }
 
-// ---------------------------------------------------------------------------
-// applyDiscount — desconto como ITEM NEGATIVO da cobrança
-// ---------------------------------------------------------------------------
-// `billings.discount_amount` deixou de existir. Desconto passa a ser um item de
-// valor negativo, o que o torna rastreável como qualquer outra composição —
-// aparece no extrato, tem origem e entra no ledger.
-
-export async function applyDiscount(
-  data: ApplyDiscount,
-): Promise<ActionResult<void>> {
-  const supabase = await createClient()
-  const { data: { user } } = await supabase.auth.getUser()
-  if (!user) return { ok: false, error: { code: 'UNAUTHORIZED', message: 'Não autorizado' } }
-
-  const tenantId = await getCurrentTenantId(supabase)
-  if (!tenantId) return { ok: false, error: { code: 'UNAUTHORIZED', message: 'Tenant não encontrado' } }
-
-  const parsed = ApplyDiscountSchema.safeParse(data)
-  if (!parsed.success) {
-    return { ok: false, error: { code: 'VALIDATION_ERROR', message: 'Dados inválidos' } }
-  }
-
-  const { data: balance } = await supabase
-    .from('charge_balances')
-    .select('charge_id, customer_id, rental_id, status, open_amount')
-    .eq('charge_id', parsed.data.billing_id)
-    .eq('tenant_id', tenantId)
-    .maybeSingle()
-
-  const b = balance as {
-    charge_id: string; customer_id: string; rental_id: string | null
-    status: string; open_amount: number
-  } | null
-
-  if (!b) return { ok: false, error: { code: 'NOT_FOUND', message: 'Cobrança não encontrada' } }
-  if (b.status !== 'open') {
-    return { ok: false, error: { code: 'CONFLICT', message: 'Só cobrança em aberto admite desconto.' } }
-  }
-  if (parsed.data.discount_amount > b.open_amount) {
-    return { ok: false, error: { code: 'VALIDATION_ERROR', message: 'Desconto maior que o saldo em aberto.' } }
-  }
-
-  const amount = -Math.abs(parsed.data.discount_amount)
-
-  const { error } = await supabase.from('charge_items').insert({
-    tenant_id: tenantId,
-    charge_id: b.charge_id,
-    description: parsed.data.discount_reason
-      ? `Desconto — ${parsed.data.discount_reason}`
-      : 'Desconto',
-    credit_account_code: ACCOUNTS.RENTAL_REVENUE,
-    quantity: 1,
-    unit_amount: amount,
-    amount,
-  })
-
-  if (error) return { ok: false, error: { code: 'INTERNAL_ERROR', message: error.message } }
-
-  // Estorna a receita na proporção do desconto.
-  try {
-    await postTransaction(supabase, tenantId, {
-      event: {
-        type: 'charge_issuance_reversed',
-        amount: Math.abs(amount),
-        debit_account: ACCOUNTS.RENTAL_REVENUE,
-        dimensions: dimensionsOf({
-          customerId: b.customer_id,
-          rentalId: b.rental_id,
-          chargeId: b.charge_id,
-        }),
-      },
-      description: 'Desconto concedido',
-      sourceModule: 'discount',
-      sourceId: b.charge_id,
-      createdBy: user.id,
-    })
-  } catch (err) {
-    return { ok: false, error: { code: 'INTERNAL_ERROR', message: String(err) } }
-  }
-
-  await logAction({
-    action: 'update',
-    table: 'charges',
-    recordId: b.charge_id,
-    newData: { discount: parsed.data.discount_amount, reason: parsed.data.discount_reason },
-  })
-
-  revalidatePath('/cobrancas')
-  revalidatePath('/locacoes')
-  return { ok: true, data: undefined }
-}
+// `applyDiscount` mudou de endereço: mora em `cobrancas/actions.ts`, como
+// `applyDiscountAction` — desconto se aplica a qualquer cobrança, não só à de
+// locação, e a Server Action fica co-localizada com a tela que a chama (ADR
+// 0002).
 
 // ---------------------------------------------------------------------------
 // createOneTimeCharge — cobrança avulsa
@@ -1207,32 +1303,28 @@ export async function createRentalWithDeposit(
 }
 
 // ---------------------------------------------------------------------------
-// applyCreditToRentalDebt — abate o crédito do cliente na dívida da locação
+// returnRemainingDeposit — devolve a sobra de caução depois da distribuição
 // ---------------------------------------------------------------------------
 
 /**
- * Abate o saldo de crédito do cliente nas cobranças EM ABERTO desta locação,
- * da mais antiga para a mais nova (ADR 0026, fase 2).
+ * Devolve em dinheiro o que sobrou da caução depois da distribuição dirigida
+ * (Spec 0017, RF-008).
  *
- * Por que orquestrar aqui em vez de uma RPC nova: a decisão de dinheiro já está
- * no banco. `fn_apply_customer_credit` trava o CLIENTE (`FOR UPDATE`), relê o
- * saldo e o que a cobrança deve, e recusa acima de qualquer um dos dois — a
- * cada chamada. O laço não decide nada; só escolhe a próxima cobrança. Dois
- * operadores abatendo ao mesmo tempo serializam no banco, e não existe o
- * ler-decidir-escrever que essa RPC nasceu para eliminar.
+ * Substitui `closeRentalFinancial`, que também retinha (agregado, da cobrança
+ * mais antiga para a mais nova). Reter agora só existe dívida a dívida, DENTRO
+ * de `terminate_rental` — e é lá também que o depósito fecha (`closed_at`).
+ * Sobrou aqui só a saída de caixa, chamada apenas quando o operador escolhe
+ * devolver; "deixar como está" não chama nada, e o saldo segue visível em
+ * `deposit_balances`.
  *
- * O que o laço NÃO dá é atomicidade entre cobranças: se a terceira falhar, as
- * duas primeiras ficam abatidas. Isso não corrompe nada — cada abatimento é um
- * par pagamento+alocação completo, com lançamento fechado —, e o operador
- * reexecuta com o saldo que sobrou. É o mesmo grão que a retenção de caução já
- * usa em `allocateWithoutCash`.
- *
- * Escopo é a LOCAÇÃO, não o cliente: quem encerra este contrato não deveria
- * consumir crédito abatendo dívida de outro contrato que segue vivo.
+ * Roda DEPOIS do encerramento, fora da transação dele: se falhar, a locação já
+ * está fechada e a mensagem da tela diz isso (tolerância herdada, PRD 0017).
+ * O limite do saldo é conferido aqui porque dinheiro que sai do caixa não pode
+ * depender só da tela.
  */
-export async function applyCreditToRentalDebt(
+export async function returnRemainingDeposit(
   input: unknown,
-): Promise<ActionResult<{ applied: number; charges: number }>> {
+): Promise<ActionResult<{ returned: number }>> {
   const supabase = await createClient()
   const { data: { user } } = await supabase.auth.getUser()
   if (!user) return { ok: false, error: { code: 'UNAUTHORIZED', message: 'Não autorizado' } }
@@ -1240,80 +1332,86 @@ export async function applyCreditToRentalDebt(
   const tenantId = await getCurrentTenantId(supabase)
   if (!tenantId) return { ok: false, error: { code: 'UNAUTHORIZED', message: 'Tenant não encontrado' } }
 
-  const parsed = z.object({
-    rental_id:   z.string().uuid(),
-    customer_id: z.string().uuid(),
-    /** Teto pedido pela tela. O saldo real ainda manda — quem confere é o banco. */
-    amount:      z.number().positive(),
-  }).safeParse(input)
-
+  const parsed = ReturnRemainingDepositSchema.safeParse(input)
   if (!parsed.success) {
-    return { ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.issues[0]?.message ?? 'Dados inválidos' } }
+    const first = parsed.error.issues[0]
+    return { ok: false, error: { code: 'VALIDATION_ERROR', message: first?.message ?? 'Dados inválidos', field: first?.path?.map(String).join('.') } }
   }
 
-  const { data: rows, error } = await supabase
-    .from('charge_balances')
-    .select('charge_id, open_amount')
+  // Devolver a caução de um contrato que segue ativo deixaria a locação sem
+  // garantia: só depois do encerramento.
+  const { data: rentalRow } = await supabase
+    .from('rentals')
+    .select('status')
+    .eq('id', parsed.data.rental_id)
     .eq('tenant_id', tenantId)
+    .maybeSingle()
+
+  if (!rentalRow) return { ok: false, error: { code: 'NOT_FOUND', message: 'Locação não encontrada' } }
+  if ((rentalRow as { status: string }).status === 'active') {
+    return { ok: false, error: { code: 'CONFLICT', message: 'A locação ainda está ativa — encerre antes de devolver a caução.' } }
+  }
+
+  // Sem filtrar `closed_at`: `terminate_rental` já fechou o depósito.
+  const { data: deposit } = await supabase
+    .from('deposits')
+    .select('id, customer_id')
     .eq('rental_id', parsed.data.rental_id)
-    .eq('customer_id', parsed.data.customer_id)
-    .eq('status', 'open')
-    .gt('open_amount', 0)
-    .order('due_date', { ascending: true })
+    .eq('tenant_id', tenantId)
+    .order('created_at', { ascending: false })
+    .limit(1)
+    .maybeSingle()
 
-  if (error) return { ok: false, error: { code: 'INTERNAL', message: error.message } }
+  const dep = deposit as { id: string; customer_id: string } | null
+  if (!dep) return { ok: false, error: { code: 'NOT_FOUND', message: 'Caução não encontrada para esta locação' } }
 
-  let restante = Math.round(parsed.data.amount * 100) / 100
-  let aplicado = 0
-  let cobrancas = 0
+  // Saldo vem do RAZÃO, não de coluna (F-08).
+  const { data: balanceRow } = await supabase
+    .from('deposit_balances')
+    .select('balance')
+    .eq('rental_id', parsed.data.rental_id)
+    .maybeSingle()
 
-  for (const row of (rows ?? []) as { charge_id: string; open_amount: number }[]) {
-    if (restante <= 0) break
-
-    const parcela = Math.round(Math.min(restante, row.open_amount) * 100) / 100
-    if (parcela <= 0) continue
-
-    const { error: rpcError } = await supabase.rpc('fn_apply_customer_credit', {
-      p_tenant_id:   tenantId,
-      p_customer_id: parsed.data.customer_id,
-      p_charge_id:   row.charge_id,
-      p_amount:      parcela,
-      p_created_by:  user.id,
-    })
-
-    if (rpcError) {
-      // Saldo acabou antes do previsto (outro operador abateu no meio): o que
-      // já foi aplicado vale, e a mensagem diz onde parou.
-      const semSaldo = rpcError.message.includes('AMOUNT_EXCEEDS_BALANCE')
-      return {
-        ok: false,
-        error: {
-          code: semSaldo ? 'CONFLICT' : 'INTERNAL',
-          message: semSaldo
-            ? `Abatido ${formatBRL(aplicado)} antes de o saldo de crédito acabar. Confira o saldo do cliente.`
-            : rpcError.message,
-        },
-      }
+  const balance = (balanceRow as { balance: number } | null)?.balance ?? 0
+  if (parsed.data.amount > balance) {
+    return {
+      ok: false,
+      error: {
+        code: 'VALIDATION_ERROR',
+        field: 'amount',
+        message: `O valor a devolver (${formatBRL(parsed.data.amount)}) excede o saldo da caução (${formatBRL(balance)}).`,
+      },
     }
-
-    aplicado = Math.round((aplicado + parcela) * 100) / 100
-    restante = Math.round((restante - parcela) * 100) / 100
-    cobrancas += 1
   }
 
-  if (aplicado > 0) {
-    await logAction({
-      action: 'update',
-      table: 'customer_credits',
-      recordId: parsed.data.customer_id,
-      newData: { rental_id: parsed.data.rental_id, applied: aplicado, charges: cobrancas },
+  try {
+    await postTransaction(supabase, tenantId, {
+      event: {
+        type: 'deposit_returned',
+        amount: parsed.data.amount,
+        dimensions: dimensionsOf({ customerId: dep.customer_id, rentalId: parsed.data.rental_id }),
+      },
+      description: 'Devolução de caução',
+      sourceModule: 'deposit',
+      sourceId: dep.id,
+      createdBy: user.id,
     })
-    revalidatePath('/cobrancas')
-    revalidatePath('/clientes')
-    revalidatePath('/financeiro')
+  } catch (err) {
+    console.error(JSON.stringify({
+      ts: new Date().toISOString(), level: 'error', action: 'rental.return_remaining_deposit_failed',
+      tenant_id: tenantId, rental_id: parsed.data.rental_id, error: String(err),
+    }))
+    return { ok: false, error: { code: 'INTERNAL_ERROR', message: String(err) } }
   }
 
-  return { ok: true, data: { applied: aplicado, charges: cobrancas } }
+  await logAction({
+    action: 'update',
+    table: 'deposits',
+    recordId: dep.id,
+    newData: { returned_amount: parsed.data.amount, return_date: parsed.data.return_date },
+  })
+  revalidateRentalPaths()
+  return { ok: true, data: { returned: parsed.data.amount } }
 }
 
 /** R$ 1.234,56 — só para mensagem de erro; a formatação da UI vive na UI. */
@@ -1322,197 +1420,21 @@ function formatBRL(v: number): string {
 }
 
 // ---------------------------------------------------------------------------
-// closeRentalFinancial — encerramento financeiro (caução) de uma locação
+// adjustRentalPeriod — ajuste de período e condições (ADR 0035)
 // ---------------------------------------------------------------------------
-
-const CloseRentalFinancialSchema = z.discriminatedUnion('deposit_action', [
-  z.object({ rental_id: uuid(), deposit_action: z.literal('full_return'), return_date: dateString }),
-  z.object({ rental_id: uuid(), deposit_action: z.literal('partial_return'), returned_amount: z.number().positive(), retained_amount: z.number().positive(), retention_reason: z.string().min(5), return_date: dateString }),
-  z.object({ rental_id: uuid(), deposit_action: z.literal('full_retention'), retention_reason: z.string().min(5) }),
-  z.object({ rental_id: uuid(), deposit_action: z.literal('none') }),
-])
-
-export async function closeRentalFinancial(
-  input: unknown,
-): Promise<ActionResult<{ complementary_billing_needed: boolean; shortfall_amount?: number }>> {
-  const supabase = await createClient()
-  const { data: { user } } = await supabase.auth.getUser()
-  if (!user) return { ok: false, error: { code: 'UNAUTHORIZED', message: 'Não autorizado' } }
-
-  const tenantId = await getCurrentTenantId(supabase)
-  if (!tenantId) return { ok: false, error: { code: 'UNAUTHORIZED', message: 'Tenant não encontrado' } }
-
-  const parsed = CloseRentalFinancialSchema.safeParse(input)
-  if (!parsed.success) {
-    const first = parsed.error.issues[0]
-    return { ok: false, error: { code: 'VALIDATION_ERROR', message: first?.message ?? 'Dados inválidos', field: first?.path?.map(String).join('.') } }
-  }
-
-  if (parsed.data.deposit_action === 'none') {
-    return { ok: true, data: { complementary_billing_needed: false } }
-  }
-
-  // Saldo da caução vem do LEDGER, não de coluna: `deposits.balance` era
-  // mutável e nunca era atualizado (F-08). deposit_movements desaparece —
-  // movimento de caução é transação no ledger.
-  const { data: deposit } = await supabase
-    .from('deposits')
-    .select('id, amount, customer_id')
-    .eq('rental_id', parsed.data.rental_id)
-    .eq('tenant_id', tenantId)
-    .is('closed_at', null)
-    .limit(1)
-    .maybeSingle()
-
-  const dep = deposit as { id: string; amount: number; customer_id: string } | null
-  if (!dep) return { ok: false, error: { code: 'NOT_FOUND', message: 'Caução não encontrada para esta locação' } }
-
-  const { data: balanceRow } = await supabase
-    .from('deposit_balances')
-    .select('balance')
-    .eq('rental_id', parsed.data.rental_id)
-    .maybeSingle()
-
-  const balance = (balanceRow as { balance: number } | null)?.balance ?? 0
-  if (balance <= 0) {
-    return { ok: false, error: { code: 'CONFLICT', message: 'Caução sem saldo a movimentar.' } }
-  }
-
-  const now = new Date().toISOString()
-  /** Capturado fora da closure: dentro dela o TS não estreita o union do Zod. */
-  const rentalId = parsed.data.rental_id
-  const dims = dimensionsOf({
-    customerId: dep.customer_id,
-    rentalId: parsed.data.rental_id,
-  })
-
-  async function settle(returned: number, retained: number, reason: string | null) {
-    // Retenção: o passivo com o cliente vira quitação de dívida dele.
-    //
-    // ADR 0026, fase 3 — reter é abater, e só existe contra dívida. Antes daqui
-    // saía um `deposit_retained` pelo valor inteiro mais `allocateWithoutCash`,
-    // cujo `unallocated` era ignorado: sem dívida suficiente, sobrava
-    // `contas_a_receber` creditado sem contrapartida e um `payments` sem
-    // alocação. Agora quem lança é `fn_retain_deposit_on_charge`, uma cobrança
-    // por chamada, com a guarda no banco — este laço só escolhe a próxima.
-    if (retained > 0) {
-      const { data: abertas, error: abertasError } = await supabase
-        .from('charge_balances')
-        .select('charge_id, open_amount')
-        .eq('tenant_id', tenantId!)
-        .eq('customer_id', dep!.customer_id)
-        .eq('status', 'open')
-        .gt('open_amount', 0)
-        .order('due_date', { ascending: true })
-
-      if (abertasError) throw new Error(abertasError.message)
-
-      let restante = Math.round(retained * 100) / 100
-
-      for (const row of (abertas ?? []) as { charge_id: string; open_amount: number }[]) {
-        if (restante <= 0) break
-
-        const parcela = Math.round(Math.min(restante, row.open_amount) * 100) / 100
-        if (parcela <= 0) continue
-
-        const { error: rpcError } = await supabase.rpc('fn_retain_deposit_on_charge', {
-          p_tenant_id:  tenantId!,
-          p_rental_id:  rentalId,
-          p_charge_id:  row.charge_id,
-          p_amount:     parcela,
-          p_reason:     reason ? `Retenção de caução — ${reason}` : 'Retenção de caução',
-          p_created_by: user!.id,
-        })
-
-        if (rpcError) throw new Error(rpcError.message)
-        restante = Math.round((restante - parcela) * 100) / 100
-      }
-
-      // Sobrou retenção sem dívida onde pousar. Falhar aqui é o ponto: antes
-      // esse resto virava recebível sem lastro, calado.
-      if (restante > 0) {
-        throw new Error(
-          `Retenção de ${formatBRL(restante)} sem dívida para abater. `
-          + 'Lance a despesa (avaria, diária em aberto) com rateio ao cliente para gerar a cobrança, '
-          + 'ou devolva a caução.',
-        )
-      }
-    }
-    // Devolução: sai do caixa e zera o passivo.
-    if (returned > 0) {
-      await postTransaction(supabase, tenantId!, {
-        event: { type: 'deposit_returned', amount: returned, dimensions: dims },
-        description: 'Devolução de caução',
-        sourceModule: 'deposit',
-        sourceId: dep!.id,
-        createdBy: user!.id,
-      })
-    }
-  }
-
-  try {
-    if (parsed.data.deposit_action === 'full_return') {
-      await settle(balance, 0, null)
-      await supabase.from('deposits').update({ closed_at: now }).eq('id', dep.id).eq('tenant_id', tenantId)
-      await logAction({ action: 'update', table: 'deposits', recordId: dep.id, newData: { returned: balance } })
-      revalidateRentalPaths()
-      return { ok: true, data: { complementary_billing_needed: false } }
-    }
-
-    if (parsed.data.deposit_action === 'full_retention') {
-      await settle(0, balance, parsed.data.retention_reason ?? null)
-      await supabase.from('deposits').update({ closed_at: now }).eq('id', dep.id).eq('tenant_id', tenantId)
-      await logAction({ action: 'update', table: 'deposits', recordId: dep.id, newData: { retained: balance } })
-      revalidateRentalPaths()
-      return { ok: true, data: { complementary_billing_needed: false } }
-    }
-
-    // partial_return
-    const { returned_amount, retained_amount, retention_reason } = parsed.data
-    const totalHandled = returned_amount + retained_amount
-    const shortfall = Math.max(0, totalHandled - balance)
-
-    if (totalHandled > balance) {
-      return {
-        ok: false,
-        error: { code: 'VALIDATION_ERROR', message: `Total movimentado excede o saldo da caução (${balance}).` },
-      }
-    }
-
-    await settle(returned_amount, retained_amount, retention_reason ?? null)
-    await supabase.from('deposits').update({ closed_at: now }).eq('id', dep.id).eq('tenant_id', tenantId)
-
-    await logAction({
-      action: 'update',
-      table: 'deposits',
-      recordId: dep.id,
-      newData: { returned_amount, retained_amount },
-    })
-    revalidateRentalPaths()
-    return {
-      ok: true,
-      data: { complementary_billing_needed: shortfall > 0, shortfall_amount: shortfall > 0 ? shortfall : undefined },
-    }
-  } catch (err) {
-    return { ok: false, error: { code: 'INTERNAL_ERROR', message: String(err) } }
-  }
-}
-
-// ---------------------------------------------------------------------------
-// adjustRentalSchedule — reajuste sobre o CRONOGRAMA (Spec 0014 / ADR 0024)
-// ---------------------------------------------------------------------------
-// A reversão da ADR 0009 simplifica drasticamente este fluxo. Antes existiam
-// duas operações: `adjustRental`, que reescrevia o valor de billings emitidos,
-// e `regenerateRentalSchedule`, que cancelava documentos pendentes e regerava
-// — porque o cronograma e o documento eram a mesma coisa.
+// Absorve `renewRental` (só esticava o fim, e recusava encurtar) e
+// `adjustRentalSchedule` (só mudava o valor). Os dois eram recortes do mesmo
+// ato: mudar as condições do contrato e regerar o plano a partir de uma
+// fronteira.
 //
-// Agora o reajuste toca apenas linhas `scheduled`. Período já emitido é
-// documento imutável (Princípio 5): ajustá-lo exige cobrança complementar ou
-// renegociação, nunca reescrita.
+// A decisão de o que cai, o que é cancelado e o que nasce está em
+// `planPeriodAdjustment` — função pura, a MESMA que desenha a prévia na tela.
+// O operador confirma exatamente o que vai acontecer, não uma estimativa
+// paralela.
 
-export async function adjustRentalSchedule(
+export async function adjustRentalPeriod(
   input: unknown,
-): Promise<ActionResult<{ updated_lines: number }>> {
+): Promise<ActionResult<{ superseded: number; created: number; cancelled: number }>> {
   const supabase = await createClient()
   const { data: { user } } = await supabase.auth.getUser()
   if (!user) return { ok: false, error: { code: 'UNAUTHORIZED', message: 'Não autorizado' } }
@@ -1520,7 +1442,7 @@ export async function adjustRentalSchedule(
   const tenantId = await getCurrentTenantId(supabase)
   if (!tenantId) return { ok: false, error: { code: 'UNAUTHORIZED', message: 'Tenant não encontrado' } }
 
-  const parsed = AdjustScheduleSchema.safeParse(input)
+  const parsed = AdjustRentalPeriodSchema.safeParse(input)
   if (!parsed.success) {
     const first = parsed.error.issues[0]
     return {
@@ -1533,34 +1455,171 @@ export async function adjustRentalSchedule(
     }
   }
 
-  const { data: count, error } = await supabase.rpc('adjust_rental_schedule', {
-    p_tenant_id:      tenantId,
-    p_rental_id:      parsed.data.rental_id,
-    p_new_amount:     parsed.data.new_amount,
-    p_effective_from: parsed.data.effective_from,
-    p_justification:  parsed.data.justification,
-    p_adjusted_by:    user.id,
+  const ctx = await loadPeriodAdjustmentContext(supabase, tenantId, parsed.data.rental_id)
+  if (!ctx) return { ok: false, error: { code: 'NOT_FOUND', message: 'Locação não encontrada ou sem ciclo definido.' } }
+  if (ctx.rental.status !== 'active') {
+    return { ok: false, error: { code: 'RENTAL_NOT_ACTIVE', message: 'Locação não está ativa.' } }
+  }
+
+  const plan = planPeriodAdjustment({
+    current:        ctx.rental.params,
+    next: {
+      start_date:   parsed.data.start_date,
+      end_date:     parsed.data.end_date,
+      cycle:        parsed.data.cycle,
+      due_day:      parsed.data.due_day,
+      cycle_amount: parsed.data.cycle_amount,
+      use_pro_rata: parsed.data.use_pro_rata,
+    },
+    contract_type:  ctx.rental.contract_type,
+    lines:          ctx.lines,
+    charges:        ctx.charges,
+    effective_from: parsed.data.effective_from,
+    today:          ctx.today,
+    has_signed_contract: !!ctx.rental.signed_contract_path,
+    other_rentals:  ctx.other_rentals,
+  })
+
+  // Reconferido no servidor sobre o estado ATUAL do banco, não sobre o que a
+  // tela leu: entre a prévia e o clique cabe o job de emissão e um webhook de
+  // pagamento.
+  if (plan.blockers.length > 0) {
+    return { ok: false, error: { code: 'CONFLICT', message: plan.blockers[0]!.message } }
+  }
+  if (plan.changed_fields.length === 0) {
+    return { ok: false, error: { code: 'VALIDATION_ERROR', message: 'Nenhuma condição foi alterada.' } }
+  }
+
+  // Cancelar antes de mexer no plano, e não depois: `cancelCharge` estorna o
+  // lançamento de emissão no razão e encerra o código de pagamento no gateway,
+  // e recusa cobrança com dinheiro alocado. Falha aqui deixa o contrato como
+  // estava — o plano só muda no passo seguinte, que reconfere.
+  for (const charge of plan.cancel_charges) {
+    try {
+      await cancelCharge(
+        supabase, tenantId, charge.charge_id,
+        `Ajuste de período da locação: ${parsed.data.justification}`,
+        user.id,
+      )
+      await logAction({
+        action: 'update',
+        table: 'charges',
+        recordId: charge.charge_id,
+        newData: { status: 'cancelled', reason: 'rental_period_adjustment' },
+      })
+    } catch (err) {
+      return {
+        ok: false,
+        error: {
+          code: 'INTERNAL_ERROR',
+          message: `Falha ao cancelar a cobrança #${charge.charge_number}: ${String(err)}. Nada foi alterado no contrato.`,
+        },
+      }
+    }
+  }
+
+  const { data: result, error } = await supabase.rpc('fn_adjust_rental_period', {
+    p_tenant_id:          tenantId,
+    p_rental_id:          parsed.data.rental_id,
+    p_params: {
+      start_date:   parsed.data.start_date,
+      end_date:     parsed.data.end_date,
+      cycle:        parsed.data.cycle,
+      due_day:      parsed.data.due_day,
+      cycle_amount: parsed.data.cycle_amount,
+      use_pro_rata: parsed.data.use_pro_rata,
+    },
+    p_effective_from:     parsed.data.effective_from,
+    p_supersede_line_ids: plan.supersede_lines.map((l) => l.id),
+    p_new_lines:          plan.new_lines.map((l) => ({
+      sequence_number: l.sequence_number,
+      period_start:    l.period_start,
+      period_end:      l.period_end,
+      due_date:        l.due_date,
+      amount:          l.amount,
+    })),
+    p_justification:      parsed.data.justification,
+    p_adjusted_by:        user.id,
   })
 
   if (error) {
-    if (error.message?.includes('RENTAL_NOT_FOUND')) {
-      return { ok: false, error: { code: 'NOT_FOUND', message: 'Locação não encontrada.' } }
+    if (error.message?.includes('RENTAL_NOT_ACTIVE')) {
+      return { ok: false, error: { code: 'RENTAL_NOT_ACTIVE', message: 'Locação não está ativa.' } }
+    }
+    if (error.message?.includes('VEHICLE_PERIOD_OVERLAP')) {
+      return { ok: false, error: { code: 'CONFLICT', message: vehicleOverlapMessage(error.message) } }
+    }
+    if (error.message?.includes('LINE_HAS_LIVE_CHARGE')) {
+      return {
+        ok: false,
+        error: {
+          code: 'CONFLICT',
+          message: 'Uma cobrança do período foi emitida enquanto você preenchia o formulário. Recarregue a tela e confira a prévia de novo.',
+        },
+      }
     }
     return { ok: false, error: { code: 'INTERNAL_ERROR', message: error.message } }
   }
 
-  const updated = (count as number | null) ?? 0
+  const summary = (result ?? { superseded: 0, created: 0, cancelled: 0, new_lines: [] }) as {
+    superseded: number; created: number; cancelled: number
+    new_lines: Array<{ id: string; sequence_number: number }>
+  }
+
+  // Parcela nova cujo período já começou (`emits_now`) só vira cobrança na
+  // próxima rodada do cron (06h em Brasília) — sem isto, um ajuste
+  // retroativo (comum: erro de data descoberto dias depois) deixava o
+  // operador esperando até o dia seguinte por uma cobrança que ele acabou de
+  // criar. Escopado às linhas que ESTE ajuste criou (por `sequence_number`,
+  // única por locação — não por posição no array, que `jsonb_array_elements`
+  // não garante preservar em `RETURNING`): emitir o tenant inteiro aqui
+  // acoplaria esta ação à fila inteira e, pior, uma cobrança de OUTRA locação
+  // falhando no meio do laço de `issue_due_charges` desfaria a transação
+  // inteira — inclusive a cobrança que este ajuste acabou de criar.
+  //
+  // `fn_issue_charges_for_tenant` tem EXECUTE revogado de `authenticated` de
+  // propósito (só quem passa por `service_role` — cron ou disparo manual com
+  // `CRON_SECRET` — deveria emitir), então esta chamada usa
+  // `createAdminClient()` (ADR 0034), o mesmo papel que a rota de disparo
+  // manual já usa. Best-effort: a emissão já reconfere sozinha o que ainda
+  // cabe emitir, então uma falha aqui não desfaz o ajuste (já commitado) —
+  // só significa que a linha espera o cron normal, como sempre esperou.
+  const idsParaEmitirAgora = plan.new_lines
+    .filter((l) => l.emits_now)
+    .map((l) => summary.new_lines.find((n) => n.sequence_number === l.sequence_number)?.id)
+    .filter((id): id is string => !!id)
+
+  if (idsParaEmitirAgora.length > 0) {
+    const { error: issueError } = await createAdminClient().rpc('fn_issue_charges_for_tenant', {
+      p_tenant_id: tenantId,
+      p_lead_days: 0,
+      p_schedule_line_ids: idsParaEmitirAgora,
+    })
+    if (issueError) {
+      console.error('adjustRentalPeriod: emissão imediata falhou, aguardando o cron', issueError.message)
+    }
+  }
 
   await logAction({
     action: 'update',
-    table: 'rental_billing_schedules',
+    table: 'rentals',
     recordId: parsed.data.rental_id,
-    newData: { new_amount: parsed.data.new_amount, updated_lines: updated },
+    oldData: ctx.rental.params,
+    newData: {
+      start_date:   parsed.data.start_date,
+      end_date:     parsed.data.end_date,
+      cycle:        parsed.data.cycle,
+      due_day:      parsed.data.due_day,
+      cycle_amount: parsed.data.cycle_amount,
+      use_pro_rata: parsed.data.use_pro_rata,
+      effective_from: parsed.data.effective_from,
+      ...summary,
+    },
   })
 
   revalidateRentalPaths()
   revalidatePath(`/locacoes/${parsed.data.rental_id}`)
   revalidatePath(`/locacoes/${parsed.data.rental_id}/financeiro`)
-  return { ok: true, data: { updated_lines: updated } }
+  revalidatePath('/veiculos')
+  return { ok: true, data: summary }
 }
-

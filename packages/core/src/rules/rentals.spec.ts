@@ -5,11 +5,15 @@ import {
   isRentalTerminationWithinMinimum,
   calculateMinimumEndDateForRental,
   getEarlyTerminationImpact,
+  isWithinConfiguredMinimumTerm,
   calculateAdjustedBillingAmount,
   previewRentalAdjustment,
   computeScheduleRegenerationCutoff,
   previewScheduleRegeneration,
   RENTAL_MINIMUM_DURATION,
+  rentalPeriodsOverlap,
+  displayPeriodEnd,
+  minimumFinalKm,
 } from './rentals'
 import { RentalSchema, RenewRentalSchema, TerminateRentalSchema } from '../schemas/rentals'
 import type { CycleCharge } from './rentals'
@@ -144,6 +148,13 @@ describe('generateCycleCharges — mensal', () => {
 // ---------------------------------------------------------------------------
 
 describe('generateCycleCharges — semanal', () => {
+  // Estes dois casos contavam VENCIMENTOS ("4 segundas dentro do período"),
+  // não PERÍODOS. O contrato começa numa segunda e vence na segunda, então o
+  // primeiro vencimento coincide com o início: a cobrança que ele gerava
+  // cobria de 06/01 a 06/01 — zero dia — pelo valor cheio. Eram R$ 400 por
+  // 3 semanas de uso. A unidade é o período entre dois vencimentos, e é assim
+  // que o ramo com pro rata sempre contou.
+
   it('gera cobranças semanais sem pro rata', () => {
     // due_day 1 = Segunda. Início: 2025-01-06 (Seg), fim: 2025-01-28 (Ter)
     const charges = generateCycleCharges({
@@ -154,9 +165,10 @@ describe('generateCycleCharges — semanal', () => {
       cycle_amount: 100,
       use_pro_rata: false,
     })
-    // Segundas: 06, 13, 20, 27 — 4 vencimentos dentro do período
-    expect(charges).toHaveLength(4)
+    // Períodos fechados: 06→13, 13→20, 20→27. A ponta 27→28 é ignorada (RN-011).
+    expect(charges).toHaveLength(3)
     expect(charges.every((c) => c.amount === 100)).toBe(true)
+    expect(charges.every((c) => c.period_end > c.period_start)).toBe(true)
   })
 
   it('vencimentos são todas as segundas-feiras', () => {
@@ -168,8 +180,21 @@ describe('generateCycleCharges — semanal', () => {
       cycle_amount: 100,
       use_pro_rata: false,
     })
-    const expectedDates = ['2025-01-06', '2025-01-13', '2025-01-20', '2025-01-27']
+    const expectedDates = ['2025-01-13', '2025-01-20', '2025-01-27']
     expect(charges.map((c) => c.due_date)).toEqual(expectedDates)
+  })
+
+  it('os dois ramos cobram os mesmos ciclos cheios', () => {
+    const base = {
+      start_date: '2025-01-06', end_date: '2025-01-28',
+      cycle: 'weekly' as const, due_day: 1, cycle_amount: 100,
+    }
+    const semProRata = generateCycleCharges({ ...base, use_pro_rata: false })
+    const comProRata = generateCycleCharges({ ...base, use_pro_rata: true })
+
+    // A diferença entre os dois é só a ponta final proporcional — antes era
+    // também uma cobrança inteira a mais no começo.
+    expect(comProRata.filter((c) => c.amount === 100)).toHaveLength(semProRata.length)
   })
 
   it('due_day 7 (domingo) funciona corretamente', () => {
@@ -245,7 +270,36 @@ describe('calculateMinimumEndDateForRental', () => {
 })
 
 // ---------------------------------------------------------------------------
-// getEarlyTerminationImpact
+// isWithinConfiguredMinimumTerm (Spec 0015)
+// ---------------------------------------------------------------------------
+
+describe('isWithinConfiguredMinimumTerm', () => {
+  it('true quando hoje é anterior a start_date + minimum_term_days', () => {
+    const today = new Date('2026-02-01')
+    expect(isWithinConfiguredMinimumTerm({ start_date: '2026-01-01', minimum_term_days: 90 }, today)).toBe(true)
+  })
+
+  it('false exatamente na data-limite (start_date + minimum_term_days) — CA-006', () => {
+    // T00:00:00 explícito: sem ele, "2026-04-01" é parseado como UTC e vira
+    // 31/03 no horário de Brasília — o mesmo cuidado de parseIsoDate().
+    const today = new Date('2026-04-01T00:00:00') // 2026-01-01 + 90 dias
+    expect(isWithinConfiguredMinimumTerm({ start_date: '2026-01-01', minimum_term_days: 90 }, today)).toBe(false)
+  })
+
+  it('false depois da data-limite', () => {
+    const today = new Date('2026-05-01')
+    expect(isWithinConfiguredMinimumTerm({ start_date: '2026-01-01', minimum_term_days: 90 }, today)).toBe(false)
+  })
+
+  it('false quando minimum_term_days é null/undefined (RN-003)', () => {
+    const today = new Date('2026-01-15')
+    expect(isWithinConfiguredMinimumTerm({ start_date: '2026-01-01', minimum_term_days: null }, today)).toBe(false)
+    expect(isWithinConfiguredMinimumTerm({ start_date: '2026-01-01', minimum_term_days: undefined }, today)).toBe(false)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// getEarlyTerminationImpact (Spec 0015: fine/prazo mínimo por locação)
 // ---------------------------------------------------------------------------
 
 describe('getEarlyTerminationImpact', () => {
@@ -255,30 +309,44 @@ describe('getEarlyTerminationImpact', () => {
     { due_date: '2025-03-10', status: 'pending' },
     { due_date: '2025-04-10', status: 'pending' },
   ]
+  const fineConfig = { early_termination_fine_amount: 1000, minimum_term_days: 90 }
 
   it('conta cobranças vencidas e futuras corretamente', () => {
     const today = new Date('2025-02-15')
-    const impact = getEarlyTerminationImpact(charges, today, '2025-01-01', 'rental')
+    const impact = getEarlyTerminationImpact(charges, today, '2025-01-01', fineConfig)
     // jan/10 e fev/10 são passadas; mar/10 e abr/10 são futuras
     expect(impact.overdue_count).toBe(2)
     expect(impact.future_count).toBe(2)
   })
 
-  it('within_minimum = true se dentro do período mínimo (rental)', () => {
-    const today = new Date('2025-02-15')  // 45 dias, < 3 meses
-    const impact = getEarlyTerminationImpact(charges, today, '2025-01-01', 'rental')
+  it('within_minimum = true e fine_amount = valor configurado, dentro do prazo', () => {
+    const today = new Date('2025-02-15')  // 45 dias, < 90
+    const impact = getEarlyTerminationImpact(charges, today, '2025-01-01', fineConfig)
     expect(impact.within_minimum).toBe(true)
+    expect(impact.fine_amount).toBe(1000)
   })
 
-  it('fine_amount > 0 quando within_minimum = true', () => {
+  it('fine_amount = 0 quando fora do prazo mínimo, mesmo com config', () => {
+    const today = new Date('2025-05-01')  // > 90 dias
+    const impact = getEarlyTerminationImpact(charges, today, '2025-01-01', fineConfig)
+    expect(impact.within_minimum).toBe(false)
+    expect(impact.fine_amount).toBe(0)
+  })
+
+  it('fine_amount = 0 quando não há multa configurada, mesmo dentro do prazo (RN-003)', () => {
     const today = new Date('2025-02-15')
-    const impact = getEarlyTerminationImpact(charges, today, '2025-01-01', 'rental')
-    expect(impact.fine_amount).toBeGreaterThan(0)
+    const impact = getEarlyTerminationImpact(charges, today, '2025-01-01', {
+      early_termination_fine_amount: null, minimum_term_days: 90,
+    })
+    expect(impact.fine_amount).toBe(0)
   })
 
-  it('fine_amount = 0 quando beyond minimum period', () => {
-    const today = new Date('2025-05-01')  // > 3 meses
-    const impact = getEarlyTerminationImpact(charges, today, '2025-01-01', 'rental')
+  it('fine_amount = 0 quando não há prazo mínimo configurado (RN-003)', () => {
+    const today = new Date('2025-02-15')
+    const impact = getEarlyTerminationImpact(charges, today, '2025-01-01', {
+      early_termination_fine_amount: 1000, minimum_term_days: null,
+    })
+    expect(impact.within_minimum).toBe(false)
     expect(impact.fine_amount).toBe(0)
   })
 })
@@ -298,6 +366,7 @@ describe('RentalSchema', () => {
     start_date:     '2025-01-01',
     end_date:       '2025-12-01',
     use_pro_rata:   true,
+    km_initial:     8000,
   }
 
   it('valida dados corretos', () => {
@@ -323,6 +392,27 @@ describe('RentalSchema', () => {
   it('rejeita contract_type inválido', () => {
     const result = RentalSchema.safeParse({ ...validRental, contract_type: 'loyalty' })
     expect(result.success).toBe(false)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// minimumFinalKm (Spec 0014, RN-002 + RN-003)
+// ---------------------------------------------------------------------------
+
+describe('minimumFinalKm', () => {
+  it('retorna o km do veículo quando ele é maior que o km inicial da locação', () => {
+    expect(minimumFinalKm(15000, 12000)).toBe(15000)
+  })
+
+  it('retorna o km inicial da locação quando ele é maior que o km atual do veículo', () => {
+    // Ex.: outro trabalho registrou km no veículo entre a criação e o encerramento,
+    // mas depois voltou a cair — o piso não pode ser menor que o que a própria
+    // locação já registrou na entrega.
+    expect(minimumFinalKm(10000, 12000)).toBe(12000)
+  })
+
+  it('empate: retorna o valor comum', () => {
+    expect(minimumFinalKm(12000, 12000)).toBe(12000)
   })
 })
 
@@ -429,5 +519,99 @@ describe('previewScheduleRegeneration', () => {
       new_charges_count: 0,
       new_charges_total: 0,
     })
+  })
+})
+
+describe('generateCycleCharges — contrato que começa no dia do vencimento', () => {
+  // Sem pro rata, `firstDueDate` devolve o próprio início quando ele cai no
+  // dia de vencimento, e a primeira volta do laço montava um período de
+  // duração zero cobrando o ciclo inteiro. Arranjo trivial e caro: "vence todo
+  // dia 10, o contrato começou dia 10".
+  const base = {
+    start_date: '2026-10-10',
+    end_date:   '2027-03-10',
+    cycle:      'monthly' as const,
+    due_day:    10,
+    cycle_amount: 600,
+  }
+
+  it('sem pro rata: não gera cobrança para período de duração zero', () => {
+    const charges = generateCycleCharges({ ...base, use_pro_rata: false })
+    expect(charges).toHaveLength(5)
+    expect(charges.reduce((s, c) => s + c.amount, 0)).toBe(3000)
+    for (const c of charges) expect(c.period_end > c.period_start).toBe(true)
+  })
+
+  it('com pro rata chega ao mesmo total — os dois ramos concordam', () => {
+    const semProRata = generateCycleCharges({ ...base, use_pro_rata: false })
+    const comProRata = generateCycleCharges({ ...base, use_pro_rata: true })
+    expect(semProRata.reduce((s, c) => s + c.amount, 0))
+      .toBe(comProRata.reduce((s, c) => s + c.amount, 0))
+  })
+
+  it('início FORA do dia de vencimento segue cobrando o ciclo cheio na ponta (RN-011)', () => {
+    const charges = generateCycleCharges({ ...base, start_date: '2026-10-05', use_pro_rata: false })
+    expect(charges[0]!.period_start).toBe('2026-10-05')
+    expect(charges[0]!.period_end).toBe('2026-10-10')
+    expect(charges[0]!.amount).toBe(600)
+  })
+})
+
+describe('rentalPeriodsOverlap — mesma semântica do trigger (ADR 0036)', () => {
+  it('períodos que se cruzam', () => {
+    expect(rentalPeriodsOverlap('2026-06-01', '2026-07-01', '2026-06-15', '2026-08-01')).toBe(true)
+  })
+
+  it('devolver e retirar no mesmo dia NÃO é sobreposição', () => {
+    expect(rentalPeriodsOverlap('2026-06-01', '2026-07-01', '2026-07-01', '2026-08-01')).toBe(false)
+    expect(rentalPeriodsOverlap('2026-07-01', '2026-08-01', '2026-06-01', '2026-07-01')).toBe(false)
+  })
+
+  it('contrato sem data de fim ocupa tudo dali em diante', () => {
+    expect(rentalPeriodsOverlap('2026-06-01', null, '2027-01-01', '2027-02-01')).toBe(true)
+    expect(rentalPeriodsOverlap('2026-06-01', null, '2026-01-01', '2026-06-01')).toBe(false)
+  })
+
+  it('locação encerrada antes de começar é período vazio', () => {
+    // terminate_rental grava a data de encerramento como fim — que pode ser
+    // anterior ao início de um contrato futuro cancelado antes da retirada.
+    expect(rentalPeriodsOverlap('2026-09-01', '2026-08-20', '2026-08-01', '2026-12-01')).toBe(false)
+  })
+
+  it('é simétrica', () => {
+    const a = ['2026-06-01', '2026-07-01'] as const
+    const b = ['2026-06-20', '2026-09-01'] as const
+    expect(rentalPeriodsOverlap(a[0], a[1], b[0], b[1])).toBe(rentalPeriodsOverlap(b[0], b[1], a[0], a[1]))
+  })
+})
+
+describe('displayPeriodEnd — period_end é fronteira exclusiva, não dia de uso', () => {
+  it('ciclo semanal 23/12 a 30/12: o último dia de uso é 29/12', () => {
+    expect(displayPeriodEnd('2026-12-30')).toBe('2026-12-29')
+  })
+
+  it('atravessa virada de mês', () => {
+    expect(displayPeriodEnd('2027-01-01')).toBe('2026-12-31')
+  })
+
+  it('atravessa virada de ano', () => {
+    expect(displayPeriodEnd('2027-01-01')).not.toBe('2027-01-01')
+  })
+})
+
+describe('makeCycleDescription (via generateCycleCharges) — semanal mostra o último dia de USO', () => {
+  it('ciclo cheio 23/12 a 30/12 descreve "23/12 a 29/12", não "23/12 a 30/12"', () => {
+    // Exemplo real que motivou a correção: vencimento 30/12 não é dia cobrado.
+    const charges = generateCycleCharges({
+      start_date: '2026-12-16', end_date: '2027-01-13',
+      cycle: 'weekly', due_day: 3, // quarta-feira
+      cycle_amount: 350, use_pro_rata: false,
+    })
+    const alvo = charges.find((c) => c.period_start === '2026-12-23' && c.period_end === '2026-12-30')
+    expect(alvo, 'período 23/12→30/12 não apareceu no cronograma').toBeDefined()
+    expect(alvo!.description).toBe('Aluguel semanal — 23/12 a 29/12')
+    expect(alvo!.description).not.toContain('a 30/12')
+    // O vencimento em si não muda — só o texto do período.
+    expect(alvo!.due_date).toBe('2026-12-30')
   })
 })

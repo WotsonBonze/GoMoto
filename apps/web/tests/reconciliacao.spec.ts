@@ -226,10 +226,24 @@ test.describe('Reconciliação do razão', () => {
     // inutilizável — visível na tela do cliente e impossível de aplicar.
     const { data: creditos } = await admin()
       .from('customer_credits')
-      .select('id, amount, origin')
+      .select('id, amount, origin, payment_id')
 
-    const lista = (creditos ?? []) as { id: string; amount: number; origin: string }[]
-    expect(lista.length, 'sem crédito no banco — o teste não provaria nada').toBeGreaterThan(0)
+    const todos = (creditos ?? []) as {
+      id: string; amount: number; origin: string; payment_id: string | null
+    }[]
+    expect(todos.length, 'sem crédito no banco — o teste não provaria nada').toBeGreaterThan(0)
+
+    // Crédito por cobrança CANCELADA (ADR 0033, Questão 1) é lançado com
+    // `source_module = 'payment'`, porque o fato que o originou é o
+    // RECEBIMENTO e não uma concessão de crédito. Ele tem lançamento — só não
+    // sob a chave que esta varredura procura, e o elo com o pagamento é o que
+    // prova isso.
+    //
+    // A exceção está repetida aqui e na view `financial_reconciliation`. É
+    // duplicação consciente: a view é o que produção lê, e este spec vale
+    // justamente por ser uma SEGUNDA implementação da pergunta. Se as duas
+    // divergirem, o teste acusa.
+    const lista = todos.filter((c) => c.payment_id === null)
 
     const { data: tx } = await admin()
       .from('financial_transactions')

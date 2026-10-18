@@ -80,6 +80,10 @@ export const CustomerSchema = z.object({
   emergency_contact: z.string().trim().max(300).optional().nullable(),
   emergency_contact_name: z.string().trim().max(200).optional().nullable(),
   emergency_contact_phone: z.string().trim().max(20).optional().nullable(),
+  emergency_contact_name2: z.string().trim().max(200).optional().nullable(),
+  emergency_contact_phone2: z.string().trim().max(20).optional().nullable(),
+  emergency_contact_name3: z.string().trim().max(200).optional().nullable(),
+  emergency_contact_phone3: z.string().trim().max(20).optional().nullable(),
   // Endereço estruturado
   street: z.string().trim().max(300).optional().nullable(),
   street_number: z.string().trim().max(20).optional().nullable(),
@@ -241,7 +245,6 @@ export const CreateTenantWithOwnerSchema = z.object({
 })
 
 export * from './rentals'
-export * from './payments'
 export * from './vehicles'
 export * from './contractTemplates'
 export * from './financial'
@@ -249,6 +252,8 @@ export * from './inspectionProfile'
 export * from './inspection'
 export * from './theme'
 export * from './access-control'
+export * from './tenantContacts'
+export * from './loginBranding'
 
 export const TenantSuspendSchema = z.object({
   reason: z.string().trim().min(1, 'Informe o motivo da suspensão').max(500),

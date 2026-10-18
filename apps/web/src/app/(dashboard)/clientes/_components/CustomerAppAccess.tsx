@@ -1,16 +1,22 @@
 'use client'
 
 import { useState } from 'react'
+import Link from 'next/link'
 import { Smartphone, CheckCircle2, Eye, EyeOff } from 'lucide-react'
+import { applyCpfMask } from '@gomoto/core'
 import { inviteCustomerToApp, setCustomerPassword, resetCustomerPassword } from '../actions'
 
 interface Props {
   customerId: string
-  customerEmail?: string | null
+  /**
+   * O app faz login por CPF + senha (cpfShellEmail) — o email do cadastro não
+   * participa do acesso. Por isso o portão é o CPF, não o email.
+   */
+  customerCpf?: string | null
   hasAppAccess: boolean
 }
 
-export function CustomerAppAccess({ customerId, customerEmail, hasAppAccess }: Props) {
+export function CustomerAppAccess({ customerId, customerCpf, hasAppAccess }: Props) {
   const [mode, setMode] = useState<'idle' | 'password'>('idle')
   const [passwordValue, setPasswordValue] = useState('')
   const [showPasswordText, setShowPasswordText] = useState(false)
@@ -53,9 +59,13 @@ export function CustomerAppAccess({ customerId, customerEmail, hasAppAccess }: P
         <h2 className="text-[14px] font-bold text-primary">Acesso ao App</h2>
       </div>
 
-      {!customerEmail ? (
+      {!customerCpf ? (
         <p className="text-[13px] text-fg-mute">
-          Cadastre um email para liberar o acesso ao app mobile.
+          O login no app é feito pelo CPF.{' '}
+          <Link href={`/clientes/${customerId}/editar`} className="text-primary hover:underline">
+            Cadastre o CPF
+          </Link>{' '}
+          para liberar o acesso.
         </p>
       ) : hasAppAccess ? (
         <div className="space-y-3">
@@ -87,8 +97,8 @@ export function CustomerAppAccess({ customerId, customerEmail, hasAppAccess }: P
       ) : (
         <div className="space-y-3">
           <p className="text-[13px] text-fg-mute">
-            Escolha como liberar o acesso para{' '}
-            <span className="text-fg">{customerEmail}</span>:
+            Escolha como liberar o acesso. O cliente entra no app com o CPF{' '}
+            <span className="text-fg">{applyCpfMask(customerCpf)}</span> e a senha:
           </p>
           {mode === 'password' ? (
             <PasswordForm

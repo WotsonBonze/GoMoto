@@ -342,6 +342,110 @@ test.describe('Locações — Entrada na criação (Spec 0010)', () => {
 })
 
 // ---------------------------------------------------------------------------
+// Registro de KM na locação (Spec 0014) — RF-001, RF-002, RF-003, RN-002, RN-003
+// ---------------------------------------------------------------------------
+
+test.describe('Locações — Registro de KM (Spec 0014)', () => {
+  let vehicleId = ''
+  let customerId = ''
+  let rentalId = ''
+
+  test.beforeAll(async () => {
+    // createTestVehicle() nasce com km_current = 0.
+    vehicleId = (await createTestVehicle()).id
+    customerId = (await createTestCustomer()).id
+  })
+
+  test.afterAll(async () => {
+    const sb = await getSupabase()
+    if (rentalId) await sb.from('rentals').delete().eq('id', rentalId)
+    await deleteTestVehicle(vehicleId)
+    await deleteTestCustomer(customerId)
+  })
+
+  // RF-001, RF-003 — cria locação com km inicial e o detalhe exibe km inicial,
+  // km final (—, ainda não encerrada) e não exibe km rodado sem os dois.
+  test('cria locação com km inicial e o detalhe exibe o km registrado', async ({ page }) => {
+    await page.goto('/locacoes/nova')
+    await waitForPageLoad(page)
+
+    await fieldAfterLabel(page, 'Cliente *').selectOption(customerId)
+    await fieldAfterLabel(page, 'Veículo *').selectOption(vehicleId)
+    await fieldAfterLabel(page, 'Valor do ciclo (R$) *').fill('500')
+    await fieldAfterLabel(page, 'Data de início *').fill(hojeISO())
+    // Vem pré-preenchido com o km atual do veículo (0) ao selecionar o
+    // veículo — aqui o operador ajusta para o km real da entrega.
+    await fieldAfterLabel(page, 'Km inicial *').fill('10000')
+
+    await page.getByRole('button', { name: 'Preview' }).click()
+    await expect(page.getByText('Resumo do contrato')).toBeVisible({ timeout: 10_000 })
+    await expect(page.getByText('10.000 km')).toBeVisible()
+
+    await page.getByRole('button', { name: /Confirmar/ }).click()
+    await page.waitForURL(/\/locacoes\/[0-9a-f-]{36}$/, { timeout: 15_000 })
+    rentalId = page.url().split('/').pop()!
+
+    await expect(page.locator('main')).toContainText('Km inicial: 10.000')
+    await expect(page.locator('main')).toContainText('Km final: —')
+
+    const sb = await getSupabase()
+    const { data } = await sb.from('rentals').select('km_initial').eq('id', rentalId).single()
+    expect((data as { km_initial: number } | null)?.km_initial).toBe(10000)
+  })
+
+  // RN-002/RN-003 — km final abaixo do piso (maior entre km atual do veículo e
+  // km inicial da locação) é recusado: o botão de confirmar fica desabilitado
+  // e o encerramento não conclui.
+  test('km final abaixo do piso é recusado no encerramento', async ({ page }) => {
+    test.skip(!rentalId, 'depende da locação criada no teste anterior')
+
+    await page.goto(`/locacoes/${rentalId}/encerrar`)
+    await waitForPageLoad(page)
+
+    const confirmar = page.getByRole('button', { name: 'Confirmar Encerramento' })
+    // Sem km final preenchido, o botão já nasce desabilitado.
+    await expect(confirmar).toBeDisabled()
+
+    await page.locator('input[type=number]').first().fill('9000')
+    await expect(page.getByText(/Km não pode ser menor que/)).toBeVisible()
+    await expect(confirmar).toBeDisabled()
+
+    // Locação continua ativa — o encerramento não aconteceu.
+    const sb = await getSupabase()
+    const { data } = await sb.from('rentals').select('status').eq('id', rentalId).single()
+    expect((data as { status: string } | null)?.status).toBe('active')
+  })
+
+  // RF-002, RF-003, RN-001 — encerra com km final válido; o detalhe passa a
+  // exibir km final e km rodado, e o km do veículo é atualizado.
+  test('encerra locação com km final e o detalhe exibe km final e km rodado', async ({ page }) => {
+    test.skip(!rentalId, 'depende da locação criada no primeiro teste')
+
+    await page.goto(`/locacoes/${rentalId}/encerrar`)
+    await waitForPageLoad(page)
+    await page.locator('input[type=number]').first().fill('10350')
+
+    await page.getByRole('button', { name: 'Confirmar Encerramento' }).click()
+    await page.waitForURL((u) => new URL(u).pathname === '/locacoes', { timeout: 15_000 })
+
+    const sb = await getSupabase()
+    const { data: rental } = await sb.from('rentals').select('status, km_initial, km_final').eq('id', rentalId).single()
+    const r = rental as { status: string; km_initial: number; km_final: number } | null
+    expect(r?.status).toBe('closed')
+    expect(r?.km_final).toBe(10350)
+
+    const { data: vehicle } = await sb.from('vehicles').select('km_current').eq('id', vehicleId).single()
+    expect((vehicle as { km_current: number } | null)?.km_current).toBe(10350)
+
+    await page.goto(`/locacoes/${rentalId}`)
+    await waitForPageLoad(page)
+    await expect(page.locator('main')).toContainText('Km inicial: 10.000')
+    await expect(page.locator('main')).toContainText('Km final: 10.350')
+    await expect(page.locator('main')).toContainText('Km rodado: 350')
+  })
+})
+
+// ---------------------------------------------------------------------------
 // Stub tests (implementar quando locacoes/page.tsx tiver UI completa)
 // ---------------------------------------------------------------------------
 
