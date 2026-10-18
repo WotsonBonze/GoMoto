@@ -26,3 +26,5 @@ export * from './settlement'
 export * from './vehicle-receivables'
 export * from './vehicle-payback'
 export * from './vehicle-income'
+// ADR 0042 — login por subdomínio da locadora
+export * from './login-subdomain'
