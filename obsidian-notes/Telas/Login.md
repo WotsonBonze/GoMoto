@@ -2,12 +2,17 @@
 
 Rota: `/login` | Tipo: Client Component | Grupo: `(auth)` (sem Sidebar/Header)
 
-## Layout
+## Layout (redesenho 2026-10-17)
 
-- Container: `min-h-screen bg-[#121212] flex items-center justify-center`
-- Logo: ícone Bike em bg `#BAFF1A` + texto "GoMoto" (28px bold) + "Sistema de Gestão" (20px)
-- Card do formulário: `bg-[#202020] border-[#474747] rounded-2xl p-6`
-- Rodapé: "GoMoto © {ano}" em 12px cinza
+Identidade fixa da Locaw — **não** segue o tema do tenant (ADR 0019): o login roda sem sessão. Cores em tokens escopados `.login-brand` (`--login-ink`, `--login-accent`, `--login-paper*`) no fim de `globals.css`. Títulos em Archivo 800 (`next/font/google`).
+
+- Desktop (`lg+`): duas colunas.
+  - **Esquerda (escura):** logo Locaw, eyebrow "Gestão de locação de veículos", título "Do contrato ao pagamento, sem sair da pista." com faixa tracejada amarela (pista) atrás da última linha, círculos decorativos e chips (Contratos, Cobranças recorrentes, Controle da frota).
+  - **Direita (branca):** "Precisa de ajuda? Suporte" (`/suporte.html`), "Bem-vindo de volta", formulário, rodapé "Locaw © {ano} · Termos · Privacidade" (`/privacidade.html`).
+- Abaixo de `lg`: só o formulário, com o logo no topo.
+- Senha com botão **Mostrar/Ocultar**.
+- **Inertes por enquanto** (texto visível, sem ação): "Esqueci a senha" (não há fluxo de recuperação no web) e "Termos" (não há página de termos).
+- Fora do escopo do mockup, de propósito: checkbox "Manter conectado" (a sessão já persiste sempre) e card de evento/campanha (sem conteúdo real).
 
 ## Campos
 
@@ -32,11 +37,12 @@ async function handleLogin(event) {
     return
   }
 
-  router.push('/dashboard')
+  // platform_admin → /admin/dashboard; demais → /dashboard (navegação dura)
+  window.location.href = destino
 }
 ```
 
-- Erro exibido em card: `bg-[#7c1c1c] border-[#ff9c9a] text-[#ff9c9a]`
+- Erro exibido em card: `bg-danger-bg border-danger text-danger`
 - Botão mostra `loading={true}` durante a requisição
 
 ## Rate Limiting (Middleware)
