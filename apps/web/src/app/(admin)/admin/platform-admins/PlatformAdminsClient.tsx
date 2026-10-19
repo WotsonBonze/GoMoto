@@ -157,8 +157,8 @@ export function PlatformAdminsClient({
             <ShieldCheck className="w-6 h-6" /> Admins da plataforma
           </h1>
           <p className="text-[13px] text-fg-mute mt-1">
-            Pessoas com acesso ao control plane. Owners gerenciam outros owners; operators
-            executam o operacional do dia-a-dia.
+            Pessoas com acesso ao painel da plataforma. Proprietários gerenciam os outros admins;
+            operadores cuidam do dia a dia.
           </p>
         </div>
         {isOwner ? (
@@ -185,7 +185,7 @@ export function PlatformAdminsClient({
           <thead className="bg-surface text-[12px] uppercase tracking-wide text-fg-mute">
             <tr>
               <th className="px-4 py-3 font-medium">Pessoa</th>
-              <th className="px-4 py-3 font-medium">Role</th>
+              <th className="px-4 py-3 font-medium">Papel</th>
               <th className="px-4 py-3 font-medium">Adicionado por</th>
               <th className="px-4 py-3 font-medium text-right">Ações</th>
             </tr>
@@ -209,13 +209,14 @@ export function PlatformAdminsClient({
                     </td>
                     <td className="px-4 py-3">
                       {row.role === 'owner' ? (
-                        <Badge variant="brand">Owner</Badge>
+                        <Badge variant="brand">Proprietário</Badge>
                       ) : (
-                        <Badge variant="muted">Operator</Badge>
+                        <Badge variant="muted">Operador</Badge>
                       )}
                     </td>
                     <td className="px-4 py-3 text-[13px] text-fg-mute">
-                      {row.created_by_email ?? <span className="italic">bootstrap</span>}
+                      {/* Sem quem adicionou = criado na configuração inicial da plataforma. */}
+                      {row.created_by_email ?? <span className="italic">Criado na instalação</span>}
                     </td>
                     <td className="px-4 py-3 text-right">
                       <div className="inline-flex gap-2">
@@ -236,7 +237,7 @@ export function PlatformAdminsClient({
                               size="sm"
                               disabled={pending || isLastOwner}
                               onClick={() => handleSetRole(row, 'operator')}
-                              title={isLastOwner ? 'Precisa de ≥1 owner' : 'Rebaixar para operator'}
+                              title={isLastOwner ? 'É preciso ao menos 1 proprietário' : 'Rebaixar para operador'}
                             >
                               <ShieldOff className="w-3.5 h-3.5 mr-1" /> Rebaixar
                             </Button>
@@ -246,6 +247,7 @@ export function PlatformAdminsClient({
                               size="sm"
                               disabled={pending}
                               onClick={() => handleSetRole(row, 'owner')}
+                              title="Promover a proprietário"
                             >
                               <ShieldCheck className="w-3.5 h-3.5 mr-1" /> Promover
                             </Button>
@@ -261,7 +263,7 @@ export function PlatformAdminsClient({
                               isSelf
                                 ? 'Você não pode se remover'
                                 : isLastOwner
-                                  ? 'Precisa de ≥1 owner'
+                                  ? 'É preciso ao menos 1 proprietário'
                                   : 'Remover admin'
                             }
                           >
@@ -322,7 +324,7 @@ export function PlatformAdminsClient({
             disabled={pending}
           />
           <div>
-            <label className="text-[13px] text-fg-soft block mb-1.5">Role</label>
+            <label className="text-[13px] text-fg-soft block mb-1.5">Papel</label>
             <div className="flex gap-2">
               {(['operator', 'owner'] as const).map((r) => (
                 <button
@@ -339,11 +341,11 @@ export function PlatformAdminsClient({
                 >
                   {r === 'owner' ? (
                     <span className="inline-flex items-center gap-1.5">
-                      <ShieldCheck className="w-4 h-4" /> Owner
+                      <ShieldCheck className="w-4 h-4" /> Proprietário
                     </span>
                   ) : (
                     <span className="inline-flex items-center gap-1.5">
-                      <UserPlus className="w-4 h-4" /> Operator
+                      <UserPlus className="w-4 h-4" /> Operador
                     </span>
                   )}
                 </button>

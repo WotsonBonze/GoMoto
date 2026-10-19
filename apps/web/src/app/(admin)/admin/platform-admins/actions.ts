@@ -10,8 +10,8 @@ import { logPlatformAction } from '@/lib/audit'
 type PlatformRole = 'owner' | 'operator'
 
 const ERROR_MAP: Record<string, string> = {
-  '42501': 'Apenas owners podem realizar essa ação',
-  '23514': 'A plataforma precisa de pelo menos um owner ativo',
+  '42501': 'Apenas proprietários podem realizar essa ação',
+  '23514': 'A plataforma precisa de pelo menos um proprietário ativo',
   '23505': 'Esse usuário já é platform_admin',
   '22023': 'Role inválida',
   P0002: 'Usuário não encontrado',
@@ -35,7 +35,7 @@ export async function createPlatformAdmin(rawData: unknown) {
   try {
     ctx = await requirePlatformOwner()
   } catch {
-    return { error: 'Apenas owners podem adicionar admins' }
+    return { error: 'Apenas proprietários podem adicionar admins' }
   }
 
   const parsed = CreatePlatformAdminSchema.safeParse(rawData)
@@ -120,7 +120,7 @@ export async function resetPlatformAdminPassword(userId: string, rawData: unknow
   try {
     ctx = await requirePlatformOwner()
   } catch {
-    return { error: 'Apenas owners podem resetar senha de admin' }
+    return { error: 'Apenas proprietários podem redefinir a senha de um admin' }
   }
 
   const parsed = ResetPasswordSchema.safeParse(rawData)
