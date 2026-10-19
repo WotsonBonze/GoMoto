@@ -10,6 +10,7 @@ import { Badge } from '@/components/ui/Badge'
 import { Modal } from '@/components/ui/Modal'
 
 import { useCustomers, useDeleteCustomer, useActiveRentals } from '@gomoto/data'
+import { applyCpfMask, applyCnpjMask } from '@gomoto/core'
 import type { Customer } from '@gomoto/core'
 
 // ─── Constantes ──────────────────────────────────────────────────────────────
@@ -64,10 +65,17 @@ export default function ClientesPage() {
     if (stateFilter) list = list.filter((c) => c.state === stateFilter)
     if (searchTerm.trim()) {
       const term = searchTerm.toLowerCase()
+      // Documento e telefone comparados só pelos dígitos: a coluna mostra o CPF
+      // com máscara e o banco o guarda sem, e o telefone é o contrário. Colar o
+      // CPF copiado da tabela precisa achar o cliente.
+      const digits = searchTerm.replace(/\D/g, '')
+      const hasDigits = (v: string | null | undefined) =>
+        !!digits && !!v && v.replace(/\D/g, '').includes(digits)
       list = list.filter(
         (c) => c.name?.toLowerCase().includes(term) ||
-               c.cpf?.includes(term) ||
-               c.phone?.includes(term),
+               hasDigits(c.cpf) ||
+               hasDigits(c.cnpj) ||
+               hasDigits(c.phone),
       )
     }
     return list
@@ -141,7 +149,7 @@ export default function ClientesPage() {
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-fg-mute" />
             <input
               type="text"
-              placeholder="Buscar nome, CPF ou telefone…"
+              placeholder="Buscar nome, CPF/CNPJ ou telefone…"
               value={searchTerm}
               onChange={(e) => setSearchTerm(e.target.value)}
               className="h-10 rounded-full border border-border bg-surface-2 pl-9 pr-4 text-[13px] text-fg placeholder:text-fg-mute focus:border-primary focus:outline-none w-52"
@@ -190,6 +198,7 @@ export default function ClientesPage() {
               <thead className="border-b border-divider">
                 <tr>
                   <th className="h-9 px-4 text-[13px] font-medium text-fg-mute">Nome</th>
+                  <th className="h-9 px-4 text-[13px] font-medium text-fg-mute">CPF / CNPJ</th>
                   <th className="h-9 px-4 text-[13px] font-medium text-fg-mute">Telefone</th>
                   <th className="h-9 px-4 text-[13px] font-medium text-fg-mute">Moto Atual</th>
                   <th className="h-9 px-4 text-[13px] font-medium text-fg-mute">Status</th>
@@ -199,7 +208,7 @@ export default function ClientesPage() {
               <tbody>
                 {loading ? (
                   <tr>
-                    <td colSpan={5}>
+                    <td colSpan={6}>
                       <div className="flex items-center justify-center py-16">
                         <div className="w-6 h-6 border-2 border-primary border-t-transparent rounded-full animate-spin" />
                       </div>
@@ -207,7 +216,7 @@ export default function ClientesPage() {
                   </tr>
                 ) : filtered.length === 0 ? (
                   <tr>
-                    <td colSpan={5}>
+                    <td colSpan={6}>
                       <div className="flex flex-col items-center justify-center py-16 gap-3">
                         <div className="w-12 h-12 bg-surface-2 rounded-full flex items-center justify-center">
                           <Users className="w-6 h-6 text-fg-mute" />
@@ -245,6 +254,13 @@ export default function ClientesPage() {
                           {customer.person_type === 'company' && (
                             <p className="text-[11px] text-fg-mute">PJ</p>
                           )}
+                        </td>
+                        {/* O CPF é o login do cliente no app — à vista para não
+                            precisar abrir a ficha. PJ não tem CPF: mostra o CNPJ. */}
+                        <td className="px-4 text-[13px] font-mono whitespace-nowrap">
+                          {customer.person_type === 'company'
+                            ? (customer.cnpj ? applyCnpjMask(customer.cnpj) : <span className="text-fg-mute">—</span>)
+                            : (customer.cpf ? applyCpfMask(customer.cpf) : <span className="text-fg-mute">—</span>)}
                         </td>
                         <td className="px-4 text-[13px]">
                           {whatsapp ? (
