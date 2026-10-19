@@ -24,7 +24,7 @@ setup('autenticar usuário de teste', async ({ page }) => {
   await page.waitForLoadState('networkidle')
 
   await page.getByLabel('Email').fill(email)
-  await page.getByLabel('Senha').fill(password)
+  await page.getByLabel('Senha', { exact: true }).fill(password)
   await page.getByRole('button', { name: /entrar/i }).click()
 
   // Aguarda o redirecionamento para o dashboard após login bem-sucedido

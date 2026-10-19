@@ -8,6 +8,9 @@ import {
   calculateExpectedEndDate,
   getRentalValidityLevel,
   isTerminationWithinMinimum,
+  computeRentalEndDate,
+  isPlausibleRentalDate,
+  generateCycleCharges,
 } from './rentals'
 
 describe('addMonths / addYears', () => {
@@ -134,5 +137,63 @@ describe('isTerminationWithinMinimum', () => {
       { start_date: '2026-01-01', contract_type: 'rental' },
       new Date('2026-06-10T12:00:00'),
     )).toBe(false)
+  })
+})
+
+describe('computeRentalEndDate', () => {
+  it('soma meses e semanas a partir do início', () => {
+    expect(computeRentalEndDate('2026-10-18', 3, 'monthly')).toBe('2027-01-18')
+    expect(computeRentalEndDate('2026-10-18', 2, 'weekly')).toBe('2026-11-01')
+  })
+
+  // Estados intermediários ao digitar o ano no input nativo ("2" → 0002).
+  // `new Date(2, 9, 18)` é 1902 — o fim saía 1903 e a prévia gerava ~1.900
+  // anos de cobranças, travando a tela.
+  it('preserva ano de dois e três dígitos, com quatro dígitos na saída', () => {
+    expect(computeRentalEndDate('0002-10-18', 3, 'monthly')).toBe('0003-01-18')
+    expect(computeRentalEndDate('0020-10-18', 3, 'monthly')).toBe('0021-01-18')
+    expect(computeRentalEndDate('0202-10-18', 3, 'monthly')).toBe('0203-01-18')
+  })
+
+  it('devolve vazio sem início válido ou sem quantidade', () => {
+    expect(computeRentalEndDate('', 3, 'monthly')).toBe('')
+    expect(computeRentalEndDate('82026-10-18', 3, 'monthly')).toBe('')
+    expect(computeRentalEndDate('2026-10-18', 0, 'monthly')).toBe('')
+    expect(computeRentalEndDate('2026-10-18', NaN, 'weekly')).toBe('')
+  })
+})
+
+describe('generateCycleCharges — intervalo longo', () => {
+  // Era quadrático: 0202 → 2027 semanal levava ~18 s e congelava a aba.
+  it('continua linear em intervalos de séculos', () => {
+    const t = performance.now()
+    const charges = generateCycleCharges({
+      start_date: '0202-10-18', end_date: '2027-10-18',
+      cycle: 'weekly', due_day: 5, cycle_amount: 600, use_pro_rata: true,
+    })
+    expect(charges.length).toBeGreaterThan(90_000)
+    expect(performance.now() - t).toBeLessThan(2_000)
+  })
+})
+
+describe('isPlausibleRentalDate', () => {
+  it('rejeita os estados intermediários de digitação do ano', () => {
+    expect(isPlausibleRentalDate('0002-10-18')).toBe(false)
+    expect(isPlausibleRentalDate('0020-10-18')).toBe(false)
+    expect(isPlausibleRentalDate('0202-10-18')).toBe(false)
+    expect(isPlausibleRentalDate('20261-10-18')).toBe(false)
+  })
+
+  it('aceita data completa dentro da faixa', () => {
+    expect(isPlausibleRentalDate('2026-10-18')).toBe(true)
+    expect(isPlausibleRentalDate('2000-01-01')).toBe(true)
+    expect(isPlausibleRentalDate('2100-12-31')).toBe(true)
+  })
+
+  it('rejeita vazio, data impossível e ano fora da faixa', () => {
+    expect(isPlausibleRentalDate('')).toBe(false)
+    expect(isPlausibleRentalDate(null)).toBe(false)
+    expect(isPlausibleRentalDate('2026-02-30')).toBe(false)
+    expect(isPlausibleRentalDate('9999-01-01')).toBe(false)
   })
 })

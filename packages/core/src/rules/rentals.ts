@@ -136,6 +136,48 @@ export function displayPeriodEnd(periodEndIso: string): string {
   return formatIsoDate(d)
 }
 
+/** Faixa de anos aceita para datas de locação digitadas pelo operador. */
+export const RENTAL_DATE_YEAR_RANGE = { min: 2000, max: 2100 } as const
+
+/**
+ * A data já foi digitada por completo e é uma data de locação plausível?
+ *
+ * `isParseableIsoDate` não basta para quem DIGITA: o `<input type="date">`
+ * emite cada estado intermediário do ano como data completa ("2" → 0002-10-18,
+ * depois 0020, 0202, 2026), e todos são datas válidas no calendário. Locação
+ * em 0202 não existe — fora da faixa, a data ainda está sendo digitada (ou foi
+ * digitada errado), e nada deve ser calculado a partir dela.
+ */
+export function isPlausibleRentalDate(isoDate: string | null | undefined): boolean {
+  if (!isParseableIsoDate(isoDate)) return false
+  const year = Number(isoDate!.slice(0, 4))
+  return year >= RENTAL_DATE_YEAR_RANGE.min && year <= RENTAL_DATE_YEAR_RANGE.max
+}
+
+/**
+ * Data de fim a partir do início e da quantidade de ciclos (meses ou semanas).
+ *
+ * Vivia na tela montando `new Date(y, m - 1, d)` — e esse construtor trata
+ * ano de 0 a 99 como 1900 + ano. Ao DIGITAR o ano no `<input type="date">`, o
+ * navegador emite os estados intermediários ("0002", "0020", "0202"…) como
+ * datas completas; início 0002-10-18 + 3 meses saía como 1903-01-18, e a
+ * prévia gerava quase dois mil anos de cobranças a cada tecla. A página
+ * travava inteira. `parseIsoDate` lê o ano literal, e `formatIsoDate` devolve
+ * o ano com quatro dígitos.
+ *
+ * Retorna '' quando não há o que calcular (data inválida ou quantidade ≤ 0).
+ */
+export function computeRentalEndDate(startDate: string, qty: number, cycle: RentalCycle): string {
+  if (!isParseableIsoDate(startDate) || !(qty > 0)) return ''
+  const date = parseIsoDate(startDate)
+  if (cycle === 'monthly') {
+    date.setMonth(date.getMonth() + qty)
+  } else {
+    date.setDate(date.getDate() + qty * 7)
+  }
+  return formatIsoDate(date)
+}
+
 // ---------------------------------------------------------------------------
 // Registro de KM (Spec 0014)
 // ---------------------------------------------------------------------------
@@ -476,7 +518,11 @@ export function generateCycleCharges(input: CycleChargeInput): CycleCharge[] {
   const lastBoundary = boundaries[boundaries.length - 1]!
   if (end.getTime() > lastBoundary.getTime()) boundaries.push(end)
 
-  const isDueDate = (d: Date) => dueDates.some((due) => due.getTime() === d.getTime())
+  // Set em vez de `dueDates.some(...)`: a busca linear dentro do laço deixava a
+  // função quadrática — com um intervalo longo (ano digitado pela metade) eram
+  // ~10^10 comparações e a aba congelava.
+  const dueTimes  = new Set(dueDates.map((due) => due.getTime()))
+  const isDueDate = (d: Date) => dueTimes.has(d.getTime())
 
   for (let i = 0; i < boundaries.length - 1; i++) {
     const periodStart = boundaries[i]!
