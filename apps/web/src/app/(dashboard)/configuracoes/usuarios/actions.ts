@@ -35,7 +35,7 @@ async function requireCtx() {
     return await requireTenantOwnerOrAdmin()
   } catch (err) {
     const code = err instanceof Error && err.message === 'FORBIDDEN' ? 'FORBIDDEN' : 'UNAUTHORIZED'
-    return { error: { code: code as ErrorCode, message: code === 'FORBIDDEN' ? 'Apenas owner/admin gerenciam usuários' : 'Não autorizado' } }
+    return { error: { code: code as ErrorCode, message: code === 'FORBIDDEN' ? 'Apenas o Proprietário e os Administradores gerenciam usuários' : 'Não autorizado' } }
   }
 }
 

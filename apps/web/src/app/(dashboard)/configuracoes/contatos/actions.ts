@@ -32,7 +32,7 @@ function adminError(code: 'FORBIDDEN' | 'UNAUTHORIZED'): ActionError {
   return {
     code,
     message: code === 'FORBIDDEN'
-      ? 'Apenas Owner ou Admin da empresa podem alterar os contatos'
+      ? 'Apenas o Proprietário ou um Administrador da empresa podem alterar os contatos'
       : 'Não autorizado',
   }
 }

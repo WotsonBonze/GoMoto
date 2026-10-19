@@ -155,7 +155,7 @@ test.describe('Usuários do tenant — convite, papéis, revogação (Spec 0011)
     const ownerRow = page.locator('tr', { hasText: 'empresa01@teste.com' })
     await expect(ownerRow).toBeVisible({ timeout: 10_000 })
     const options = await ownerRow.locator('select option').allTextContents()
-    expect(options).toEqual(['Owner'])
+    expect(options).toEqual(['Proprietário'])
   })
 
   test('revoga o acesso de um membro e bloqueia acesso imediatamente (RF-018/021)', async ({ page, browser }) => {
