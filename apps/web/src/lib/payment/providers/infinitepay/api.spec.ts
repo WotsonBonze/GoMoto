@@ -12,7 +12,14 @@
  */
 
 import { describe, it, expect } from 'vitest'
-import { toCents, fromCents, normalizeHandle, isValidHandleFormat } from './api'
+import {
+  toCents,
+  fromCents,
+  normalizeHandle,
+  isValidHandleFormat,
+  toInfinitePayPhone,
+  toInfinitePayAddress,
+} from './api'
 
 describe('toCents', () => {
   it('converte reais para centavos', () => {
@@ -72,5 +79,64 @@ describe('isValidHandleFormat', () => {
     expect(isValidHandleFormat('$alan')).toBe(false)
     expect(isValidHandleFormat('com espaço')).toBe(false)
     expect(isValidHandleFormat('acentuação')).toBe(false)
+  })
+})
+
+describe('toInfinitePayPhone', () => {
+  it('converte o telefone do cadastro para E.164', () => {
+    // O formato com máscara é o que a tela de clientes grava.
+    expect(toInfinitePayPhone('(11) 91000-0001')).toBe('+5511910000001')
+    expect(toInfinitePayPhone('11910000001')).toBe('+5511910000001')
+    expect(toInfinitePayPhone('(21) 3456-7890')).toBe('+552134567890')
+  })
+
+  it('não duplica o código do país nem o zero de longa distância', () => {
+    expect(toInfinitePayPhone('+55 11 91000-0001')).toBe('+5511910000001')
+    expect(toInfinitePayPhone('5511910000001')).toBe('+5511910000001')
+    expect(toInfinitePayPhone('011 91000-0001')).toBe('+5511910000001')
+  })
+
+  it('omite o que não dá para ter certeza, em vez de arriscar a recusa do link', () => {
+    // Uma recusa da API derruba a geração inteira do link: sem telefone, o
+    // checkout só pergunta; com telefone errado, o cliente fica sem pagar.
+    expect(toInfinitePayPhone(null)).toBeNull()
+    expect(toInfinitePayPhone('')).toBeNull()
+    expect(toInfinitePayPhone('91000-0001')).toBeNull()
+    expect(toInfinitePayPhone('(11) 81000-0001')).toBeNull()
+    expect(toInfinitePayPhone('(01) 91000-0001')).toBeNull()
+    expect(toInfinitePayPhone('não tem')).toBeNull()
+  })
+})
+
+describe('toInfinitePayAddress', () => {
+  const completo = {
+    zip_code: '01310-100',
+    street: 'Av. Paulista',
+    street_number: '1000',
+    complement: 'Apto 12',
+    neighborhood: 'Bela Vista',
+  }
+
+  it('usa os nomes de campo do checkout, com CEP só em dígitos', () => {
+    expect(toInfinitePayAddress(completo)).toEqual({
+      cep: '01310100',
+      street: 'Av. Paulista',
+      number: '1000',
+      neighborhood: 'Bela Vista',
+      complement: 'Apto 12',
+    })
+  })
+
+  it('complemento é opcional', () => {
+    expect(toInfinitePayAddress({ ...completo, complement: null })).not.toHaveProperty('complement')
+    expect(toInfinitePayAddress({ ...completo, complement: '  ' })).not.toHaveProperty('complement')
+  })
+
+  it('endereço incompleto não vai, para não travar campo em branco no checkout', () => {
+    expect(toInfinitePayAddress(null)).toBeNull()
+    expect(toInfinitePayAddress({ ...completo, zip_code: '0131' })).toBeNull()
+    expect(toInfinitePayAddress({ ...completo, street: null })).toBeNull()
+    expect(toInfinitePayAddress({ ...completo, street_number: '' })).toBeNull()
+    expect(toInfinitePayAddress({ ...completo, neighborhood: '   ' })).toBeNull()
   })
 })

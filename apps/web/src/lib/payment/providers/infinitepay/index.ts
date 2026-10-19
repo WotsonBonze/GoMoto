@@ -75,7 +75,10 @@ export const infinitePayProvider: PaymentProvider = {
       orderNsu,
       description: `Cobrança ${chargeId.slice(0, 8)}`,
       webhookUrl: webhookUrl(),
-      customer: { name: customer.name, email: customer.email },
+      // Telefone e endereço só são lidos por este adaptador (ver
+      // `CreateIntentParams.customer`); a conversão de formato é de `api.ts`.
+      customer: { name: customer.name, email: customer.email, phone: customer.phone },
+      address: customer.address,
     })
 
     return {

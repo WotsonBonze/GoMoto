@@ -170,13 +170,15 @@ export async function getOrCreateIntent(
 
   const { data: customer } = await supabase
     .from('customers')
-    .select('name, email, cpf, cnpj, company_name')
+    .select('name, email, cpf, cnpj, company_name, phone, zip_code, street, street_number, complement, neighborhood')
     .eq('id', b.customer_id)
     .maybeSingle()
 
   const c = (customer ?? null) as {
     name: string | null; email: string | null
     cpf: string | null; cnpj: string | null; company_name: string | null
+    phone: string | null; zip_code: string | null; street: string | null
+    street_number: string | null; complement: string | null; neighborhood: string | null
   } | null
 
   // ── 5. Cria no provedor ───────────────────────────────────────────
@@ -196,6 +198,16 @@ export async function getOrCreateIntent(
         name: c?.company_name || c?.name || null,
         email: c?.email ?? null,
         document: c?.cpf || c?.cnpj || null,
+        // Lidos só pela InfinitePay (ver `CreateIntentParams.customer`): o
+        // checkout dela pede ao cliente tudo que não chegar aqui.
+        phone: c?.phone ?? null,
+        address: c ? {
+          zip_code: c.zip_code,
+          street: c.street,
+          street_number: c.street_number,
+          complement: c.complement,
+          neighborhood: c.neighborhood,
+        } : null,
       },
     })
   } catch (err) {

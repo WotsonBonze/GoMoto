@@ -166,8 +166,15 @@ Nenhum arquivo fora de `providers/infinitepay/` precisou saber que a InfinitePay
 
 ## Em aberto, saindo daqui
 
-**Telefone do cliente não é enviado.** A InfinitePay aceita `customer.phone_number` e nós temos `customers.phone`, mas `CreateIntentParams.customer` é `{ name, email, document }` — formato desenhado pelo Mercado Pago e pela Cora, que exigem CPF e nunca pediram telefone. Enviar pré-preencheria o checkout e alimentaria o antifraude do cartão. Custo: o campo no contrato, no `select` de `intents.ts`, e **normalização para E.164** no adaptador (o exemplo deles é `+5511999887766`; nosso `phone` é varchar livre) — omitindo quando não der para normalizar, porque recusa na criação do link derruba a geração inteira da cobrança. Decidido não fazer agora.
+**Telefone e endereço — resolvido em 2026-10-18.** Clientes reclamavam de preencher telefone, e-mail e endereço no checkout a cada pagamento. O cliente já está identificado (login por CPF, cobrança ligada ao cadastro), então o GoMoto passou a enviar o que tem:
 
-O `address` continua fora de propósito: a doc diz que serve para entrega física, e cobrança de aluguel não é produto entregue. Mandar endereço do cliente a um terceiro sem finalidade seria dado pessoal circulando à toa.
+- `CreateIntentParams.customer` ganhou `phone` e `address`, **opcionais e lidos só pela InfinitePay**. Os outros adaptadores geram o Pix aqui e os ignoram; o contrato documenta isso para nenhum passar a depender deles sem revisão.
+- `toInfinitePayPhone` (em `providers/infinitepay/api.ts`) converte o `phone` livre para E.164 e **omite** o que não reconhece: sem telefone o checkout só pergunta, com telefone recusado o link inteiro falha.
+- `toInfinitePayAddress` mapeia para `cep` (só dígitos), `street`, `number`, `neighborhood` e `complement`. A API não tem cidade nem estado. Vai **tudo ou nada**: endereço pela metade travaria campo em branco, como o `name: null`.
+- A ficha do cliente avisa a locadora quando falta dado, só com a InfinitePay eleita, usando as mesmas duas funções. Completar o cadastro é responsabilidade da locadora; o cliente não edita o próprio cadastro pelo app.
+
+A objeção anterior ao endereço ("dado pessoal circulando à toa") não se sustentava: o checkout pede o endereço de qualquer forma, ao mesmo destinatário. Enviar não aumenta a exposição, só poupa o cliente.
+
+Continua fora do nosso alcance: a API **não tem campo de CPF**, e a doc diz que os dados chegam "preenchidos", sem garantir que o formulário seja pulado. O que a página ainda pede precisa ser conferido uma vez com um pagamento real de R$ 1,00, já que não há sandbox.
 
 Fechar este ciclo revelou um defeito que **não é da InfinitePay** e vale para os três gateways: cancelar uma cobrança não expira o intent pendente, o código de pagamento continua vivo no provedor, e dinheiro que chegue depois deixa `contas_a_receber` negativo. Registrado em [[decisions/0033-dinheiro-para-cobranca-cancelada|ADR 0033]], junto com a ausência de um consumidor para a fila de replay.

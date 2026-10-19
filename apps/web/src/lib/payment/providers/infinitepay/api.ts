@@ -85,6 +85,78 @@ export function isValidHandleFormat(handle: string): boolean {
 }
 
 // ---------------------------------------------------------------------------
+// Dados do cliente — pré-preenchimento do checkout
+// ---------------------------------------------------------------------------
+
+/**
+ * Telefone do cadastro → E.164, o formato do exemplo deles (`+5511999887766`).
+ *
+ * EXCLUSIVO DA INFINITEPAY. `customers.phone` é texto livre ("(11) 91000-0001",
+ * "11910000001", "+55 11 ..."), e os outros provedores nem recebem telefone.
+ * A conversão mora aqui para que nenhum deles passe a depender dela.
+ *
+ * Devolve `null` quando não dá para ter certeza do número: não enviar só faz o
+ * checkout pedir o telefone, enquanto um número que a API recuse derrubaria a
+ * geração do link inteira — o cliente ficaria sem como pagar.
+ */
+export function toInfinitePayPhone(raw: string | null | undefined): string | null {
+  if (!raw) return null
+  let digits = raw.replace(/\D/g, '')
+  // Prefixo de discagem de longa distância ("0 11 ...").
+  if (digits.length === 11 && digits.startsWith('0')) digits = digits.slice(1)
+  if (digits.length === 12 && digits.startsWith('0')) digits = digits.slice(1)
+  // Já veio com o código do país.
+  if ((digits.length === 12 || digits.length === 13) && digits.startsWith('55')) digits = digits.slice(2)
+
+  // DDD (dois dígitos, sem zero) + 8 dígitos (fixo) ou 9 começando em 9 (celular).
+  const ddd = digits.slice(0, 2)
+  const numero = digits.slice(2)
+  if (!/^[1-9][1-9]$/.test(ddd)) return null
+  const fixo = numero.length === 8 && /^[2-5]/.test(numero)
+  const celular = numero.length === 9 && numero.startsWith('9')
+  if (!fixo && !celular) return null
+
+  return `+55${ddd}${numero}`
+}
+
+type LinkAddress = {
+  cep: string
+  street: string
+  number: string
+  neighborhood: string
+  complement?: string
+}
+
+/**
+ * Endereço do cadastro → objeto `address` do checkout.
+ *
+ * EXCLUSIVO DA INFINITEPAY, pelo mesmo motivo do telefone. A API não tem campo
+ * de cidade nem de estado: ela os deduz do CEP.
+ *
+ * Tudo ou nada nos campos que o checkout pede. Mandar o endereço pela metade
+ * repete o problema do `name: null` (ver `createCheckoutLink`): a página abre
+ * com o que faltou travado em branco. Incompleto, não vai — e o cliente
+ * preenche lá, como hoje. Só o complemento é opcional.
+ */
+export function toInfinitePayAddress(address: {
+  zip_code: string | null
+  street: string | null
+  street_number: string | null
+  complement: string | null
+  neighborhood: string | null
+} | null | undefined): LinkAddress | null {
+  if (!address) return null
+  const cep = (address.zip_code ?? '').replace(/\D/g, '')
+  const street = address.street?.trim()
+  const number = address.street_number?.trim()
+  const neighborhood = address.neighborhood?.trim()
+  if (cep.length !== 8 || !street || !number || !neighborhood) return null
+
+  const complement = address.complement?.trim()
+  return { cep, street, number, neighborhood, ...(complement ? { complement } : {}) }
+}
+
+// ---------------------------------------------------------------------------
 // Checkout
 // ---------------------------------------------------------------------------
 
@@ -96,6 +168,7 @@ type CreateLinkBody = {
   order_nsu?: string
   webhook_url?: string
   customer?: { name?: string; email?: string; phone_number?: string }
+  address?: LinkAddress
 }
 
 /**
@@ -113,7 +186,8 @@ export async function createCheckoutLink(params: {
   orderNsu: string
   description: string
   webhookUrl?: string | null
-  customer?: { name: string | null; email: string | null }
+  customer?: { name: string | null; email: string | null; phone?: string | null }
+  address?: Parameters<typeof toInfinitePayAddress>[0]
 }): Promise<{ url: string }> {
   const body: CreateLinkBody = {
     handle: params.handle,
@@ -129,11 +203,22 @@ export async function createCheckoutLink(params: {
 
   // Só o que temos. Mandar `name: null` faz a API tratar como preenchido e o
   // checkout abre com o campo travado em branco — pior do que não mandar.
+  // Cada campo que chega aqui é uma pergunta a menos no checkout. O cliente já
+  // se identificou pelo CPF no login e a cobrança aponta para o cadastro dele,
+  // então não há o que perguntar de novo.
   const nome = params.customer?.name?.trim()
   const email = params.customer?.email?.trim()
-  if (nome || email) {
-    body.customer = { ...(nome ? { name: nome } : {}), ...(email ? { email } : {}) }
+  const phone = toInfinitePayPhone(params.customer?.phone)
+  if (nome || email || phone) {
+    body.customer = {
+      ...(nome ? { name: nome } : {}),
+      ...(email ? { email } : {}),
+      ...(phone ? { phone_number: phone } : {}),
+    }
   }
+
+  const address = toInfinitePayAddress(params.address)
+  if (address) body.address = address
 
   const res = await fetch(`${apiBase()}/links`, {
     method: 'POST',

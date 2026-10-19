@@ -32,12 +32,37 @@ export type ProviderConnection = {
   credentials: ProviderCredentials
 }
 
+/** Endereço do cadastro do cliente, campo a campo como está em `customers`. */
+export type CustomerAddress = {
+  zip_code: string | null
+  street: string | null
+  street_number: string | null
+  complement: string | null
+  neighborhood: string | null
+}
+
 export type CreateIntentParams = {
   amount: number
   chargeId: string
   method: GatewayMethod
   credentials: ProviderCredentials
-  customer: { name: string | null; email: string | null; document: string | null }
+  customer: {
+    name: string | null
+    email: string | null
+    document: string | null
+    /**
+     * SÓ A INFINITEPAY LÊ `phone` e `address`. Ela é o único provedor de
+     * checkout hospedado: o que não for enviado vira formulário que o cliente
+     * preenche a cada pagamento. Os demais geram o código Pix aqui e ignoram
+     * os dois campos — nenhum outro adaptador deve passar a usá-los sem
+     * revisar este contrato.
+     *
+     * Vão crus, como estão no cadastro: a conversão para o formato do
+     * provedor (E.164, CEP só dígitos) mora no adaptador dele.
+     */
+    phone?: string | null
+    address?: CustomerAddress | null
+  }
   /**
    * Multa e juros a embutir no código, para provedor com
    * `accruesLateChargesNatively` (ADR 0037). `null` para os demais — e o
