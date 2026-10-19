@@ -22,7 +22,7 @@ export function LayoutShell({ children, userName, userEmail }: LayoutShellProps)
         style={{ marginLeft: expanded ? 256 : 64 }}
       >
         <Topbar userName={userName} userEmail={userEmail} />
-        <main className="flex-1 min-h-0 overflow-y-auto">{children}</main>
+        <main className="relative flex-1 min-h-0 overflow-y-auto">{children}</main>
       </div>
     </div>
   )

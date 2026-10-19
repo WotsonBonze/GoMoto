@@ -47,7 +47,7 @@ export const DASHBOARD_NAV: NavSection[] = [
         ],
       },
       { kind: 'leaf', href: '/contratos/modelos', label: 'Modelos de Contrato', icon: ScrollText },
-      { kind: 'leaf', href: '/clientes',          label: 'Clientes',          icon: Users },
+      { kind: 'leaf', href: '/clientes',          label: 'Clientes | Locatário', icon: Users },
     ],
   },
   {
