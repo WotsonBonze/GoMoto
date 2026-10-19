@@ -64,7 +64,7 @@ function pgErrorToFieldIssues(err: {
       return [{ path: 'tenant.slug', message: 'Slug já em uso — escolha outro' }]
     }
     if (/auth\.users.*email|users_email_partial_key|\(email\)/i.test(msg)) {
-      return [{ path: 'owner.email', message: 'Email já cadastrado em auth.users' }]
+      return [{ path: 'owner.email', message: 'E-mail já cadastrado' }]
     }
   }
   if (err.code === '23514') {
@@ -261,12 +261,12 @@ export async function regenerateOwnerLink(tenantId: string) {
     .limit(1)
     .maybeSingle()
 
-  if (memberErr || !member) return { error: 'Owner do tenant não encontrado' }
+  if (memberErr || !member) return { error: 'Responsável da empresa não encontrado' }
 
   const supabaseAdmin = createAdminClient(serviceUrl, serviceKey, { auth: { persistSession: false } })
 
   const { data: authUser, error: userErr } = await supabaseAdmin.auth.admin.getUserById(member.user_id)
-  if (userErr || !authUser.user?.email) return { error: 'Usuário do owner não encontrado' }
+  if (userErr || !authUser.user?.email) return { error: 'Usuário do responsável não encontrado' }
 
   const { data: linkData, error: linkErr } = await supabaseAdmin.auth.admin.generateLink({
     type: 'magiclink',
@@ -306,7 +306,7 @@ export async function changeOwnerPassword(tenantId: string, newPassword: string)
     .limit(1)
     .maybeSingle()
 
-  if (memberErr || !member) return { error: 'Owner do tenant não encontrado' }
+  if (memberErr || !member) return { error: 'Responsável da empresa não encontrado' }
 
   const supabaseAdmin = createAdminClient(serviceUrl, serviceKey, { auth: { persistSession: false } })
 
