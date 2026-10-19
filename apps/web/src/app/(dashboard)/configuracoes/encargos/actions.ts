@@ -37,7 +37,7 @@ export async function createLateChargePolicyAction(input: unknown) {
   const ctx = await getOwnerTenant()
   if ('error' in ctx) {
     const message = ctx.error === 'FORBIDDEN'
-      ? 'Apenas o Owner da empresa pode alterar a política de encargo'
+      ? 'Apenas o Proprietário da empresa pode alterar a política de encargo'
       : 'Não autorizado'
     return { ok: false as const, error: { code: ctx.error, message } }
   }

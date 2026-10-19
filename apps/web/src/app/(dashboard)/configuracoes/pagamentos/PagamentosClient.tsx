@@ -35,7 +35,7 @@ export function PagamentosClient() {
         token_exchange:   'O provedor recusou a autorização. Tente novamente.',
         misconfiguration: 'Integração não configurada no servidor. Contate o suporte.',
         unknown_provider: 'Gateway desconhecido.',
-        forbidden:        'Apenas o Owner da empresa pode conectar um gateway.',
+        forbidden:        'Apenas o Proprietário da empresa pode conectar um gateway.',
         missing_params:   'Retorno incompleto do provedor. Tente novamente.',
         other_account:    'Você autorizou uma conta diferente da integração atual deste gateway. Para usar outra conta, exclua a integração atual primeiro.',
       }

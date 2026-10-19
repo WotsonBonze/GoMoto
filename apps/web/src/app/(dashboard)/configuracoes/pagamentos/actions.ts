@@ -42,7 +42,7 @@ function ownerError(code: 'FORBIDDEN' | 'UNAUTHORIZED', acao: string): ActionErr
   return {
     code,
     message: code === 'FORBIDDEN'
-      ? `Apenas o Owner da empresa pode ${acao}`
+      ? `Apenas o Proprietário da empresa pode ${acao}`
       : 'Não autorizado',
   }
 }
@@ -56,7 +56,7 @@ function ownerError(code: 'FORBIDDEN' | 'UNAUTHORIZED', acao: string): ActionErr
  */
 function gatewayError(message: string): ActionError {
   if (message.includes('GATEWAY_OWNER_ONLY') || message.includes('GATEWAY_WRONG_TENANT')) {
-    return { code: 'FORBIDDEN', message: 'Apenas o Owner da empresa pode alterar o gateway de pagamento' }
+    return { code: 'FORBIDDEN', message: 'Apenas o Proprietário da empresa pode alterar o gateway de pagamento' }
   }
   if (message.includes('GATEWAY_ACCOUNT_NOT_FOUND')) {
     return { code: 'NOT_FOUND', message: 'Conta de gateway não encontrada' }

@@ -28,7 +28,7 @@ export async function replayGatewayEventAction(rawEventId: unknown): Promise<Rep
   try {
     ctx = await requireTenantOwnerOrAdmin()
   } catch {
-    return { ok: false, message: 'Só Owner e Admin podem reprocessar eventos.' }
+    return { ok: false, message: 'Só o Proprietário e os Administradores podem reprocessar eventos.' }
   }
 
   if (typeof rawEventId !== 'string' || !rawEventId) {

@@ -32,8 +32,8 @@ type InviteForm = { name: string; email: string; role: TenantMemberRole; passwor
 const EMPTY_FORM: InviteForm = { name: '', email: '', role: 'operator', password: '', confirmPassword: '' }
 
 const ROLE_OPTIONS: { value: TenantMemberRole; label: string }[] = [
-  { value: 'owner', label: 'Owner' },
-  { value: 'admin', label: 'Admin' },
+  { value: 'owner', label: 'Proprietário' },
+  { value: 'admin', label: 'Administrador' },
   { value: 'operator', label: 'Operador' },
   { value: 'viewer', label: 'Visualizador' },
 ]
@@ -304,7 +304,7 @@ export function UsuariosClient({ initialRows, loadError, currentUserId, currentR
                                       onClick={() => openRevoke(row)}
                                       title={
                                         wouldLeaveZeroActiveOwners(membersForOwnerCheck(), row.user_id, 'revoke')
-                                          ? 'Precisa de ≥1 owner ativo'
+                                          ? 'É preciso ao menos 1 proprietário ativo'
                                           : 'Revogar acesso'
                                       }
                                     >
