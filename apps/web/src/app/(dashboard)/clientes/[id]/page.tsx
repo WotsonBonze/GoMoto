@@ -8,6 +8,7 @@ import { BlockCustomerButton } from './_components/BlockCustomerButton'
 import { SettleCreditButton } from './_components/SettleCreditButton'
 import { MessageCircle } from 'lucide-react'
 import { CustomerAppAccess } from '../_components/CustomerAppAccess'
+import { toInfinitePayAddress, toInfinitePayPhone } from '@/lib/payment/providers/infinitepay/api'
 import type { Customer, Rental } from '@gomoto/core'
 
 const BUCKET = 'customer-documents'
@@ -56,7 +57,7 @@ export default async function CustomerDetailPage({
 
   const [
     customerResult, rentalResult, creditsResult, delinquencyBlocksResult,
-    positionResult, overdueResult, creditBalanceResult,
+    positionResult, overdueResult, creditBalanceResult, gatewayResult,
   ] = await Promise.all([
     supabase.from('customers').select('*').eq('id', id).single(),
     supabase
@@ -109,6 +110,15 @@ export default async function CustomerDetailPage({
       .select('balance')
       .eq('customer_id', id)
       .eq('tenant_id', tenantId)
+      .maybeSingle(),
+    // Gateway eleito — mesma consulta de `resolveActiveAccount`. Só decide se
+    // o aviso de dados para o checkout da InfinitePay aparece.
+    supabase
+      .from('payment_provider_accounts')
+      .select('provider')
+      .eq('tenant_id', tenantId)
+      .eq('is_default', true)
+      .eq('active', true)
       .maybeSingle(),
   ])
 
@@ -172,6 +182,26 @@ export default async function CustomerDetailPage({
     ? new Date(customer.drivers_license_validity + 'T12:00:00')
     : null
   const cnhExpired = cnhExpiryDate ? cnhExpiryDate < new Date() : false
+
+  // Só com a InfinitePay eleita: é o único gateway de checkout hospedado, e o
+  // dado que não estiver no cadastro vira formulário que o cliente preenche a
+  // cada pagamento. Completar é tarefa da locadora, não do cliente. As mesmas
+  // funções que montam o envio decidem o que falta — o aviso não pode dizer
+  // "completo" para um dado que o adaptador descartaria.
+  const usesInfinitePay = (gatewayResult.data as { provider: string } | null)?.provider === 'infinitepay'
+  const missingCheckoutData = usesInfinitePay
+    ? [
+        !customer.email?.trim() && 'e-mail',
+        !toInfinitePayPhone(customer.phone) && 'celular ou telefone com DDD',
+        !toInfinitePayAddress({
+          zip_code: customer.zip_code ?? null,
+          street: customer.street ?? null,
+          street_number: customer.street_number ?? null,
+          complement: customer.complement ?? null,
+          neighborhood: customer.neighborhood ?? null,
+        }) && 'endereço (CEP, rua, número e bairro)',
+      ].filter((x): x is string => !!x)
+    : []
 
   const fullAddress = [
     customer.street && customer.street_number
@@ -237,6 +267,27 @@ export default async function CustomerDetailPage({
             {isCompany ? 'Pessoa Jurídica' : 'Pessoa Física'}
           </span>
         </div>
+
+        {/* ── Dados para o checkout da InfinitePay ─────────────────────────── */}
+        {missingCheckoutData.length > 0 && (
+          <div className="rounded-xl border border-warning bg-warning-bg px-4 py-3 flex items-start justify-between gap-4">
+            <div className="space-y-1">
+              <p className="text-[13px] font-medium text-warning">
+                Cadastro incompleto para pagamento pela InfinitePay
+              </p>
+              <p className="text-[13px] text-fg-mute">
+                Falta {missingCheckoutData.join(', ')}. Sem isso, o cliente precisa digitar
+                esses dados na página da InfinitePay toda vez que for pagar.
+              </p>
+            </div>
+            <Link
+              href={`/clientes/${id}/editar`}
+              className="shrink-0 inline-flex items-center h-8 px-3 rounded-lg bg-surface-2 text-fg text-[12px] font-medium hover:bg-divider transition-colors"
+            >
+              Completar cadastro
+            </Link>
+          </div>
+        )}
 
         {/* ── Contrato Ativo ───────────────────────────────────────────────── */}
         {rental && (
